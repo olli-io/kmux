@@ -1,0 +1,773 @@
+package main
+
+import (
+	"slices"
+	"strings"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
+)
+
+const pollInterval = 2 * time.Second
+
+var (
+	clStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // claude
+	ocStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // opencode
+	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	activeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // project with a live session
+
+	chevronStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	selectedStyle = lipgloss.NewStyle().Background(lipgloss.Color("238"))
+
+	keyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // keybind hint (yellow)
+
+	borderIdle = lipgloss.Color("240") // unfocused panel border (grey)
+)
+
+// messages
+type tickMsg time.Time
+type sessionsMsg struct {
+	names []string
+	err   error
+}
+type projectsMsg struct {
+	projects []Project
+	err      error
+}
+type reconciledMsg struct{ errs []error }
+type focusedMsg struct{ err error }
+
+type model struct {
+	mgr           *Manager
+	sessions      []string
+	projects      []Project
+	collapsed     map[string]bool // collapse key -> collapsed
+	hidden        map[string]bool // session name -> hidden from the Sessions panel
+	cursor        int             // index into rows()
+	lastErr       string
+	width, height int
+}
+
+func newModel(mgr *Manager) model {
+	return model{mgr: mgr, collapsed: map[string]bool{}, hidden: map[string]bool{}}
+}
+
+func (m model) Init() tea.Cmd {
+	// Kick off an immediate poll, then tick on the interval.
+	return tea.Batch(pollCmd(), projectsCmd(), tickCmd())
+}
+
+func tickCmd() tea.Cmd {
+	return tea.Tick(pollInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+// pollCmd lists agent sessions off the UI goroutine.
+func pollCmd() tea.Cmd {
+	return func() tea.Msg {
+		names, err := ListAgentSessions()
+		return sessionsMsg{names: names, err: err}
+	}
+}
+
+// projectsCmd scans ~/git off the UI goroutine.
+func projectsCmd() tea.Cmd {
+	return func() tea.Msg {
+		projects, err := ScanProjects()
+		return projectsMsg{projects: projects, err: err}
+	}
+}
+
+// reconcileCmd performs kitty RC work off the UI goroutine. It attaches/detaches
+// agent panes, then pads the layout with placeholder panes so real agent panes
+// keep a fixed width. When the pane layout changes it follows up with a
+// Rebalance to pin the sidebar width and even out the agent columns.
+func reconcileCmd(mgr *Manager, active []string) tea.Cmd {
+	return func() tea.Msg {
+		live, err := LiveWindowIDs()
+		if err != nil {
+			live = nil // best-effort: skip the manual-close prune this round
+		}
+		changed, errs := mgr.Reconcile(active, live)
+		// Lift stacked panes into any slot a removed column just freed, before
+		// padding, so a collapsed split fills the gap instead of an idle slot.
+		cchanged, cerrs := mgr.Compact()
+		errs = append(errs, cerrs...)
+		pchanged, perrs := mgr.SyncPlaceholders(live)
+		errs = append(errs, perrs...)
+		if changed || cchanged || pchanged {
+			errs = append(errs, mgr.Rebalance()...)
+		}
+		return reconciledMsg{errs: errs}
+	}
+}
+
+// focusCmd gives keyboard focus to a session's kitty pane off the UI goroutine.
+func focusCmd(id int) tea.Cmd {
+	return func() tea.Msg {
+		return focusedMsg{err: FocusWindow(id)}
+	}
+}
+
+// openSessionCmd creates (if needed) and attaches a claude session pane off the
+// UI goroutine, then pads/rebalances the layout the same way reconcileCmd does
+// so the new pane lands at the fixed agent width.
+func openSessionCmd(mgr *Manager, name, dir string) tea.Cmd {
+	return func() tea.Msg {
+		if err := mgr.Open(name, dir); err != nil {
+			return reconciledMsg{errs: []error{err}}
+		}
+		live, err := LiveWindowIDs()
+		if err != nil {
+			live = nil // best-effort: skip the manual-close prune this round
+		}
+		_, errs := mgr.SyncPlaceholders(live)
+		errs = append(errs, mgr.Rebalance()...)
+		return reconciledMsg{errs: errs}
+	}
+}
+
+// killSessionCmd kills a session's tmux session off the UI goroutine, then
+// re-lists so the panel updates immediately (the resulting sessionsMsg drives
+// reconcile, which closes the now-orphaned pane).
+func killSessionCmd(name string) tea.Cmd {
+	return func() tea.Msg {
+		if err := KillSession(name); err != nil {
+			return sessionsMsg{err: err}
+		}
+		names, err := ListAgentSessions()
+		return sessionsMsg{names: names, err: err}
+	}
+}
+
+// reattachSessionCmd re-opens a pane for an already-running session off the UI
+// goroutine (for a session whose pane was lost), then pads/rebalances the layout
+// the same way openSessionCmd does.
+func reattachSessionCmd(mgr *Manager, name string) tea.Cmd {
+	return func() tea.Msg {
+		if err := mgr.Reattach(name); err != nil {
+			return reconciledMsg{errs: []error{err}}
+		}
+		live, err := LiveWindowIDs()
+		if err != nil {
+			live = nil // best-effort: skip the manual-close prune this round
+		}
+		_, errs := mgr.SyncPlaceholders(live)
+		errs = append(errs, mgr.Rebalance()...)
+		return reconciledMsg{errs: errs}
+	}
+}
+
+// lazygitCmd opens lazygit for dir in kitty's quick-access dropdown.
+func lazygitCmd(dir string) tea.Cmd {
+	return func() tea.Msg {
+		return focusedMsg{err: OpenLazygit(dir)}
+	}
+}
+
+// rowDeco renders styled row labels/badges. It keeps lipgloss styling out of the
+// pure tree-building code in tree.go.
+type rowDeco struct{}
+
+func (rowDeco) session(name string, depth int, attached bool) row {
+	var badge string
+	switch AgentKind(name) {
+	case "claude":
+		badge = clStyle.Render("Claude")
+	case "opencode":
+		badge = ocStyle.Render("OpenCode")
+	}
+	mark := dimStyle.Render("·")
+	if attached {
+		mark = okStyle.Render("✓")
+	}
+	return row{section: sectionSessions, depth: depth, label: name, badge: badge, mark: mark}
+}
+
+// branchGlyph is the git-branch symbol () shown before a branch name.
+const branchGlyph = ""
+
+// folderGlyph / folderOpenGlyph are the outlined folder symbols shown before a
+// multi-worktree project header: closed when collapsed, open when expanded.
+const (
+	folderGlyph     = "" // nf-fa-folder_o
+	folderOpenGlyph = "" // nf-fa-folder_open_o
+)
+
+// branchSuffix renders the dim " <glyph> <branch>" tail, or "" when no branch.
+func branchSuffix(branch string) string {
+	if branch == "" {
+		return ""
+	}
+	return dimStyle.Render(" " + branchGlyph + " " + branch)
+}
+
+// projectName renders a project/worktree name, colored green when it has a live
+// agent session.
+func projectName(name string, active bool) string {
+	if active {
+		return activeStyle.Render(name)
+	}
+	return name
+}
+
+// projectLeaf labels a single-worktree project (name + branch).
+func (rowDeco) projectLeaf(p Project, active bool) string {
+	return projectName(p.Name, active) + branchSuffix(p.Branch)
+}
+
+// projectFolder labels a multi-worktree project header (folder glyph + name).
+// The glyph is the open variant when expanded, the closed variant otherwise.
+// The branch moves onto the main-worktree child row inside the expanded list.
+func (rowDeco) projectFolder(p Project, open, active bool) string {
+	glyph := folderGlyph
+	if open {
+		glyph = folderOpenGlyph
+	}
+	return glyph + " " + projectName(p.Name, active)
+}
+
+// mainWorktree labels the main worktree row (repo name + branch), listed first
+// inside an expanded project folder.
+func (rowDeco) mainWorktree(p Project, active bool) string {
+	return projectName(p.Name, active) + branchSuffix(p.Branch)
+}
+
+func (rowDeco) worktree(w Worktree, active bool) string {
+	label := projectName(w.Name, active)
+	if w.Branch != "" {
+		label += dimStyle.Render(" " + branchGlyph + " " + w.Branch)
+	}
+	return label
+}
+
+// rows builds the combined, navigable row list: session rows first, then
+// project rows. The cursor indexes into this slice.
+func (m model) rows() []row {
+	deco := rowDeco{}
+	sess := buildSessionRows(m.visibleSessions(), projectNames(m.projects), m.collapsed, m.mgr.Attached, deco)
+	proj := buildProjectRows(m.projects, m.collapsed, m.hasSession, deco)
+	return append(sess, proj...)
+}
+
+// visibleSessions is m.sessions with hidden sessions filtered out. Hiding is
+// display-only: the full list still drives reconcile, so a hidden session keeps
+// its pane and tmux session (it is not detached).
+func (m model) visibleSessions() []string {
+	if len(m.hidden) == 0 {
+		return m.sessions
+	}
+	out := make([]string, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		if !m.hidden[s] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// pruneHidden drops hidden entries for sessions that no longer exist, so a
+// future session that reuses the same name isn't silently hidden.
+func (m *model) pruneHidden() {
+	for s := range m.hidden {
+		if !slices.Contains(m.sessions, s) {
+			delete(m.hidden, s)
+		}
+	}
+}
+
+// hasSession reports whether an agent session with the given name is running.
+func (m model) hasSession(name string) bool {
+	return slices.Contains(m.sessions, name)
+}
+
+// killTarget returns the agent session a `d` press should kill for row r: a
+// session leaf kills itself; a project or worktree row kills its running
+// session. It returns "" when there's nothing to kill (folder headers, or
+// project rows whose session isn't running).
+func (m model) killTarget(r *row) string {
+	if r == nil {
+		return ""
+	}
+	if isSessionLeaf(r) {
+		return r.label
+	}
+	if r.section == sectionProjects && r.session != "" && m.hasSession(r.session) {
+		return r.session
+	}
+	return ""
+}
+
+// lazygitDir returns the directory to open lazygit in for row r: a project or
+// worktree row carries its dir directly; a session leaf is resolved back to its
+// project's directory via the session name. It returns "" when there's no
+// associated directory (e.g. folder headers or ungrouped sessions).
+func (m model) lazygitDir(r *row) string {
+	if r == nil {
+		return ""
+	}
+	if r.dir != "" {
+		return r.dir // project / worktree leaf carries its dir directly
+	}
+	if r.section != sectionSessions {
+		return ""
+	}
+	if !r.collapsible {
+		return m.sessionDir(r.label) // session leaf: resolve from its name
+	}
+	// Sessions-panel group header: derive the dir from its collapse key, which
+	// encodes "sess:<project>" or "sess:<project>/<worktree>".
+	proj, wt, _ := strings.Cut(strings.TrimPrefix(r.key, "sess:"), "/")
+	return m.projectPath(proj, wt)
+}
+
+// sessionDir resolves the working directory for an agent session by matching its
+// name (<project>[_<worktree>]_<cl|oc>) against the scanned projects, mirroring
+// how sessions are grouped under projects in the tree. It returns "" when no
+// project matches (e.g. ungrouped sessions).
+func (m model) sessionDir(name string) string {
+	rem := strings.TrimSuffix(strings.TrimSuffix(name, "_cl"), "_oc")
+	proj, wt, ok := matchProject(rem, projectNames(m.projects))
+	if !ok {
+		return ""
+	}
+	return m.projectPath(proj, wt)
+}
+
+// projectPath returns the directory for a scanned project (wt == "") or one of
+// its linked worktrees (wt == the worktree's basename), or "" when no such
+// project/worktree exists (e.g. the "(ungrouped)" bucket).
+func (m model) projectPath(proj, wt string) string {
+	for _, p := range m.projects {
+		if p.Name != proj {
+			continue
+		}
+		if wt == "" {
+			return p.Path
+		}
+		for _, w := range p.Worktrees {
+			if w.Name == wt {
+				return w.Path
+			}
+		}
+	}
+	return ""
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		return m, nil
+
+	case tea.KeyMsg:
+		return m.handleKey(msg)
+
+	case tickMsg:
+		return m, tea.Batch(pollCmd(), projectsCmd(), tickCmd())
+
+	case sessionsMsg:
+		if msg.err != nil {
+			m.lastErr = msg.err.Error()
+			return m, nil
+		}
+		m.lastErr = ""
+		m.sessions = msg.names
+		m.pruneHidden()
+		return m, reconcileCmd(m.mgr, msg.names)
+
+	case projectsMsg:
+		if msg.err != nil {
+			m.lastErr = msg.err.Error()
+			return m, nil
+		}
+		m.projects = msg.projects
+		return m, nil
+
+	case reconciledMsg:
+		if len(msg.errs) > 0 {
+			m.lastErr = msg.errs[0].Error()
+		}
+		return m, nil
+
+	case focusedMsg:
+		if msg.err != nil {
+			m.lastErr = msg.err.Error()
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+// handleKey processes navigation and fold keys (arrows + vim).
+func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	rows := m.rows()
+	m.clampCursor(rows)
+
+	switch msg.String() {
+	case "q", "ctrl+c":
+		m.mgr.CloseAll()
+		return m, tea.Quit
+
+	case "j", "down":
+		if m.cursor < len(rows)-1 {
+			m.cursor++
+		}
+	case "k", "up":
+		if m.cursor > 0 {
+			m.cursor--
+		}
+
+	case "l", "right":
+		r := rowAt(rows, m.cursor)
+		if r == nil {
+			break
+		}
+		if cmd := m.openOrFocusSession(r); cmd != nil {
+			return m, cmd
+		}
+		if cmd := m.actOnProjectRow(r); cmd != nil {
+			return m, cmd
+		}
+		if r.collapsible && m.collapsed[r.key] {
+			delete(m.collapsed, r.key)
+		}
+	case "h", "left":
+		r := rowAt(rows, m.cursor)
+		if r == nil {
+			break
+		}
+		// `h` (but not arrow-left) hides a session leaf from the panel without
+		// detaching it; the pane and tmux session keep running.
+		if msg.String() == "h" && isSessionLeaf(r) {
+			m.hidden[r.label] = true
+			break
+		}
+		if r.collapsible && !m.collapsed[r.key] {
+			m.collapsed[r.key] = true
+		} else {
+			m.cursor = parentIndex(rows, m.cursor)
+		}
+
+	case "d":
+		// Kill (delete) the agent: ends the tmux session and its pane.
+		if name := m.killTarget(rowAt(rows, m.cursor)); name != "" {
+			return m, killSessionCmd(name)
+		}
+	case "enter", " ":
+		r := rowAt(rows, m.cursor)
+		if r == nil {
+			break
+		}
+		if cmd := m.openOrFocusSession(r); cmd != nil {
+			return m, cmd
+		}
+		if cmd := m.actOnProjectRow(r); cmd != nil {
+			return m, cmd
+		}
+		if r.collapsible {
+			if m.collapsed[r.key] {
+				delete(m.collapsed, r.key)
+			} else {
+				m.collapsed[r.key] = true
+			}
+		}
+
+	case "g":
+		if dir := m.lazygitDir(rowAt(rows, m.cursor)); dir != "" {
+			return m, lazygitCmd(dir)
+		}
+
+	case "1":
+		m.cursor = sectionStart(rows, sectionSessions)
+	case "2":
+		m.cursor = sectionStart(rows, sectionProjects)
+	}
+	return m, nil
+}
+
+// isSessionLeaf reports whether r is an actionable session row (a leaf in the
+// Sessions panel, i.e. a session name rather than a project/worktree node).
+func isSessionLeaf(r *row) bool {
+	return r != nil && r.section == sectionSessions && !r.collapsible
+}
+
+// openOrFocusSession returns a command to focus the agent pane for a session
+// leaf row, re-opening a pane first when the session is running but currently
+// has none (e.g. its pane was closed by hand). It returns nil when r is not a
+// session leaf.
+func (m model) openOrFocusSession(r *row) tea.Cmd {
+	if !isSessionLeaf(r) {
+		return nil
+	}
+	if id, ok := m.mgr.WindowID(r.label); ok {
+		return focusCmd(id)
+	}
+	return reattachSessionCmd(m.mgr, r.label)
+}
+
+// actOnProjectRow focuses the running claude session for an actionable project
+// leaf, or creates and attaches one when none exists. It returns nil for folder
+// headers (empty session) and non-project rows so callers fall through to the
+// fold/collapse handling.
+func (m model) actOnProjectRow(r *row) tea.Cmd {
+	if r.section != sectionProjects || r.session == "" {
+		return nil
+	}
+	if id, ok := m.mgr.WindowID(r.session); ok {
+		return focusCmd(id)
+	}
+	return openSessionCmd(m.mgr, r.session, r.dir)
+}
+
+func (m *model) clampCursor(rows []row) {
+	if m.cursor >= len(rows) {
+		m.cursor = len(rows) - 1
+	}
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+}
+
+func rowAt(rows []row, i int) *row {
+	if i < 0 || i >= len(rows) {
+		return nil
+	}
+	return &rows[i]
+}
+
+// parentIndex returns the index of the nearest preceding row at a shallower
+// depth, or the current index if none exists.
+func parentIndex(rows []row, i int) int {
+	if i < 0 || i >= len(rows) {
+		return i
+	}
+	for j := i - 1; j >= 0; j-- {
+		if rows[j].depth < rows[i].depth {
+			return j
+		}
+	}
+	return i
+}
+
+// sectionStart returns the index of the first row in sec, or 0 if absent.
+func sectionStart(rows []row, sec section) int {
+	for i, r := range rows {
+		if r.section == sec {
+			return i
+		}
+	}
+	return 0
+}
+
+// keyHint is one row in the bottom keybind panel: the key(s) and what they do.
+type keyHint struct{ key, desc string }
+
+// helpHints returns the keybind hints for the focused section: the section's
+// action keys first, then the shared navigation keys (move / switch panel /
+// quit). The h/l fold keys are omitted as redundant with open/focus.
+func helpHints(focused section) []keyHint {
+	if focused == sectionSessions {
+		return []keyHint{
+			{"↵/space", "focus pane"},
+			{"d", "kill session"},
+			{"h", "hide"},
+			{"g", "lazygit"},
+			{"j/k", "move"},
+			{"1/2", "switch panel"},
+			{"q", "quit"},
+		}
+	}
+	return []keyHint{
+		{"↵/space", "open / focus"},
+		{"d", "kill session"},
+		{"g", "lazygit"},
+		{"j/k", "move"},
+		{"1/2", "switch panel"},
+		{"q", "quit"},
+	}
+}
+
+// helpHeight is the body-row count of the keybind panel: the taller of the two
+// sections' hint lists, so the panel stays a constant height and the dashboard
+// doesn't jump when switching panels (the shorter list pads with blank rows).
+func helpHeight() int {
+	s, p := len(helpHints(sectionSessions)), len(helpHints(sectionProjects))
+	if s > p {
+		return s
+	}
+	return p
+}
+
+// renderHelp formats the keybind hints into panel body lines, keys left-aligned
+// to a common width with dim descriptions.
+func renderHelp(focused section) []string {
+	hints := helpHints(focused)
+	kw := 0
+	for _, h := range hints {
+		if w := lipgloss.Width(h.key); w > kw {
+			kw = w
+		}
+	}
+	lines := make([]string, len(hints))
+	for i, h := range hints {
+		pad := strings.Repeat(" ", kw-lipgloss.Width(h.key)+2)
+		lines[i] = keyStyle.Render(h.key) + pad + dimStyle.Render(h.desc)
+	}
+	return lines
+}
+
+func (m model) View() string {
+	if m.width <= 0 || m.height <= 0 {
+		return ""
+	}
+
+	rows := m.rows()
+	cursor := m.cursor
+	if cursor >= len(rows) {
+		cursor = len(rows) - 1
+	}
+	if cursor < 0 {
+		cursor = 0
+	}
+	focused := sectionSessions
+	if r := rowAt(rows, cursor); r != nil {
+		focused = r.section
+	}
+
+	contentWidth := m.width - 2 // inside the vertical borders
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+
+	var sLines, pLines []string
+	for i, r := range rows {
+		line := renderRow(r, i == cursor, m.collapsed, contentWidth)
+		if r.section == sectionSessions {
+			sLines = append(sLines, line)
+		} else {
+			pLines = append(pLines, line)
+		}
+	}
+	if len(sLines) == 0 {
+		sLines = []string{dimStyle.Render("no agent sessions")}
+	}
+	if len(pLines) == 0 {
+		pLines = []string{dimStyle.Render("no projects in ~/git")}
+	}
+	if m.lastErr != "" {
+		pLines = append(pLines, "", errStyle.Render("! "+m.lastErr))
+	}
+
+	// Reserve the bottom rows for the context-sensitive keybind panel, but drop
+	// it on very short terminals so the lists keep usable height.
+	help := renderHelp(focused)
+	hh := helpHeight() + 2
+	avail := m.height - hh
+	if avail < 6 {
+		hh, avail = 0, m.height
+	}
+
+	// Size the sessions panel to its content (up to half the remaining height);
+	// the projects panel absorbs the rest.
+	sh := len(sLines) + 2
+	if max := avail / 2; sh > max {
+		sh = max
+	}
+	if sh < 3 {
+		sh = 3
+	}
+	ph := avail - sh
+	if ph < 3 {
+		ph = 3
+	}
+
+	sessions := panel("[1]─Sessions", sLines, m.width, sh, focused == sectionSessions)
+	projects := panel("[2]─Projects", pLines, m.width, ph, focused == sectionProjects)
+	parts := []string{sessions, projects}
+	if hh > 0 {
+		parts = append(parts, panel("Keys", help, m.width, hh, false))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+// renderRow renders a tree row: indent, chevron, optional mark/badge, label.
+// Selected rows get a full-width background highlight.
+func renderRow(r row, selected bool, collapsed map[string]bool, width int) string {
+	var b strings.Builder
+	b.WriteString(strings.Repeat("  ", r.depth))
+	if r.collapsible {
+		if collapsed[r.key] {
+			b.WriteString(chevronStyle.Render("▸ "))
+		} else {
+			b.WriteString(chevronStyle.Render("▾ "))
+		}
+	} else {
+		b.WriteString("  ")
+	}
+	if r.mark != "" {
+		b.WriteString(r.mark + " ")
+	}
+	if r.badge != "" {
+		b.WriteString(r.badge + " ")
+	}
+	b.WriteString(r.label)
+
+	line := b.String()
+	if selected {
+		return selectedStyle.Width(width).Render(line)
+	}
+	return line
+}
+
+// panel draws a rounded, titled box (lazygit-style: title in the top border,
+// border color reflecting focus) sized to width x height, filling/clipping body
+// lines to fit. width and height include the border.
+func panel(title string, body []string, width, height int, focused bool) string {
+	// Focused panels use the default text color; idle panels are dimmed grey.
+	bs := lipgloss.NewStyle()
+	ts := lipgloss.NewStyle().Bold(true)
+	if !focused {
+		bs = bs.Foreground(borderIdle)
+		ts = ts.Foreground(borderIdle)
+	}
+
+	inner := width - 2 // columns between the vertical borders
+	if inner < 1 {
+		inner = 1
+	}
+
+	// Top border with the title embedded: ╭─title───╮
+	if maxTitle := inner - 2; maxTitle >= 1 && lipgloss.Width(title) > maxTitle {
+		title = ansi.Truncate(title, maxTitle, "…")
+	}
+	fill := inner - lipgloss.Width(title) - 1 // leading "─" before the title
+	if fill < 0 {
+		fill = 0
+	}
+	top := bs.Render("╭─") + ts.Render(title) + bs.Render(strings.Repeat("─", fill)+"╮")
+
+	out := make([]string, 0, height)
+	out = append(out, top)
+	for i := 0; i < height-2; i++ {
+		var raw string
+		if i < len(body) {
+			raw = body[i]
+		}
+		out = append(out, bs.Render("│")+padCell(raw, inner)+bs.Render("│"))
+	}
+	out = append(out, bs.Render("╰"+strings.Repeat("─", inner)+"╯"))
+	return strings.Join(out, "\n")
+}
+
+// padCell pads (or clips) s to exactly w display columns, ANSI-aware.
+func padCell(s string, w int) string {
+	if sw := lipgloss.Width(s); sw > w {
+		return ansi.Truncate(s, w, "")
+	} else {
+		return s + strings.Repeat(" ", w-sw)
+	}
+}

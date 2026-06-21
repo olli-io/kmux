@@ -1,0 +1,85 @@
+package main
+
+import (
+	"fmt"
+	"os/exec"
+	"regexp"
+	"sort"
+	"strings"
+)
+
+// agentSession matches tmux session names ending in _cl (claude) or _oc
+// (opencode), case-insensitively.
+var agentSession = regexp.MustCompile(`(?i)_(cl|oc)$`)
+
+// AgentKind returns "claude", "opencode", or "" for a session name. The agent
+// suffix is matched case-insensitively.
+func AgentKind(name string) string {
+	switch {
+	case agentSuffix(name, "cl"):
+		return "claude"
+	case agentSuffix(name, "oc"):
+		return "opencode"
+	default:
+		return ""
+	}
+}
+
+// agentSuffix reports whether name ends in "_"+suffix, case-insensitively.
+func agentSuffix(name, suffix string) bool {
+	return strings.HasSuffix(strings.ToLower(name), "_"+suffix)
+}
+
+// ListAgentSessions returns the sorted names of live tmux sessions whose names
+// end in _cl or _oc. A missing tmux server (no sessions) yields an empty slice,
+// not an error.
+func ListAgentSessions() ([]string, error) {
+	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		// `tmux ls` exits non-zero when no server is running: treat as empty.
+		if _, ok := err.(*exec.ExitError); ok {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var names []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		name := strings.TrimSpace(line)
+		if name != "" && agentSession.MatchString(name) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// KillSession kills the tmux session named `name` outright, ending the agent
+// process running in it. A missing session is treated as success (it is already
+// gone). The next poll drops it from the list and reconcile closes its pane.
+func KillSession(name string) error {
+	cmd := exec.Command("tmux", "kill-session", "-t", name)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "can't find session") {
+			return nil // already gone
+		}
+		return fmt.Errorf("tmux kill-session %s: %w: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// NewDetachedSession creates a detached tmux session named `name` whose first
+// window runs `claude` in dir. If the session already exists, tmux reports a
+// duplicate and we treat it as success so the caller can attach to it.
+func NewDetachedSession(name, dir string) error {
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir, "claude")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "duplicate session") {
+			return nil // already exists; caller attaches
+		}
+		return fmt.Errorf("tmux new-session %s: %w: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
