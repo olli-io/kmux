@@ -70,10 +70,11 @@ func KillSession(name string) error {
 }
 
 // NewDetachedSession creates a detached tmux session named `name` whose first
-// window runs `claude` in dir. If the session already exists, tmux reports a
-// duplicate and we treat it as success so the caller can attach to it.
-func NewDetachedSession(name, dir string) error {
-	cmd := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir, "claude")
+// window runs `agentCmd` (e.g. "claude" or "opencode") in dir. If the session
+// already exists, tmux reports a duplicate and we treat it as success so the
+// caller can attach to it.
+func NewDetachedSession(name, dir, agentCmd string) error {
+	cmd := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir, agentCmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "duplicate session") {

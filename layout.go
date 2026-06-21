@@ -115,14 +115,14 @@ func (m *Manager) Reconcile(active []string, live map[int]bool) (changed bool, e
 	return changed, errs
 }
 
-// Open ensures a detached tmux session named `name` (running claude in dir)
+// Open ensures a detached tmux session named `name` (running agentCmd in dir)
 // exists, then attaches a pane for it and records it in the layout. If the
 // session is already attached it is a no-op; callers should focus it instead.
-func (m *Manager) Open(name, dir string) error {
+func (m *Manager) Open(name, dir, agentCmd string) error {
 	if m.Attached(name) {
 		return nil
 	}
-	if err := NewDetachedSession(name, dir); err != nil {
+	if err := NewDetachedSession(name, dir, agentCmd); err != nil {
 		return err
 	}
 	return m.add(name)

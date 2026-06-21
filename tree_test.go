@@ -62,6 +62,27 @@ func TestExpectedSession(t *testing.T) {
 	}
 }
 
+func TestSessionForKind(t *testing.T) {
+	if got := sessionForKind("kmux_cl", "claude"); got != "kmux_cl" {
+		t.Errorf("claude = %q, want %q", got, "kmux_cl")
+	}
+	if got := sessionForKind("kmux_cl", "opencode"); got != "kmux_oc" {
+		t.Errorf("opencode = %q, want %q", got, "kmux_oc")
+	}
+	if got := sessionForKind("kmux_feat_cl", "opencode"); got != "kmux_feat_oc" {
+		t.Errorf("worktree opencode = %q, want %q", got, "kmux_feat_oc")
+	}
+}
+
+func TestAgentCommand(t *testing.T) {
+	if got := agentCommand("claude"); got != "claude" {
+		t.Errorf("claude cmd = %q, want %q", got, "claude")
+	}
+	if got := agentCommand("opencode"); got != "opencode" {
+		t.Errorf("opencode cmd = %q, want %q", got, "opencode")
+	}
+}
+
 func TestBuildProjectRows(t *testing.T) {
 	projects := []Project{
 		{Name: "solo", Path: "/g/solo", Branch: "main"}, // no worktrees

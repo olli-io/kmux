@@ -45,6 +45,29 @@ func expectedSession(project, wt string) string {
 	return tmuxSafe(project + "_" + wt + "_cl")
 }
 
+// agentSuffixes maps an agent kind to its tmux session-name suffix.
+var agentSuffixes = map[string]string{"claude": "_cl", "opencode": "_oc"}
+
+// agentCommand returns the executable launched for an agent kind.
+func agentCommand(kind string) string {
+	if kind == "opencode" {
+		return "opencode"
+	}
+	return "claude"
+}
+
+// sessionForKind rewrites a claude session name (ending in _cl, as produced by
+// expectedSession) into the session name for the given agent kind, swapping the
+// trailing suffix. The _cl suffix is invariant under tmuxSafe, so a plain
+// suffix swap is safe.
+func sessionForKind(claudeSession, kind string) string {
+	suffix, ok := agentSuffixes[kind]
+	if !ok || suffix == "_cl" {
+		return claudeSession
+	}
+	return strings.TrimSuffix(claudeSession, "_cl") + suffix
+}
+
 // tmuxSafe rewrites a desired session name into the form tmux actually stores.
 // tmux forbids '.' and ':' in session names and silently replaces them with
 // '_'. Worktree directories often contain a '.' (e.g. repo.branch), so without

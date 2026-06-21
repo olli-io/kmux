@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -50,8 +51,27 @@ type model struct {
 	collapsed     map[string]bool // collapse key -> collapsed
 	detached      map[string]bool // session name -> pane detached (tmux still running)
 	cursor        int             // index into rows()
+	prompt        *agentPrompt    // non-nil while the agent-picker overlay is open
 	lastErr       string
 	width, height int
+}
+
+// agentPrompt is the state of the agent-picker shown when launching a project:
+// it offers a choice of agent (claude / opencode) for the selected project row.
+type agentPrompt struct {
+	title   string // human label for the project/worktree being launched
+	session string // the row's claude session name (base for sessionForKind)
+	dir     string // working directory the agent launches in
+	cursor  int    // index into promptOptions
+}
+
+// promptOptions are the agent kinds offered by the picker, in display order.
+var promptOptions = []struct {
+	kind, label string
+	style       lipgloss.Style
+}{
+	{"claude", "Claude", clStyle},
+	{"opencode", "OpenCode", ocStyle},
 }
 
 func newModel(mgr *Manager) model {
@@ -120,12 +140,13 @@ func focusCmd(id int) tea.Cmd {
 	}
 }
 
-// openSessionCmd creates (if needed) and attaches a claude session pane off the
+// openSessionCmd creates (if needed) and attaches an agent session pane off the
 // UI goroutine, then pads/rebalances the layout the same way reconcileCmd does
-// so the new pane lands at the fixed agent width.
-func openSessionCmd(mgr *Manager, name, dir string) tea.Cmd {
+// so the new pane lands at the fixed agent width. agentCmd is the executable the
+// new tmux session runs (e.g. "claude" or "opencode").
+func openSessionCmd(mgr *Manager, name, dir, agentCmd string) tea.Cmd {
 	return func() tea.Msg {
-		if err := mgr.Open(name, dir); err != nil {
+		if err := mgr.Open(name, dir, agentCmd); err != nil {
 			return reconciledMsg{errs: []error{err}}
 		}
 		live, err := LiveWindowIDs()
@@ -275,7 +296,7 @@ func (rowDeco) worktree(w Worktree, active bool) string {
 func (m model) rows() []row {
 	deco := rowDeco{}
 	sess := buildSessionRows(m.sessions, projectNames(m.projects), m.collapsed, m.mgr.Attached, m.isDetached, deco)
-	proj := buildProjectRows(m.projects, m.collapsed, m.hasSession, deco)
+	proj := buildProjectRows(m.projects, m.collapsed, m.hasSessionAny, deco)
 	return append(sess, proj...)
 }
 
@@ -316,6 +337,15 @@ func (m *model) pruneDetached() (changed bool) {
 // hasSession reports whether an agent session with the given name is running.
 func (m model) hasSession(name string) bool {
 	return slices.Contains(m.sessions, name)
+}
+
+// hasSessionAny reports whether a project/worktree has a running session of
+// either agent kind. claudeName is the _cl session name (as produced by
+// expectedSession); the opencode name is derived by suffix swap. It drives the
+// "active" green coloring of project rows so an opencode-only project still
+// reads as live.
+func (m model) hasSessionAny(claudeName string) bool {
+	return m.hasSession(claudeName) || m.hasSession(sessionForKind(claudeName, "opencode"))
 }
 
 // killTarget returns the agent session a `d` press should kill for row r: a
@@ -448,6 +478,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKey processes navigation and fold keys (arrows + vim).
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// The agent picker captures all input while open.
+	if m.prompt != nil {
+		return m.handlePromptKey(msg)
+	}
+
 	rows := m.rows()
 	m.clampCursor(rows)
 
@@ -473,8 +508,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if cmd := m.openOrFocusSession(r); cmd != nil {
 			return m, cmd
 		}
-		if cmd := m.actOnProjectRow(r); cmd != nil {
-			return m, cmd
+		if m.openAgentPrompt(r) {
+			return m, nil
 		}
 		if r.collapsible && m.collapsed[r.key] {
 			delete(m.collapsed, r.key)
@@ -513,8 +548,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if cmd := m.openOrFocusSession(r); cmd != nil {
 			return m, cmd
 		}
-		if cmd := m.actOnProjectRow(r); cmd != nil {
-			return m, cmd
+		if m.openAgentPrompt(r) {
+			return m, nil
 		}
 		if r.collapsible {
 			if m.collapsed[r.key] {
@@ -533,6 +568,31 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor = sectionStart(rows, sectionSessions)
 	case "2":
 		m.cursor = sectionStart(rows, sectionProjects)
+	}
+	return m, nil
+}
+
+// handlePromptKey drives the agent picker: j/k move between agents, enter/space
+// launches the highlighted one, and esc/h cancels. ctrl+c still quits outright.
+func (m model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		m.mgr.CloseAll()
+		return m, tea.Quit
+	case "esc", "q", "h", "left":
+		m.prompt = nil
+	case "j", "down":
+		if m.prompt.cursor < len(promptOptions)-1 {
+			m.prompt.cursor++
+		}
+	case "k", "up":
+		if m.prompt.cursor > 0 {
+			m.prompt.cursor--
+		}
+	case "tab":
+		m.prompt.cursor = (m.prompt.cursor + 1) % len(promptOptions)
+	case "enter", " ", "l", "right":
+		return m, m.confirmPrompt()
 	}
 	return m, nil
 }
@@ -560,21 +620,37 @@ func (m *model) openOrFocusSession(r *row) tea.Cmd {
 	return tea.Batch(reattachSessionCmd(m.mgr, r.label), save)
 }
 
-// actOnProjectRow focuses the running claude session for an actionable project
-// leaf, or creates and attaches one when none exists. It returns nil for folder
-// headers (empty session) and non-project rows so callers fall through to the
-// fold/collapse handling.
-func (m *model) actOnProjectRow(r *row) tea.Cmd {
+// openAgentPrompt opens the agent picker for an actionable project leaf so the
+// user can choose which agent (claude / opencode) to launch. It returns false
+// for folder headers (empty session) and non-project rows so callers fall
+// through to the fold/collapse handling.
+func (m *model) openAgentPrompt(r *row) bool {
 	if r.section != sectionProjects || r.session == "" {
-		return nil
+		return false
 	}
+	m.prompt = &agentPrompt{
+		title:   filepath.Base(r.dir),
+		session: r.session,
+		dir:     r.dir,
+	}
+	return true
+}
+
+// confirmPrompt acts on the agent picker's current selection: it focuses the
+// chosen agent's session if it is already running, otherwise creates and
+// attaches one. It clears the picker either way.
+func (m *model) confirmPrompt() tea.Cmd {
+	p := m.prompt
+	m.prompt = nil
+	kind := promptOptions[p.cursor].kind
+	name := sessionForKind(p.session, kind)
 	// Opening a session clears any detached flag so reconcile keeps its pane;
 	// persist the change when there was one.
-	save := m.clearDetached(r.session)
-	if id, ok := m.mgr.WindowID(r.session); ok {
+	save := m.clearDetached(name)
+	if id, ok := m.mgr.WindowID(name); ok {
 		return tea.Batch(focusCmd(id), save)
 	}
-	return openSessionCmd(m.mgr, r.session, r.dir)
+	return openSessionCmd(m.mgr, name, p.dir, agentCommand(kind))
 }
 
 // clearDetached removes name's detached flag and returns a command to persist
@@ -646,13 +722,33 @@ func helpHints(focused section) []keyHint {
 		}
 	}
 	return []keyHint{
-		{"↵/space", "open / focus"},
+		{"↵/space", "launch agent"},
 		{"D", "kill session"},
 		{"g", "lazygit"},
 		{"j/k", "move"},
 		{"1/2", "switch panel"},
 		{"q", "quit"},
 	}
+}
+
+// renderPrompt formats the agent picker's body lines: one row per agent kind,
+// the selected one highlighted full-width, plus a hint row. width is the panel's
+// inner width (for the selection highlight).
+func renderPrompt(p *agentPrompt, width int) []string {
+	lines := make([]string, 0, len(promptOptions)+2)
+	for i, o := range promptOptions {
+		marker := "  "
+		if i == p.cursor {
+			marker = chevronStyle.Render("▸ ")
+		}
+		line := marker + o.style.Render(o.label)
+		if i == p.cursor {
+			line = selectedStyle.Width(width).Render(line)
+		}
+		lines = append(lines, line)
+	}
+	lines = append(lines, "", keyStyle.Render("↵")+dimStyle.Render(" launch  ")+keyStyle.Render("esc")+dimStyle.Render(" cancel"))
+	return lines
 }
 
 // helpHeight is the body-row count of the keybind panel: the taller of the two
@@ -726,12 +822,20 @@ func (m model) View() string {
 		pLines = append(pLines, "", errStyle.Render("! "+m.lastErr))
 	}
 
-	// Reserve the bottom rows for the context-sensitive keybind panel, but drop
-	// it on very short terminals so the lists keep usable height.
-	help := renderHelp(focused)
+	// The bottom panel is normally the context-sensitive keybind hints, but it
+	// becomes the agent picker while one is open.
+	bottomTitle, bottomBody := "Keys", renderHelp(focused)
+	if m.prompt != nil {
+		bottomTitle = "Launch agent · " + m.prompt.title
+		bottomBody = renderPrompt(m.prompt, contentWidth)
+	}
+
+	// Reserve the bottom rows for that panel, but drop it on very short terminals
+	// so the lists keep usable height — unless the picker is open, which always
+	// needs to be visible.
 	hh := helpHeight() + 2
 	avail := m.height - hh
-	if avail < 6 {
+	if avail < 6 && m.prompt == nil {
 		hh, avail = 0, m.height
 	}
 
@@ -753,7 +857,7 @@ func (m model) View() string {
 	projects := panel("[2]─Projects", pLines, m.width, ph, focused == sectionProjects)
 	parts := []string{sessions, projects}
 	if hh > 0 {
-		parts = append(parts, panel("Keys", help, m.width, hh, false))
+		parts = append(parts, panel(bottomTitle, bottomBody, m.width, hh, m.prompt != nil))
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
