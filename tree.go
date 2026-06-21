@@ -129,8 +129,9 @@ func groupSessions(sessions, names []string) (map[string]*sessionGroup, []string
 }
 
 // buildSessionRows flattens sessions into project > worktree > session rows,
-// honoring collapse state. attached reports whether a session has a live pane.
-func buildSessionRows(sessions, names []string, collapsed map[string]bool, attached func(string) bool, deco rowDeco) []row {
+// honoring collapse state. attached reports whether a session has a live pane;
+// detached reports whether the user detached it (tmux alive, pane closed).
+func buildSessionRows(sessions, names []string, collapsed map[string]bool, attached, detached func(string) bool, deco rowDeco) []row {
 	groups, order := groupSessions(sessions, names)
 
 	var rows []row
@@ -145,7 +146,7 @@ func buildSessionRows(sessions, names []string, collapsed map[string]bool, attac
 		// Main-worktree sessions hang directly off the project.
 		sort.Strings(g.main)
 		for _, s := range g.main {
-			rows = append(rows, deco.session(s, 1, attached(s)))
+			rows = append(rows, deco.session(s, 1, attached(s), detached(s)))
 		}
 
 		// Worktree sessions get an intermediate, collapsible worktree node.
@@ -163,7 +164,7 @@ func buildSessionRows(sessions, names []string, collapsed map[string]bool, attac
 			ss := g.wts[w]
 			sort.Strings(ss)
 			for _, s := range ss {
-				rows = append(rows, deco.session(s, 2, attached(s)))
+				rows = append(rows, deco.session(s, 2, attached(s), detached(s)))
 			}
 		}
 	}

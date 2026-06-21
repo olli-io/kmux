@@ -110,8 +110,9 @@ func TestBuildSessionRows(t *testing.T) {
 	sessions := []string{"kmux_cl", "gstack_feat_cl", "gstack_feat_oc", "orphan_cl"}
 	names := []string{"kmux", "gstack"}
 	attached := func(string) bool { return false }
+	detached := func(string) bool { return false }
 
-	rows := buildSessionRows(sessions, names, map[string]bool{}, attached, rowDeco{})
+	rows := buildSessionRows(sessions, names, map[string]bool{}, attached, detached, rowDeco{})
 
 	// Expect: gstack(0) > feat(1) > 2 sessions(2); kmux(0) > kmux_cl(1);
 	// (ungrouped)(0) > orphan_cl(1). Projects sort before ungrouped.
@@ -130,7 +131,7 @@ func TestBuildSessionRows(t *testing.T) {
 	}
 
 	// Collapsing the gstack project hides feat and its sessions.
-	rows = buildSessionRows(sessions, names, map[string]bool{"sess:gstack": true}, attached, rowDeco{})
+	rows = buildSessionRows(sessions, names, map[string]bool{"sess:gstack": true}, attached, detached, rowDeco{})
 	for _, r := range rows {
 		if r.label == "feat" || r.label == "gstack_feat_cl" {
 			t.Errorf("collapsed gstack should hide %q", r.label)

@@ -13,12 +13,13 @@ import (
 const pollInterval = 2 * time.Second
 
 var (
-	clStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // claude
-	ocStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // opencode
-	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	activeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // project with a live session
+	clStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // claude
+	ocStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // opencode
+	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	detachedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // detached session (tmux alive, no pane)
+	errStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	okStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	activeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // project with a live session
 
 	chevronStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	selectedStyle = lipgloss.NewStyle().Background(lipgloss.Color("238"))
@@ -40,20 +41,27 @@ type projectsMsg struct {
 }
 type reconciledMsg struct{ errs []error }
 type focusedMsg struct{ err error }
+type savedMsg struct{ err error }
 
 type model struct {
 	mgr           *Manager
 	sessions      []string
 	projects      []Project
 	collapsed     map[string]bool // collapse key -> collapsed
-	hidden        map[string]bool // session name -> hidden from the Sessions panel
+	detached      map[string]bool // session name -> pane detached (tmux still running)
 	cursor        int             // index into rows()
 	lastErr       string
 	width, height int
 }
 
 func newModel(mgr *Manager) model {
-	return model{mgr: mgr, collapsed: map[string]bool{}, hidden: map[string]bool{}}
+	// Restore detached sessions from a previous run; best-effort (a read error
+	// just starts with an empty set).
+	detached, err := LoadDetached()
+	if err != nil || detached == nil {
+		detached = map[string]bool{}
+	}
+	return model{mgr: mgr, collapsed: map[string]bool{}, detached: detached}
 }
 
 func (m model) Init() tea.Cmd {
@@ -161,6 +169,20 @@ func reattachSessionCmd(mgr *Manager, name string) tea.Cmd {
 	}
 }
 
+// saveDetachedCmd persists the detached-session set off the UI goroutine. It
+// snapshots the map first so a later mutation can't race the write.
+func saveDetachedCmd(detached map[string]bool) tea.Cmd {
+	snap := make(map[string]bool, len(detached))
+	for k, on := range detached {
+		if on {
+			snap[k] = true
+		}
+	}
+	return func() tea.Msg {
+		return savedMsg{err: SaveDetached(snap)}
+	}
+}
+
 // lazygitCmd opens lazygit for dir in kitty's quick-access dropdown.
 func lazygitCmd(dir string) tea.Cmd {
 	return func() tea.Msg {
@@ -172,7 +194,7 @@ func lazygitCmd(dir string) tea.Cmd {
 // pure tree-building code in tree.go.
 type rowDeco struct{}
 
-func (rowDeco) session(name string, depth int, attached bool) row {
+func (rowDeco) session(name string, depth int, attached, detached bool) row {
 	var badge string
 	switch AgentKind(name) {
 	case "claude":
@@ -180,9 +202,13 @@ func (rowDeco) session(name string, depth int, attached bool) row {
 	case "opencode":
 		badge = ocStyle.Render("OpenCode")
 	}
+	// ✓ attached (live pane); ○ detached (tmux alive, pane closed); · neither.
 	mark := dimStyle.Render("·")
-	if attached {
+	switch {
+	case attached:
 		mark = okStyle.Render("✓")
+	case detached:
+		mark = detachedStyle.Render("○")
 	}
 	return row{section: sectionSessions, depth: depth, label: name, badge: badge, mark: mark}
 }
@@ -248,35 +274,43 @@ func (rowDeco) worktree(w Worktree, active bool) string {
 // project rows. The cursor indexes into this slice.
 func (m model) rows() []row {
 	deco := rowDeco{}
-	sess := buildSessionRows(m.visibleSessions(), projectNames(m.projects), m.collapsed, m.mgr.Attached, deco)
+	sess := buildSessionRows(m.sessions, projectNames(m.projects), m.collapsed, m.mgr.Attached, m.isDetached, deco)
 	proj := buildProjectRows(m.projects, m.collapsed, m.hasSession, deco)
 	return append(sess, proj...)
 }
 
-// visibleSessions is m.sessions with hidden sessions filtered out. Hiding is
-// display-only: the full list still drives reconcile, so a hidden session keeps
-// its pane and tmux session (it is not detached).
-func (m model) visibleSessions() []string {
-	if len(m.hidden) == 0 {
+// attachable is m.sessions minus detached sessions: the set reconcile keeps
+// panes for. A detached session stays in the Sessions panel (and its tmux
+// session keeps running) but has no pane, so it renders as unattached until
+// re-opened with enter/l.
+func (m model) attachable() []string {
+	if len(m.detached) == 0 {
 		return m.sessions
 	}
 	out := make([]string, 0, len(m.sessions))
 	for _, s := range m.sessions {
-		if !m.hidden[s] {
+		if !m.detached[s] {
 			out = append(out, s)
 		}
 	}
 	return out
 }
 
-// pruneHidden drops hidden entries for sessions that no longer exist, so a
-// future session that reuses the same name isn't silently hidden.
-func (m *model) pruneHidden() {
-	for s := range m.hidden {
+// isDetached reports whether the user has detached session name's pane.
+func (m model) isDetached(name string) bool {
+	return m.detached[name]
+}
+
+// pruneDetached drops detached entries for sessions that no longer exist, so a
+// future session that reuses the same name isn't silently kept detached.
+func (m *model) pruneDetached() (changed bool) {
+	for s := range m.detached {
 		if !slices.Contains(m.sessions, s) {
-			delete(m.hidden, s)
+			delete(m.detached, s)
+			changed = true
 		}
 	}
+	return changed
 }
 
 // hasSession reports whether an agent session with the given name is running.
@@ -376,8 +410,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastErr = ""
 		m.sessions = msg.names
-		m.pruneHidden()
-		return m, reconcileCmd(m.mgr, msg.names)
+		pruned := m.pruneDetached()
+		cmd := reconcileCmd(m.mgr, m.attachable())
+		if pruned {
+			cmd = tea.Batch(cmd, saveDetachedCmd(m.detached))
+		}
+		return m, cmd
 
 	case projectsMsg:
 		if msg.err != nil {
@@ -394,6 +432,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case focusedMsg:
+		if msg.err != nil {
+			m.lastErr = msg.err.Error()
+		}
+		return m, nil
+
+	case savedMsg:
 		if msg.err != nil {
 			m.lastErr = msg.err.Error()
 		}
@@ -440,12 +484,6 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if r == nil {
 			break
 		}
-		// `h` (but not arrow-left) hides a session leaf from the panel without
-		// detaching it; the pane and tmux session keep running.
-		if msg.String() == "h" && isSessionLeaf(r) {
-			m.hidden[r.label] = true
-			break
-		}
 		if r.collapsible && !m.collapsed[r.key] {
 			m.collapsed[r.key] = true
 		} else {
@@ -453,7 +491,17 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "d":
-		// Kill (delete) the agent: ends the tmux session and its pane.
+		// Detach a session leaf: close the agent's kitty pane while leaving the
+		// tmux session running, so the row stays in the panel (now unattached) and
+		// can be re-opened with enter/l. Marking it detached keeps reconcile from
+		// immediately re-attaching a pane; the reconcile below closes the current
+		// pane right away.
+		if r := rowAt(rows, m.cursor); isSessionLeaf(r) && !m.detached[r.label] {
+			m.detached[r.label] = true
+			return m, tea.Batch(reconcileCmd(m.mgr, m.attachable()), saveDetachedCmd(m.detached))
+		}
+	case "D":
+		// Kill the agent: ends the tmux session and its pane.
 		if name := m.killTarget(rowAt(rows, m.cursor)); name != "" {
 			return m, killSessionCmd(name)
 		}
@@ -499,28 +547,44 @@ func isSessionLeaf(r *row) bool {
 // leaf row, re-opening a pane first when the session is running but currently
 // has none (e.g. its pane was closed by hand). It returns nil when r is not a
 // session leaf.
-func (m model) openOrFocusSession(r *row) tea.Cmd {
+func (m *model) openOrFocusSession(r *row) tea.Cmd {
 	if !isSessionLeaf(r) {
 		return nil
 	}
+	// Opening a session clears any detached flag so reconcile keeps its pane;
+	// persist the change when there was one.
+	save := m.clearDetached(r.label)
 	if id, ok := m.mgr.WindowID(r.label); ok {
-		return focusCmd(id)
+		return tea.Batch(focusCmd(id), save)
 	}
-	return reattachSessionCmd(m.mgr, r.label)
+	return tea.Batch(reattachSessionCmd(m.mgr, r.label), save)
 }
 
 // actOnProjectRow focuses the running claude session for an actionable project
 // leaf, or creates and attaches one when none exists. It returns nil for folder
 // headers (empty session) and non-project rows so callers fall through to the
 // fold/collapse handling.
-func (m model) actOnProjectRow(r *row) tea.Cmd {
+func (m *model) actOnProjectRow(r *row) tea.Cmd {
 	if r.section != sectionProjects || r.session == "" {
 		return nil
 	}
+	// Opening a session clears any detached flag so reconcile keeps its pane;
+	// persist the change when there was one.
+	save := m.clearDetached(r.session)
 	if id, ok := m.mgr.WindowID(r.session); ok {
-		return focusCmd(id)
+		return tea.Batch(focusCmd(id), save)
 	}
 	return openSessionCmd(m.mgr, r.session, r.dir)
+}
+
+// clearDetached removes name's detached flag and returns a command to persist
+// the change, or nil when name was not detached (nothing to save).
+func (m *model) clearDetached(name string) tea.Cmd {
+	if !m.detached[name] {
+		return nil
+	}
+	delete(m.detached, name)
+	return saveDetachedCmd(m.detached)
 }
 
 func (m *model) clampCursor(rows []row) {
@@ -573,8 +637,8 @@ func helpHints(focused section) []keyHint {
 	if focused == sectionSessions {
 		return []keyHint{
 			{"↵/space", "focus pane"},
-			{"d", "kill session"},
-			{"h", "hide"},
+			{"d", "detach"},
+			{"D", "kill session"},
 			{"g", "lazygit"},
 			{"j/k", "move"},
 			{"1/2", "switch panel"},
@@ -583,7 +647,7 @@ func helpHints(focused section) []keyHint {
 	}
 	return []keyHint{
 		{"↵/space", "open / focus"},
-		{"d", "kill session"},
+		{"D", "kill session"},
 		{"g", "lazygit"},
 		{"j/k", "move"},
 		{"1/2", "switch panel"},
