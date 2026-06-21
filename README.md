@@ -1,11 +1,9 @@
 # kmux
 
-Agent dashboard for kitty.
-
 `kmux` is a barebones TUI for monitoring parallel AI coding agents (claude,
 opencode) that each run in their own tmux session. It runs as a left sidebar
 inside a kitty window and auto-attaches every matching tmux session into its own
-pane.
+pane. It is meant to be seamless with my neovim setup.
 
 ## Prerequisites
 
