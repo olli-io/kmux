@@ -25,6 +25,17 @@ var (
 	chevronStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	selectedStyle = lipgloss.NewStyle().Background(lipgloss.Color("238"))
 
+	// selectedOpenSeq is selectedStyle's background as a bare SGR open sequence,
+	// derived (not hardcoded) so it tracks the color above across terminal color
+	// profiles. selectLine re-emits it after inner ANSI resets.
+	selectedOpenSeq = func() string {
+		const sentinel = "\x00"
+		if open, _, ok := strings.Cut(selectedStyle.Render(sentinel), sentinel); ok {
+			return open
+		}
+		return ""
+	}()
+
 	keyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // keybind hint (yellow)
 
 	borderIdle = lipgloss.Color("240") // unfocused panel border (grey)
@@ -743,7 +754,7 @@ func renderPrompt(p *agentPrompt, width int) []string {
 		}
 		line := marker + o.style.Render(o.label)
 		if i == p.cursor {
-			line = selectedStyle.Width(width).Render(line)
+			line = selectLine(line, width)
 		}
 		lines = append(lines, line)
 	}
@@ -886,9 +897,19 @@ func renderRow(r row, selected bool, collapsed map[string]bool, width int) strin
 
 	line := b.String()
 	if selected {
-		return selectedStyle.Width(width).Render(line)
+		return selectLine(line, width)
 	}
 	return line
+}
+
+// selectLine paints a composed row line with the uniform selection background.
+// Inner styled segments (chevrons, marks, badges, dim branch text) each end with
+// an ANSI reset that also clears the background, which would punch
+// default-colored gaps into the highlight; re-emitting the background after every
+// reset keeps the bar one solid color while preserving the inner foregrounds.
+func selectLine(line string, width int) string {
+	line = strings.ReplaceAll(line, "\x1b[0m", "\x1b[0m"+selectedOpenSeq)
+	return selectedStyle.Width(width).Render(line)
 }
 
 // panel draws a rounded, titled box (lazygit-style: title in the top border,
