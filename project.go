@@ -11,9 +11,30 @@ import (
 
 // Worktree is a linked git worktree of a project (never the main worktree).
 type Worktree struct {
-	Name   string // directory basename
+	Name   string // short name relative to the project (see worktreeSegment)
 	Path   string
 	Branch string // short branch name, or "(detached)"
+}
+
+// worktreeSegment derives a worktree's short name relative to its project: the
+// directory basename with a leading "<project><sep>" stripped, where sep is one
+// of '.', '_', or '-'. Worktrees are conventionally placed in sibling dirs named
+// "<project>.<branch>" (and similar), yet the tmux session convention is
+// "<project>_<segment>_cl" (see expectedSession / matchProject). Stripping the
+// redundant project prefix keeps the two in sync, so a worktree's row resolves to
+// the same session name its live tmux session carries — without it the project
+// row never matches its session (no active coloring) and launching it spawns a
+// duplicate instead of focusing the existing pane. A basename that doesn't carry
+// the prefix is returned unchanged.
+func worktreeSegment(base, project string) string {
+	rest, ok := strings.CutPrefix(base, project)
+	if !ok || rest == "" || !strings.ContainsRune("._-", rune(rest[0])) {
+		return base
+	}
+	if seg := rest[1:]; seg != "" {
+		return seg
+	}
+	return base
 }
 
 // Project is a git repository directly under the projects root, together with
@@ -152,6 +173,7 @@ func listWorktrees(dir string) (string, []Worktree) {
 // main worktree's branch (the record whose path equals mainPath) and the linked
 // worktrees.
 func parseWorktrees(out, mainPath string) (string, []Worktree) {
+	project := filepath.Base(mainPath)
 	var mainBranch string
 	var wts []Worktree
 	var cur Worktree
@@ -162,7 +184,7 @@ func parseWorktrees(out, mainPath string) (string, []Worktree) {
 		case cur.Path == mainPath:
 			mainBranch = cur.Branch
 		default:
-			cur.Name = filepath.Base(cur.Path)
+			cur.Name = worktreeSegment(filepath.Base(cur.Path), project)
 			wts = append(wts, cur)
 		}
 		cur = Worktree{}

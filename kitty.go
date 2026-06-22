@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -82,34 +83,18 @@ func OpenTab(exe, dir, title string) error {
 	return err
 }
 
-// quickAccessMargin is the inset, in pixels, applied to every edge of the
-// quick-access terminal so it floats inside the kmux window rather than spanning
-// the full screen.
-const quickAccessMargin = 15
-
-// OpenLazygit opens lazygit for dir in kitty's quick-access terminal (a
-// Quake-style dropdown). lazygit is pointed at dir via its own -p flag since the
-// quick-access kitten has no cwd option. This is fire-and-forget: it is NOT a
-// managed pane, so Manager/Reconcile/Rebalance never see it. The dropdown is a
-// singleton, so re-invoking toggles the existing window's visibility.
-//
-// Appearance overrides: edge=center anchors the panel to all sides so the
-// margins inset it on every edge (the default edge=top spans the full width),
-// and background_opacity=1 makes it fully opaque.
+// OpenLazygit opens lazygit for dir in a new kitty tab in the current OS window
+// and focuses it. The tab runs lazygit with its cwd set to dir. This is
+// fire-and-forget: it is NOT a managed pane, so Manager/Reconcile/Rebalance never
+// see it; closing lazygit closes the tab.
 func OpenLazygit(dir string) error {
-	margin := strconv.Itoa(quickAccessMargin)
-	cmd := exec.Command("kitten", "quick-access-terminal",
-		"-o", "edge=center",
-		"-o", "background_opacity=1",
-		"-o", "margin_left="+margin,
-		"-o", "margin_right="+margin,
-		"-o", "margin_top="+margin,
-		"-o", "margin_bottom="+margin,
-		"lazygit", "-p", dir)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("kitten quick-access-terminal lazygit: %w: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
+	_, err := kittenAt(
+		"launch",
+		"--type=tab",
+		"--cwd", dir,
+		"--tab-title", "lazygit · "+filepath.Base(dir),
+		"lazygit")
+	return err
 }
 
 // FocusWindow gives keyboard focus to the window with the given id, switching

@@ -244,7 +244,7 @@ func saveDetachedCmd(detached map[string]bool) tea.Cmd {
 	}
 }
 
-// lazygitCmd opens lazygit for dir in kitty's quick-access dropdown.
+// lazygitCmd opens lazygit for dir in a new kitty tab.
 func lazygitCmd(dir string) tea.Cmd {
 	return func() tea.Msg {
 		return focusedMsg{err: OpenLazygit(dir)}
@@ -611,8 +611,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if cmd := m.openOrFocusSession(r); cmd != nil {
 			return m, cmd
 		}
-		if m.openAgentPrompt(r) {
-			return m, nil
+		if cmd, ok := m.launchProject(r); ok {
+			return m, cmd
 		}
 		if r.collapsible && m.collapsed[r.key] {
 			delete(m.collapsed, r.key)
@@ -651,8 +651,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if cmd := m.openOrFocusSession(r); cmd != nil {
 			return m, cmd
 		}
-		if m.openAgentPrompt(r) {
-			return m, nil
+		if cmd, ok := m.launchProject(r); ok {
+			return m, cmd
 		}
 		if r.collapsible {
 			if m.collapsed[r.key] {
@@ -672,6 +672,17 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// running its own kmux. Projects panel only (no-op for session rows).
 		if dir := m.projectRoot(rowAt(rows, m.cursor)); dir != "" {
 			return m, openTabCmd(dir)
+		}
+
+	case "c":
+		// Launch (or focus) Claude for the selected project, skipping the picker.
+		if cmd := m.launchKindOn(rowAt(rows, m.cursor), "claude"); cmd != nil {
+			return m, cmd
+		}
+	case "o":
+		// Launch (or focus) OpenCode for the selected project, skipping the picker.
+		if cmd := m.launchKindOn(rowAt(rows, m.cursor), "opencode"); cmd != nil {
+			return m, cmd
 		}
 
 	case "1":
@@ -721,46 +732,81 @@ func (m *model) openOrFocusSession(r *row) tea.Cmd {
 	if !isSessionLeaf(r) {
 		return nil
 	}
-	// Opening a session clears any detached flag so reconcile keeps its pane;
-	// persist the change when there was one.
-	save := m.clearDetached(r.label)
-	if id, ok := m.mgr.WindowID(r.label); ok {
-		return tea.Batch(focusCmd(id), save)
-	}
-	return tea.Batch(reattachSessionCmd(m.mgr, r.label), save)
+	return m.focusOrReattach(r.label)
 }
 
-// openAgentPrompt opens the agent picker for an actionable project leaf so the
-// user can choose which agent (claude / opencode) to launch. It returns false
-// for folder headers (empty session) and non-project rows so callers fall
-// through to the fold/collapse handling.
-func (m *model) openAgentPrompt(r *row) bool {
+// focusOrReattach focuses a running session's pane, re-opening one first when the
+// session is alive but has no pane (e.g. closed by hand or detached). Either way
+// it clears any detached flag so reconcile keeps the pane, persisting that change
+// when there was one.
+func (m *model) focusOrReattach(name string) tea.Cmd {
+	save := m.clearDetached(name)
+	if id, ok := m.mgr.WindowID(name); ok {
+		return tea.Batch(focusCmd(id), save)
+	}
+	return tea.Batch(reattachSessionCmd(m.mgr, name), save)
+}
+
+// launchProject activates a project/worktree leaf row. When exactly one agent
+// kind already has a running session it focuses that session directly, skipping
+// the picker — there is nothing to choose. When neither (or both) kinds are
+// running it opens the agent picker. It returns (cmd, true) for rows it handled
+// (cmd is non-nil only for the direct-focus case) and (nil, false) for rows it
+// doesn't act on — folder headers (empty session) and non-project rows — so
+// callers fall through to fold/collapse handling.
+func (m *model) launchProject(r *row) (tea.Cmd, bool) {
 	if r.section != sectionProjects || r.session == "" {
-		return false
+		return nil, false
+	}
+	claude := r.session
+	opencode := sessionForKind(r.session, "opencode")
+	var running []string
+	if m.hasSession(claude) {
+		running = append(running, claude)
+	}
+	if m.hasSession(opencode) {
+		running = append(running, opencode)
+	}
+	if len(running) == 1 {
+		return m.focusOrReattach(running[0]), true
 	}
 	m.prompt = &agentPrompt{
 		title:   filepath.Base(r.dir),
 		session: r.session,
 		dir:     r.dir,
 	}
-	return true
+	return nil, true
 }
 
-// confirmPrompt acts on the agent picker's current selection: it focuses the
-// chosen agent's session if it is already running, otherwise creates and
-// attaches one. It clears the picker either way.
+// confirmPrompt acts on the agent picker's current selection, launching the
+// chosen agent kind and clearing the picker.
 func (m *model) confirmPrompt() tea.Cmd {
 	p := m.prompt
 	m.prompt = nil
-	kind := promptOptions[p.cursor].kind
-	name := sessionForKind(p.session, kind)
+	return m.launchKind(p.session, p.dir, promptOptions[p.cursor].kind)
+}
+
+// launchKind focuses the given agent kind's session if it is already running,
+// otherwise creates and attaches one. session is the row's claude session name
+// (the base for sessionForKind), dir its working directory.
+func (m *model) launchKind(session, dir, kind string) tea.Cmd {
+	name := sessionForKind(session, kind)
 	// Opening a session clears any detached flag so reconcile keeps its pane;
 	// persist the change when there was one.
 	save := m.clearDetached(name)
 	if id, ok := m.mgr.WindowID(name); ok {
 		return tea.Batch(focusCmd(id), save)
 	}
-	return openSessionCmd(m.mgr, name, p.dir, agentCommand(kind))
+	return openSessionCmd(m.mgr, name, dir, agentCommand(kind))
+}
+
+// launchKindOn launches a specific agent kind for project leaf row r, returning
+// nil for rows that can't launch one (folder headers, non-project rows).
+func (m *model) launchKindOn(r *row, kind string) tea.Cmd {
+	if r == nil || r.section != sectionProjects || r.session == "" {
+		return nil
+	}
+	return m.launchKind(r.session, r.dir, kind)
 }
 
 // clearDetached removes name's detached flag and returns a command to persist
@@ -822,23 +868,24 @@ type keyHint struct{ key, desc string }
 func helpHints(focused section) []keyHint {
 	if focused == sectionSessions {
 		return []keyHint{
-			{"↵/space", "focus pane"},
-			{"d", "detach"},
-			{"D", "kill session"},
-			{"g", "lazygit"},
-			{"j/k", "move"},
-			{"1/2", "switch panel"},
-			{"q", "quit"},
+			{"j/k", "Move"},
+			{"1/2", "Switch panel"},
+			{"↵/space", "Focus pane"},
+			{"d", "Detach"},
+			{"D", "Kill session"},
+			{"g", "Lazygit"},
+			{"q", "Quit"},
 		}
 	}
 	return []keyHint{
-		{"↵/space", "launch agent"},
-		{"t", "open in tab"},
-		{"D", "kill session"},
-		{"g", "lazygit"},
-		{"j/k", "move"},
-		{"1/2", "switch panel"},
-		{"q", "quit"},
+		{"j/k", "Move"},
+		{"1/2", "Switch panel"},
+		{"↵/space", "Launch agent"},
+		{"c/o", "Launch claude/opencode"},
+		{"t", "Open in tab"},
+		{"D", "Kill session"},
+		{"g", "Lazygit"},
+		{"q", "Quit"},
 	}
 }
 
@@ -858,8 +905,39 @@ func renderPrompt(p *agentPrompt, width int) []string {
 		}
 		lines = append(lines, line)
 	}
-	lines = append(lines, "", keyStyle.Render("↵")+dimStyle.Render(" launch  ")+keyStyle.Render("esc")+dimStyle.Render(" cancel"))
+	lines = append(lines, "", promptHint())
 	return lines
+}
+
+// promptHint renders the picker's key-hint footer line.
+func promptHint() string {
+	return keyStyle.Render("↵") + dimStyle.Render(" launch  ") + keyStyle.Render("esc") + dimStyle.Render(" cancel")
+}
+
+// promptBox renders the floating agent picker: a focused, rounded box titled with
+// the project being launched, one row per agent kind, and the key hint. It is
+// sized to its widest line but capped at maxInner inner columns so it never
+// overflows the screen.
+func promptBox(p *agentPrompt, maxInner int) string {
+	title := "Launch agent · " + p.title
+	inner := lipgloss.Width(title)
+	for _, o := range promptOptions {
+		if w := lipgloss.Width("▸ " + o.label); w > inner {
+			inner = w
+		}
+	}
+	if w := lipgloss.Width(promptHint()); w > inner {
+		inner = w
+	}
+	inner += 2 // breathing room around the content
+	if inner > maxInner {
+		inner = maxInner
+	}
+	if inner < 1 {
+		inner = 1
+	}
+	body := renderPrompt(p, inner)
+	return panel(title, body, inner+2, len(body)+2, true)
 }
 
 // helpHeight is the body-row count of the keybind panel: the taller of the two
@@ -914,12 +992,22 @@ func (m model) View() string {
 		contentWidth = 1
 	}
 
+	// Track the selected row's position within its panel so the picker overlay can
+	// anchor to it: selPanelIdx is its index among that panel's body lines (-1 if
+	// the cursor isn't on a real row), selDepth its tree indentation.
 	var sLines, pLines []string
+	selInSessions, selPanelIdx, selDepth := false, -1, 0
 	for i, r := range rows {
 		line := renderRow(r, i == cursor, m.collapsed, contentWidth)
 		if r.section == sectionSessions {
+			if i == cursor {
+				selInSessions, selPanelIdx, selDepth = true, len(sLines), r.depth
+			}
 			sLines = append(sLines, line)
 		} else {
+			if i == cursor {
+				selInSessions, selPanelIdx, selDepth = false, len(pLines), r.depth
+			}
 			pLines = append(pLines, line)
 		}
 	}
@@ -933,20 +1021,11 @@ func (m model) View() string {
 		pLines = append(pLines, "", errStyle.Render("! "+m.lastErr))
 	}
 
-	// The bottom panel is normally the context-sensitive keybind hints, but it
-	// becomes the agent picker while one is open.
-	bottomTitle, bottomBody := "Keys", renderHelp(focused)
-	if m.prompt != nil {
-		bottomTitle = "Launch agent · " + m.prompt.title
-		bottomBody = renderPrompt(m.prompt, contentWidth)
-	}
-
-	// Reserve the bottom rows for that panel, but drop it on very short terminals
-	// so the lists keep usable height — unless the picker is open, which always
-	// needs to be visible.
+	// Reserve the bottom rows for the keybind panel, but drop it on very short
+	// terminals so the lists keep usable height.
 	hh := helpHeight() + 2
 	avail := m.height - hh
-	if avail < 6 && m.prompt == nil {
+	if avail < 6 {
 		hh, avail = 0, m.height
 	}
 
@@ -972,9 +1051,66 @@ func (m model) View() string {
 	projects := panel(projTitle, pLines, m.width, ph, focused == sectionProjects)
 	parts := []string{sessions, projects}
 	if hh > 0 {
-		parts = append(parts, panel(bottomTitle, bottomBody, m.width, hh, m.prompt != nil))
+		parts = append(parts, panel("Keys", renderHelp(focused), m.width, hh, false))
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)
+
+	// The agent picker floats just under the selected row rather than docking in a
+	// panel, so launching reads as an action on that row.
+	if m.prompt != nil && selPanelIdx >= 0 {
+		// Screen row of the selected line: the sessions panel occupies rows
+		// [0, sh) and the projects panel follows; +1 skips each panel's top border.
+		selY := 1 + selPanelIdx
+		if !selInSessions {
+			selY = sh + 1 + selPanelIdx
+		}
+		frame = m.overlayPrompt(frame, selY, selDepth)
+	}
+	return frame
+}
+
+// overlayPrompt composites the floating agent picker onto the rendered frame,
+// anchored just below the selected row (selY) at its indentation. It flips above
+// the row when there isn't room below, and clamps horizontally so the box stays
+// on screen.
+func (m model) overlayPrompt(frame string, selY, depth int) string {
+	box := promptBox(m.prompt, m.width-2)
+	boxLines := strings.Split(box, "\n")
+	boxW, boxH := lipgloss.Width(boxLines[0]), len(boxLines)
+
+	y := selY + 1
+	if y+boxH > m.height {
+		if up := selY - boxH; up >= 0 {
+			y = up // not enough room below: sit above the row instead
+		}
+	}
+	x := 2 + depth*2 // align under the row's label (left border + indent)
+	if x+boxW > m.width {
+		x = m.width - boxW
+	}
+	if x < 0 {
+		x = 0
+	}
+
+	lines := strings.Split(frame, "\n")
+	for i, bl := range boxLines {
+		if row := y + i; row >= 0 && row < len(lines) {
+			lines[row] = overlayLine(lines[row], bl, x)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// overlayLine splices over onto base starting at display column x, ANSI-aware,
+// leaving the base on either side intact. Resets bracket the inserted span so the
+// box's colors don't bleed into the surrounding frame and vice versa.
+func overlayLine(base, over string, x int) string {
+	left := ansi.Truncate(base, x, "")
+	if w := lipgloss.Width(left); w < x {
+		left += strings.Repeat(" ", x-w)
+	}
+	right := ansi.TruncateLeft(base, x+lipgloss.Width(over), "")
+	return left + "\x1b[0m" + over + "\x1b[0m" + right
 }
 
 // renderRow renders a tree row: indent, chevron, optional mark/badge, label.
@@ -1011,9 +1147,14 @@ func renderRow(r row, selected bool, collapsed map[string]bool, width int) strin
 // an ANSI reset that also clears the background, which would punch
 // default-colored gaps into the highlight; re-emitting the background after every
 // reset keeps the bar one solid color while preserving the inner foregrounds.
+//
+// The line is truncated/padded to exactly width before styling: lipgloss's
+// .Width() would wrap an over-long line onto extra rows (unlike the truncating
+// padCell used for unselected rows), breaking the layout, so we size the line
+// ourselves and render the background without it.
 func selectLine(line string, width int) string {
 	line = strings.ReplaceAll(line, "\x1b[0m", "\x1b[0m"+selectedOpenSeq)
-	return selectedStyle.Width(width).Render(line)
+	return selectedStyle.Render(padCell(line, width))
 }
 
 // panel draws a rounded, titled box (lazygit-style: title in the top border,

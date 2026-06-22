@@ -172,22 +172,18 @@ func buildSessionRows(sessions, names []string, collapsed map[string]bool, attac
 			rows = append(rows, deco.session(s, 1, attached(s), detached(s)))
 		}
 
-		// Worktree sessions get an intermediate, collapsible worktree node.
+		// Worktree sessions hang off the same project header (no intermediate
+		// worktree node), ordered by worktree segment then session name.
 		wtNames := make([]string, 0, len(g.wts))
 		for w := range g.wts {
 			wtNames = append(wtNames, w)
 		}
 		sort.Strings(wtNames)
 		for _, w := range wtNames {
-			wkey := pkey + "/" + w
-			rows = append(rows, row{section: sectionSessions, depth: 1, key: wkey, collapsible: true, label: w})
-			if collapsed[wkey] {
-				continue
-			}
 			ss := g.wts[w]
 			sort.Strings(ss)
 			for _, s := range ss {
-				rows = append(rows, deco.session(s, 2, attached(s), detached(s)))
+				rows = append(rows, deco.session(s, 1, attached(s), detached(s)))
 			}
 		}
 	}

@@ -45,11 +45,32 @@ func TestParseWorktrees(t *testing.T) {
 	if len(wts) != 2 {
 		t.Fatalf("got %d worktrees, want 2: %+v", len(wts), wts)
 	}
-	if wts[0].Name != "proj-detached" || wts[0].Branch != "(detached)" {
+	// The "proj-" project prefix is stripped from each worktree's short name, so
+	// the row matches the "<project>_<segment>_cl" tmux session convention.
+	if wts[0].Name != "detached" || wts[0].Branch != "(detached)" {
 		t.Errorf("wt[0] = %+v", wts[0]) // sorted by name, detached comes first
 	}
-	if wts[1].Name != "proj-feature" || wts[1].Branch != "feature" {
+	if wts[1].Name != "feature" || wts[1].Branch != "feature" {
 		t.Errorf("wt[1] = %+v", wts[1])
+	}
+}
+
+func TestWorktreeSegment(t *testing.T) {
+	cases := []struct {
+		base, project, want string
+	}{
+		{"wattery-app.migrate-user-invites", "wattery-app", "migrate-user-invites"}, // dot separator
+		{"proj_feature", "proj", "feature"},                                         // underscore separator
+		{"proj-feature", "proj", "feature"},                                         // hyphen separator
+		{"feature", "proj", "feature"},                                              // no project prefix: unchanged
+		{"projection", "proj", "projection"},                                        // prefix not followed by a separator: unchanged
+		{"proj", "proj", "proj"},                                                     // exactly the project name: unchanged
+		{"proj.", "proj", "proj."},                                                   // empty segment after prefix: unchanged
+	}
+	for _, c := range cases {
+		if got := worktreeSegment(c.base, c.project); got != c.want {
+			t.Errorf("worktreeSegment(%q, %q) = %q, want %q", c.base, c.project, got, c.want)
+		}
 	}
 }
 
@@ -135,13 +156,14 @@ func TestBuildSessionRows(t *testing.T) {
 
 	rows := buildSessionRows(sessions, names, map[string]bool{}, attached, detached, rowDeco{})
 
-	// Expect: gstack(0) > feat(1) > 2 sessions(2); kmux(0) > kmux_cl(1);
-	// (ungrouped)(0) > orphan_cl(1). Projects sort before ungrouped.
+	// Expect: gstack(0) > 2 worktree sessions(1) directly under it (no worktree
+	// node); kmux(0) > kmux_cl(1); (ungrouped)(0) > orphan_cl(1). Projects sort
+	// before ungrouped.
 	var labels []string
 	for _, r := range rows {
 		labels = append(labels, r.label)
 	}
-	want := []string{"gstack", "feat", "gstack_feat_cl", "gstack_feat_oc", "kmux", "kmux_cl", ungrouped, "orphan_cl"}
+	want := []string{"gstack", "gstack_feat_cl", "gstack_feat_oc", "kmux", "kmux_cl", ungrouped, "orphan_cl"}
 	if len(labels) != len(want) {
 		t.Fatalf("got %v, want %v", labels, want)
 	}
@@ -151,10 +173,21 @@ func TestBuildSessionRows(t *testing.T) {
 		}
 	}
 
-	// Collapsing the gstack project hides feat and its sessions.
+	// Worktree sessions hang directly off the project at depth 1, with no
+	// intermediate "feat" worktree header.
+	for _, r := range rows {
+		if r.label == "feat" {
+			t.Errorf("worktree node %q should not be rendered", r.label)
+		}
+		if r.label == "gstack_feat_cl" && r.depth != 1 {
+			t.Errorf("worktree session depth = %d, want 1", r.depth)
+		}
+	}
+
+	// Collapsing the gstack project hides its worktree sessions.
 	rows = buildSessionRows(sessions, names, map[string]bool{"sess:gstack": true}, attached, detached, rowDeco{})
 	for _, r := range rows {
-		if r.label == "feat" || r.label == "gstack_feat_cl" {
+		if r.label == "gstack_feat_cl" {
 			t.Errorf("collapsed gstack should hide %q", r.label)
 		}
 	}
