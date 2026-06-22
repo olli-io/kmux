@@ -23,6 +23,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// An optional directory argument scopes kmux to a single git project: the
+	// Sessions and Projects panels then show only that project (and its
+	// worktrees). Without it, kmux scans ~/git plus any configured folders.
+	var scopeDir string
+	if len(os.Args) > 1 {
+		proj, err := ScanProject(os.Args[1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
+			os.Exit(1)
+		}
+		scopeDir = proj.Path
+	}
+
 	if err := GotoLayoutSplits(); err != nil {
 		fmt.Fprintf(os.Stderr, "kmux: could not switch to splits layout: %v\n", err)
 		os.Exit(1)
@@ -30,7 +43,7 @@ func main() {
 
 	mgr := NewManager(sidebarID)
 	// AltScreen gives a clean, full-pane dashboard (clears on launch, restores on exit).
-	p := tea.NewProgram(newModel(mgr), tea.WithAltScreen())
+	p := tea.NewProgram(newModel(mgr, scopeDir), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		mgr.CloseAll()
 		fmt.Fprintf(os.Stderr, "kmux: %v\n", err)

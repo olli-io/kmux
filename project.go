@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,6 +51,7 @@ func ScanProjects() ([]Project, error) {
 	}
 
 	var projects []Project
+	seen := map[string]bool{}
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -68,9 +70,62 @@ func ScanProjects() ([]Project, error) {
 			Branch:    branch,
 			Worktrees: worktrees,
 		})
+		seen[path] = true
 	}
+
+	// Fold in any extra project folders from the config file. Each is resolved to
+	// its main worktree, deduped against the ~/git scan and one another, so a
+	// configured folder that also lives under ~/git isn't listed twice. Bad
+	// entries (missing dirs, non-repos) are skipped rather than failing the scan.
+	cfg, err := LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+	for _, dir := range cfg.Projects {
+		p, err := ScanProject(dir)
+		if err != nil || seen[p.Path] {
+			continue
+		}
+		seen[p.Path] = true
+		projects = append(projects, *p)
+	}
+
 	sort.Slice(projects, func(i, j int) bool { return projects[i].Name < projects[j].Name })
 	return projects, nil
+}
+
+// ScanProject builds the Project for the git repository containing dir, together
+// with its linked worktrees. dir may be the main worktree, a linked worktree, or
+// any subdirectory of either: git resolves the whole worktree set regardless,
+// and the main worktree is always listed first in --porcelain output, so it
+// anchors the project. An error is returned when dir is not inside a git repo.
+func ScanProject(dir string) (*Project, error) {
+	out, err := exec.Command("git", "-C", dir, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		return nil, fmt.Errorf("%s is not a git repository", dir)
+	}
+	root := firstWorktreePath(string(out))
+	if root == "" {
+		return nil, fmt.Errorf("%s is not a git repository", dir)
+	}
+	branch, worktrees := parseWorktrees(string(out), root)
+	return &Project{
+		Name:      filepath.Base(root),
+		Path:      root,
+		Branch:    branch,
+		Worktrees: worktrees,
+	}, nil
+}
+
+// firstWorktreePath returns the path from the first `worktree ` record of
+// `git worktree list --porcelain`, which git always emits for the main worktree.
+func firstWorktreePath(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "worktree ") {
+			return strings.TrimPrefix(line, "worktree ")
+		}
+	}
+	return ""
 }
 
 // isMainWorktree reports whether dir is the main worktree of a git repo, i.e.

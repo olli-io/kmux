@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -65,6 +66,13 @@ type model struct {
 	prompt        *agentPrompt    // non-nil while the agent-picker overlay is open
 	lastErr       string
 	width, height int
+
+	// scopeDir is the main-worktree path kmux is scoped to (from the CLI
+	// directory argument); scopeName is its project name. Both empty in the
+	// default, unscoped mode. When set, the Projects panel shows only that
+	// project and the Sessions panel only its sessions.
+	scopeDir  string
+	scopeName string
 }
 
 // agentPrompt is the state of the agent-picker shown when launching a project:
@@ -85,19 +93,31 @@ var promptOptions = []struct {
 	{"opencode", "OpenCode", ocStyle},
 }
 
-func newModel(mgr *Manager) model {
+// newModel builds the dashboard model. scopeDir, when non-empty, is the main
+// worktree of the single project kmux is scoped to (see model.scopeDir).
+func newModel(mgr *Manager, scopeDir string) model {
 	// Restore detached sessions from a previous run; best-effort (a read error
 	// just starts with an empty set).
 	detached, err := LoadDetached()
 	if err != nil || detached == nil {
 		detached = map[string]bool{}
 	}
-	return model{mgr: mgr, collapsed: map[string]bool{}, detached: detached}
+	scopeName := ""
+	if scopeDir != "" {
+		scopeName = filepath.Base(scopeDir)
+	}
+	return model{
+		mgr:       mgr,
+		collapsed: map[string]bool{},
+		detached:  detached,
+		scopeDir:  scopeDir,
+		scopeName: scopeName,
+	}
 }
 
 func (m model) Init() tea.Cmd {
 	// Kick off an immediate poll, then tick on the interval.
-	return tea.Batch(pollCmd(), projectsCmd(), tickCmd())
+	return tea.Batch(pollCmd(), projectsCmd(m.scopeDir), tickCmd())
 }
 
 func tickCmd() tea.Cmd {
@@ -112,9 +132,18 @@ func pollCmd() tea.Cmd {
 	}
 }
 
-// projectsCmd scans ~/git off the UI goroutine.
-func projectsCmd() tea.Cmd {
+// projectsCmd scans projects off the UI goroutine. When scopeDir is set it
+// resolves just that one project (scoped mode); otherwise it scans ~/git plus
+// any folders listed in the config file.
+func projectsCmd(scopeDir string) tea.Cmd {
 	return func() tea.Msg {
+		if scopeDir != "" {
+			p, err := ScanProject(scopeDir)
+			if err != nil {
+				return projectsMsg{err: err}
+			}
+			return projectsMsg{projects: []Project{*p}}
+		}
 		projects, err := ScanProjects()
 		return projectsMsg{projects: projects, err: err}
 	}
@@ -219,6 +248,19 @@ func saveDetachedCmd(detached map[string]bool) tea.Cmd {
 func lazygitCmd(dir string) tea.Cmd {
 	return func() tea.Msg {
 		return focusedMsg{err: OpenLazygit(dir)}
+	}
+}
+
+// openTabCmd launches a new kitty tab running a fresh kmux scoped to dir, off
+// the UI goroutine. The new tab is an independent kmux session in the same
+// terminal window.
+func openTabCmd(dir string) tea.Cmd {
+	return func() tea.Msg {
+		exe, err := os.Executable()
+		if err != nil {
+			return focusedMsg{err: err}
+		}
+		return focusedMsg{err: OpenTab(exe, dir, "kmux::"+filepath.Base(dir))}
 	}
 }
 
@@ -328,6 +370,25 @@ func (m model) attachable() []string {
 	return out
 }
 
+// scopedSessions restricts a session list to the scoped project, dropping
+// sessions that belong to other projects (and the ungrouped bucket). In the
+// default, unscoped mode it returns the list unchanged. Matching mirrors
+// groupSessions so a kept session lands under the same project node.
+func (m model) scopedSessions(names []string) []string {
+	if m.scopeName == "" {
+		return names
+	}
+	scope := []string{m.scopeName}
+	out := make([]string, 0, len(names))
+	for _, s := range names {
+		rem := strings.TrimSuffix(strings.TrimSuffix(s, "_cl"), "_oc")
+		if _, _, ok := matchProject(rem, scope); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // isDetached reports whether the user has detached session name's pane.
 func (m model) isDetached(name string) bool {
 	return m.detached[name]
@@ -399,6 +460,37 @@ func (m model) lazygitDir(r *row) string {
 	return m.projectPath(proj, wt)
 }
 
+// projectRoot returns the main-worktree path of the project that Projects-panel
+// row r belongs to, for any of its rows: the folder header (project name encoded
+// in its collapse key), the main-worktree leaf, or a linked-worktree leaf. It
+// returns "" for non-project rows or when no project matches.
+func (m model) projectRoot(r *row) string {
+	if r == nil || r.section != sectionProjects {
+		return ""
+	}
+	if r.collapsible {
+		name := strings.TrimPrefix(r.key, "proj:")
+		for _, p := range m.projects {
+			if p.Name == name {
+				return p.Path
+			}
+		}
+		return ""
+	}
+	// Leaf: find the project owning this dir (its main path or a worktree path).
+	for _, p := range m.projects {
+		if p.Path == r.dir {
+			return p.Path
+		}
+		for _, w := range p.Worktrees {
+			if w.Path == r.dir {
+				return p.Path
+			}
+		}
+	}
+	return ""
+}
+
 // sessionDir resolves the working directory for an agent session by matching its
 // name (<project>[_<worktree>]_<cl|oc>) against the scanned projects, mirroring
 // how sessions are grouped under projects in the tree. It returns "" when no
@@ -442,7 +534,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tickMsg:
-		return m, tea.Batch(pollCmd(), projectsCmd(), tickCmd())
+		return m, tea.Batch(pollCmd(), projectsCmd(m.scopeDir), tickCmd())
 
 	case sessionsMsg:
 		if msg.err != nil {
@@ -450,7 +542,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.lastErr = ""
-		m.sessions = msg.names
+		m.sessions = m.scopedSessions(msg.names)
 		pruned := m.pruneDetached()
 		cmd := reconcileCmd(m.mgr, m.attachable())
 		if pruned {
@@ -573,6 +665,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "g":
 		if dir := m.lazygitDir(rowAt(rows, m.cursor)); dir != "" {
 			return m, lazygitCmd(dir)
+		}
+
+	case "t":
+		// Open the selected project's root/main worktree in a new kitty tab
+		// running its own kmux. Projects panel only (no-op for session rows).
+		if dir := m.projectRoot(rowAt(rows, m.cursor)); dir != "" {
+			return m, openTabCmd(dir)
 		}
 
 	case "1":
@@ -734,6 +833,7 @@ func helpHints(focused section) []keyHint {
 	}
 	return []keyHint{
 		{"↵/space", "launch agent"},
+		{"t", "open in tab"},
 		{"D", "kill session"},
 		{"g", "lazygit"},
 		{"j/k", "move"},
@@ -827,7 +927,7 @@ func (m model) View() string {
 		sLines = []string{dimStyle.Render("no agent sessions")}
 	}
 	if len(pLines) == 0 {
-		pLines = []string{dimStyle.Render("no projects in ~/git")}
+		pLines = []string{dimStyle.Render("no projects found")}
 	}
 	if m.lastErr != "" {
 		pLines = append(pLines, "", errStyle.Render("! "+m.lastErr))
@@ -864,8 +964,12 @@ func (m model) View() string {
 		ph = 3
 	}
 
+	projTitle := "[2]─Projects"
+	if m.scopeName != "" {
+		projTitle = "[2]─Project · " + m.scopeName
+	}
 	sessions := panel("[1]─Sessions", sLines, m.width, sh, focused == sectionSessions)
-	projects := panel("[2]─Projects", pLines, m.width, ph, focused == sectionProjects)
+	projects := panel(projTitle, pLines, m.width, ph, focused == sectionProjects)
 	parts := []string{sessions, projects}
 	if hh > 0 {
 		parts = append(parts, panel(bottomTitle, bottomBody, m.width, hh, m.prompt != nil))

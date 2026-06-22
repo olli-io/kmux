@@ -67,6 +67,21 @@ func Launch(loc SplitLocation, nextToID, bias int, title string, cmd ...string) 
 	return id, nil
 }
 
+// OpenTab launches a new kitty tab in the current OS window running a fresh kmux
+// scoped to dir, and focuses it. exe is the running kmux executable's path; the
+// new tab is an independent kmux session (own sidebar and panes) sharing the
+// same terminal. kitty populates KITTY_LISTEN_ON / KITTY_WINDOW_ID for the new
+// window, so the child kmux finds its socket and sidebar id.
+func OpenTab(exe, dir, title string) error {
+	_, err := kittenAt(
+		"launch",
+		"--type=tab",
+		"--cwd", dir,
+		"--tab-title", title,
+		exe, dir)
+	return err
+}
+
 // quickAccessMargin is the inset, in pixels, applied to every edge of the
 // quick-access terminal so it floats inside the kmux window rather than spanning
 // the full screen.
