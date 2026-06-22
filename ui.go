@@ -22,6 +22,7 @@ var (
 	errStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	okStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	activeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // project with a live session
+	gitStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("208")) // git glyph (orange)
 
 	chevronStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	selectedStyle = lipgloss.NewStyle().Background(lipgloss.Color("238"))
@@ -82,6 +83,7 @@ type agentPrompt struct {
 	session string // the row's claude session name (base for sessionForKind)
 	dir     string // working directory the agent launches in
 	cursor  int    // index into promptOptions
+	tab     bool   // launch the chosen agent in a standalone kitty tab, not a pane
 }
 
 // promptOptions are the agent kinds offered by the picker, in display order.
@@ -251,6 +253,21 @@ func lazygitCmd(dir string) tea.Cmd {
 	}
 }
 
+// openAgentTabCmd attaches an agent session in a new standalone kitty tab (not a
+// managed pane), off the UI goroutine. When agentCmd is non-empty it first
+// ensures a detached tmux session exists; for an already-running session pass an
+// empty agentCmd to skip creation and just attach.
+func openAgentTabCmd(name, dir, agentCmd string) tea.Cmd {
+	return func() tea.Msg {
+		if agentCmd != "" {
+			if err := NewDetachedSession(name, dir, agentCmd); err != nil {
+				return focusedMsg{err: err}
+			}
+		}
+		return focusedMsg{err: OpenAgentTab(name, name)}
+	}
+}
+
 // openTabCmd launches a new kitty tab running a fresh kmux scoped to dir, off
 // the UI goroutine. The new tab is an independent kmux session in the same
 // terminal window.
@@ -297,12 +314,23 @@ const (
 	folderOpenGlyph = "" // nf-fa-folder_open_o
 )
 
+// gitGlyph is the git icon (nf-md-git, U+F02A2) shown at the start of a
+// worktree/project leaf row.
+const gitGlyph = "\U000F02A2"
+
 // branchSuffix renders the dim " <glyph> <branch>" tail, or "" when no branch.
 func branchSuffix(branch string) string {
 	if branch == "" {
 		return ""
 	}
 	return dimStyle.Render(" " + branchGlyph + " " + branch)
+}
+
+// branchLabel labels a worktree/project leaf: a leading git glyph (mirroring the
+// folder glyph on collapsible headers), the project name (green when active), and
+// the dim branch tail.
+func branchLabel(name, branch string, active bool) string {
+	return gitStyle.Render(gitGlyph) + " " + projectName(name, active) + branchSuffix(branch)
 }
 
 // projectName renders a project/worktree name, colored green when it has a live
@@ -316,7 +344,7 @@ func projectName(name string, active bool) string {
 
 // projectLeaf labels a single-worktree project (name + branch).
 func (rowDeco) projectLeaf(p Project, active bool) string {
-	return projectName(p.Name, active) + branchSuffix(p.Branch)
+	return branchLabel(p.Name, p.Branch, active)
 }
 
 // projectFolder labels a multi-worktree project header (folder glyph + name).
@@ -333,15 +361,11 @@ func (rowDeco) projectFolder(p Project, open, active bool) string {
 // mainWorktree labels the main worktree row (repo name + branch), listed first
 // inside an expanded project folder.
 func (rowDeco) mainWorktree(p Project, active bool) string {
-	return projectName(p.Name, active) + branchSuffix(p.Branch)
+	return branchLabel(p.Name, p.Branch, active)
 }
 
 func (rowDeco) worktree(w Worktree, active bool) string {
-	label := projectName(w.Name, active)
-	if w.Branch != "" {
-		label += dimStyle.Render(" " + branchGlyph + " " + w.Branch)
-	}
-	return label
+	return branchLabel(w.Name, w.Branch, active)
 }
 
 // rows builds the combined, navigable row list: session rows first, then
@@ -674,6 +698,19 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, openTabCmd(dir)
 		}
 
+	case "f":
+		// Open the selected agent in its own kitty tab instead of a managed pane.
+		// Works in both panels: a session leaf attaches its session; a project row
+		// launches (or attaches) an agent, opening the picker when the kind is
+		// ambiguous.
+		r := rowAt(rows, m.cursor)
+		if cmd := m.openSessionTab(r); cmd != nil {
+			return m, cmd
+		}
+		if cmd, ok := m.launchProjectTab(r); ok {
+			return m, cmd
+		}
+
 	case "c":
 		// Launch (or focus) Claude for the selected project, skipping the picker.
 		if cmd := m.launchKindOn(rowAt(rows, m.cursor), "claude"); cmd != nil {
@@ -747,6 +784,58 @@ func (m *model) focusOrReattach(name string) tea.Cmd {
 	return tea.Batch(reattachSessionCmd(m.mgr, name), save)
 }
 
+// openSessionTab returns a command to attach a session leaf row's session in its
+// own standalone kitty tab (not a managed pane). The tmux session already
+// exists, so it just attaches. It returns nil when r is not a session leaf.
+func (m *model) openSessionTab(r *row) tea.Cmd {
+	if !isSessionLeaf(r) {
+		return nil
+	}
+	return openAgentTabCmd(r.label, "", "")
+}
+
+// launchProjectTab is the standalone-tab counterpart of launchProject: it opens
+// the project/worktree row's agent in its own kitty tab rather than a pane. When
+// exactly one agent kind is running it attaches that one directly; when neither
+// (or both) is running it opens the agent picker in tab mode so the chosen kind
+// launches into a tab. It returns (cmd, true) for rows it handled and
+// (nil, false) for rows it doesn't act on, mirroring launchProject.
+func (m *model) launchProjectTab(r *row) (tea.Cmd, bool) {
+	if r == nil || r.section != sectionProjects || r.session == "" {
+		return nil, false
+	}
+	claude := r.session
+	opencode := sessionForKind(r.session, "opencode")
+	var running []string
+	if m.hasSession(claude) {
+		running = append(running, claude)
+	}
+	if m.hasSession(opencode) {
+		running = append(running, opencode)
+	}
+	if len(running) == 1 {
+		return openAgentTabCmd(running[0], "", ""), true
+	}
+	m.prompt = &agentPrompt{
+		title:   filepath.Base(r.dir),
+		session: r.session,
+		dir:     r.dir,
+		tab:     true,
+	}
+	return nil, true
+}
+
+// launchKindTab is the standalone-tab counterpart of launchKind: it attaches the
+// given agent kind's session in a new kitty tab, creating the tmux session first
+// when it isn't already running.
+func (m *model) launchKindTab(session, dir, kind string) tea.Cmd {
+	name := sessionForKind(session, kind)
+	if m.hasSession(name) {
+		return openAgentTabCmd(name, "", "")
+	}
+	return openAgentTabCmd(name, dir, agentCommand(kind))
+}
+
 // launchProject activates a project/worktree leaf row. When exactly one agent
 // kind already has a running session it focuses that session directly, skipping
 // the picker — there is nothing to choose. When neither (or both) kinds are
@@ -783,6 +872,9 @@ func (m *model) launchProject(r *row) (tea.Cmd, bool) {
 func (m *model) confirmPrompt() tea.Cmd {
 	p := m.prompt
 	m.prompt = nil
+	if p.tab {
+		return m.launchKindTab(p.session, p.dir, promptOptions[p.cursor].kind)
+	}
 	return m.launchKind(p.session, p.dir, promptOptions[p.cursor].kind)
 }
 
@@ -871,6 +963,7 @@ func helpHints(focused section) []keyHint {
 			{"j/k", "Move"},
 			{"1/2", "Switch panel"},
 			{"↵/space", "Focus pane"},
+			{"f", "Fullscreen agent"},
 			{"d", "Detach"},
 			{"D", "Kill session"},
 			{"g", "Lazygit"},
@@ -882,7 +975,8 @@ func helpHints(focused section) []keyHint {
 		{"1/2", "Switch panel"},
 		{"↵/space", "Launch agent"},
 		{"c/o", "Launch claude/opencode"},
-		{"t", "Open in tab"},
+		{"f", "Fullscreen agent"},
+		{"t", "Kmux project in tab"},
 		{"D", "Kill session"},
 		{"g", "Lazygit"},
 		{"q", "Quit"},

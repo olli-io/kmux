@@ -195,8 +195,22 @@ func buildSessionRows(sessions, names []string, collapsed map[string]bool, attac
 // collapsible folder whose expanded children list the main worktree first,
 // then each linked worktree; every child is an actionable leaf.
 func buildProjectRows(projects []Project, collapsed map[string]bool, hasSession func(string) bool, deco rowDeco) []row {
-	var rows []row
+	// Folders (multi-worktree projects) sort to the top, single-worktree leaves
+	// after; order within each group is preserved.
+	ordered := make([]Project, 0, len(projects))
 	for _, p := range projects {
+		if len(p.Worktrees) > 0 {
+			ordered = append(ordered, p)
+		}
+	}
+	for _, p := range projects {
+		if len(p.Worktrees) == 0 {
+			ordered = append(ordered, p)
+		}
+	}
+
+	var rows []row
+	for _, p := range ordered {
 		mainSession := expectedSession(p.Name, "")
 		if len(p.Worktrees) == 0 {
 			rows = append(rows, row{

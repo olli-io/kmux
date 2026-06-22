@@ -83,6 +83,20 @@ func OpenTab(exe, dir, title string) error {
 	return err
 }
 
+// OpenAgentTab attaches the tmux session `name` in a new kitty tab in the
+// current OS window and focuses it. Unlike a managed agent pane, this tab is
+// fire-and-forget: Manager/Reconcile/Rebalance never see it, so it stays out of
+// the splits layout. Closing the tab only detaches tmux; the session keeps
+// running.
+func OpenAgentTab(name, title string) error {
+	_, err := kittenAt(
+		"launch",
+		"--type=tab",
+		"--tab-title", title,
+		"tmux", "attach", "-t", name)
+	return err
+}
+
 // OpenLazygit opens lazygit for dir in a new kitty tab in the current OS window
 // and focuses it. The tab runs lazygit with its cwd set to dir. This is
 // fire-and-forget: it is NOT a managed pane, so Manager/Reconcile/Rebalance never
