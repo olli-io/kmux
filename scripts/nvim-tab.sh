@@ -6,9 +6,17 @@
 # into the leader-key 'n' binding.
 #
 # Usage:
-#   nvim-tab.sh           open a fresh nvim ($HOME) in a new tab
-#   nvim-tab.sh <dir>     if an nvim session for <dir> exists, focus that tab;
-#                         otherwise open a new nvim in <dir>
+#   nvim-tab.sh [--focus] [--exclude-window <id>] [<dir>]
+#     (no <dir>)            open a fresh nvim ($HOME) in a new tab
+#     <dir>                 if an nvim session for <dir> exists, focus that tab;
+#                           otherwise open a new nvim in <dir>
+#     --focus              only focus an existing session for <dir>; never launch.
+#                           Exits 0 if a tab was focused, 1 if no session exists.
+#                           Lets a caller (e.g. nvim's dashboard) fall back to
+#                           opening the project in place when it isn't open yet.
+#     --exclude-window <id> skip the kitty window with this id when matching, so a
+#                           caller can avoid focusing its own window (the nvim that
+#                           launched this script).
 #
 # In all cases it raises the kitty window hosting nvim, or launches a new kitty
 # running nvim if none exists yet.
@@ -24,12 +32,30 @@ KITTEN=/Applications/kitty.app/Contents/MacOS/kitten
 NVIM=/opt/homebrew/bin/nvim
 AEROSPACE=/opt/homebrew/bin/aerospace
 
-# Optional target directory.
+# Parse options, then the optional target directory.
+FOCUS_ONLY=""
+EXCLUDE_WINDOW=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --focus) FOCUS_ONLY=1; shift ;;
+    --exclude-window)
+      [ -n "${2:-}" ] || { echo "nvim-tab: --exclude-window needs a value" >&2; exit 1; }
+      EXCLUDE_WINDOW="$2"; shift 2 ;;
+    --exclude-window=*) EXCLUDE_WINDOW="${1#*=}"; shift ;;
+    --) shift; break ;;
+    -*) echo "nvim-tab: unknown option: $1" >&2; exit 1 ;;
+    *) break ;;
+  esac
+done
+
 TARGET_CWD=""
 if [ -n "${1:-}" ]; then
   TARGET_CWD="$(cd "$1" 2>/dev/null && pwd -P)" \
     || { echo "nvim-tab: no such directory: $1" >&2; exit 1; }
 fi
+
+[ -n "$FOCUS_ONLY" ] && [ -z "$TARGET_CWD" ] \
+  && { echo "nvim-tab: --focus requires a directory" >&2; exit 1; }
 
 # Scans a `kitten @ ls` JSON blob ($KJSON) for nvim windows. If $MATCH_TITLE is
 # set, prints "<platform-window-id> <kitty-window-id>" for the window with that
@@ -39,9 +65,12 @@ read -r -d '' FIND_NVIM <<'PY' || true
 import json, os, sys
 data = json.loads(os.environ["KJSON"])
 want = os.environ.get("MATCH_TITLE", "")
+exclude = os.environ.get("EXCLUDE_WINDOW", "")
 for osw in data:
     for tab in osw.get("tabs", []):
         for w in tab.get("windows", []):
+            if exclude and str(w.get("id")) == exclude:
+                continue
             title = w.get("title") or ""
             if not title.startswith("nvim:"):
                 continue
@@ -63,7 +92,7 @@ scan_nvim() {
   for s in /tmp/mykitty-*; do
     [ -S "$s" ] || continue
     out="$("$KITTEN" @ --to "unix:$s" ls 2>/dev/null)" || continue
-    res="$(KJSON="$out" MATCH_TITLE="$match" python3 -c "$FIND_NVIM" 2>/dev/null)" || continue
+    res="$(KJSON="$out" MATCH_TITLE="$match" EXCLUDE_WINDOW="$EXCLUDE_WINDOW" python3 -c "$FIND_NVIM" 2>/dev/null)" || continue
     if [ -n "$res" ]; then printf '%s %s\n' "unix:$s" "$res"; return 0; fi
   done
   return 0
@@ -77,6 +106,9 @@ if [ -n "$TARGET_CWD" ]; then
     "$AEROSPACE" focus --window-id "$winid" >/dev/null 2>&1 || true
     exec "$KITTEN" @ --to "$sock" focus-window --match "id:$kid"
   fi
+  # --focus only ever focuses an existing tab; signal "not open" so the caller
+  # can fall back to opening the project itself.
+  [ -n "$FOCUS_ONLY" ] && exit 1
 fi
 
 # Otherwise open a fresh nvim (in $TARGET_CWD if given, else $HOME).
