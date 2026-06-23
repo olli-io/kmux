@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ type Worktree struct {
 	Name   string // short name relative to the project (see worktreeSegment)
 	Path   string
 	Branch string // short branch name, or "(detached)"
+	Dirty  bool   // has staged or unstaged changes (see isDirty)
 }
 
 // worktreeSegment derives a worktree's short name relative to its project: the
@@ -43,6 +45,7 @@ type Project struct {
 	Name      string
 	Path      string
 	Branch    string // current branch of the main worktree, or "(detached)"
+	Dirty     bool   // main worktree has staged or unstaged changes (see isDirty)
 	Worktrees []Worktree
 }
 
@@ -85,12 +88,14 @@ func ScanProjects() ([]Project, error) {
 			continue
 		}
 		branch, worktrees := listWorktrees(path)
-		projects = append(projects, Project{
+		p := Project{
 			Name:      e.Name(),
 			Path:      path,
 			Branch:    branch,
 			Worktrees: worktrees,
-		})
+		}
+		markDirty(&p)
+		projects = append(projects, p)
 		seen[path] = true
 	}
 
@@ -130,12 +135,37 @@ func ScanProject(dir string) (*Project, error) {
 		return nil, fmt.Errorf("%s is not a git repository", dir)
 	}
 	branch, worktrees := parseWorktrees(string(out), root)
-	return &Project{
+	p := &Project{
 		Name:      filepath.Base(root),
 		Path:      root,
 		Branch:    branch,
 		Worktrees: worktrees,
-	}, nil
+	}
+	markDirty(p)
+	return p, nil
+}
+
+// isDirty reports whether the git worktree at dir has any uncommitted changes —
+// staged, unstaged, or untracked. It runs the cheapest status query that still
+// covers every change kind (`git status --porcelain`) and treats any output as
+// dirty. Best-effort: a git error (not a repo, etc.) reads as clean so a status
+// hiccup never fails a scan.
+func isDirty(dir string) bool {
+	out, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
+	if err != nil {
+		return false
+	}
+	return len(bytes.TrimSpace(out)) > 0
+}
+
+// markDirty fills the Dirty flag of a project and each of its worktrees from the
+// working tree at each path. It is the only place a scan spends a git status
+// call per worktree, kept to one cheap invocation each.
+func markDirty(p *Project) {
+	p.Dirty = isDirty(p.Path)
+	for i := range p.Worktrees {
+		p.Worktrees[i].Dirty = isDirty(p.Worktrees[i].Path)
+	}
 }
 
 // firstWorktreePath returns the path from the first `worktree ` record of

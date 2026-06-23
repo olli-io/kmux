@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Config is kmux's optional, user-authored configuration, read from
@@ -16,6 +17,26 @@ type Config struct {
 	// repos discovered under ~/git. Entries may use ~ and $ENV references and may
 	// point at a main worktree, a linked worktree, or any subdirectory of one.
 	Projects []string
+
+	// IdleTimeout overrides how long an agent session may sit with a completely
+	// unchanged pane before kmux kills it to free memory (see idleTimeout). It is
+	// a Go duration string such as `2h`, `90m`, or `30m`. A zero value (omitted,
+	// or set to `0`/`off`/`never`) leaves the default in place; see IdleDuration.
+	IdleTimeout time.Duration
+
+	// idleSet records whether idle_timeout appeared in the file at all, so
+	// IdleDuration can tell "use the default" from an explicit "never reap".
+	idleSet bool
+}
+
+// IdleDuration resolves the effective idle-kill timeout: the configured value if
+// idle_timeout was set (including an explicit 0, which disables reaping), else
+// the built-in idleTimeout default.
+func (c Config) IdleDuration() time.Duration {
+	if c.idleSet {
+		return c.IdleTimeout
+	}
+	return idleTimeout
 }
 
 // configFile returns the path to kmux's config file
@@ -48,9 +69,10 @@ func LoadConfig() (Config, error) {
 }
 
 // parseConfig reads a deliberately small subset of YAML: top-level `key:` lines
-// and `- item` list entries beneath them, plus `#` comments and blank lines. It
-// is enough for kmux's flat config without pulling in a YAML dependency. Only
-// the `projects:` list is currently recognized; unknown keys are ignored.
+// (with an optional inline scalar value) and `- item` list entries beneath them,
+// plus `#` comments and blank lines. It is enough for kmux's flat config without
+// pulling in a YAML dependency. The `projects:` list and `idle_timeout:` scalar
+// are recognized; unknown keys are ignored.
 func parseConfig(r io.Reader) (Config, error) {
 	var cfg Config
 	key := ""
@@ -69,13 +91,36 @@ func parseConfig(r io.Reader) (Config, error) {
 			}
 			continue
 		}
-		// A top-level key opens a new section; any inline value is ignored, since
-		// kmux only consumes list-valued keys.
-		if name, _, ok := strings.Cut(line, ":"); ok {
-			key = strings.TrimSpace(name)
+		// A top-level key opens a new section. An inline scalar value is consumed
+		// for the keys kmux recognizes; otherwise it just opens a list section.
+		name, val, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(name)
+		if v := cleanScalar(val); v != "" {
+			applyScalar(&cfg, key, v)
 		}
 	}
 	return cfg, sc.Err()
+}
+
+// applyScalar interprets an inline `key: value` setting. Unrecognized keys and
+// unparseable values are ignored, keeping a typo from failing the whole config.
+func applyScalar(cfg *Config, key, val string) {
+	switch key {
+	case "idle_timeout":
+		// `0`, `off`, and `never` all mean "disable reaping"; otherwise parse a
+		// Go duration like `2h` or `90m`.
+		switch strings.ToLower(val) {
+		case "0", "off", "never":
+			cfg.IdleTimeout, cfg.idleSet = 0, true
+		default:
+			if d, err := time.ParseDuration(val); err == nil {
+				cfg.IdleTimeout, cfg.idleSet = d, true
+			}
+		}
+	}
 }
 
 // cleanScalar normalizes a scalar value: it unwraps surrounding single or double

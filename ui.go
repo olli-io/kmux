@@ -31,8 +31,7 @@ var (
 	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	activeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))  // project with a live session
-	gitStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("208")) // git glyph (orange)
-	folderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))  // folder glyph (blue)
+	folderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // folder glyph (blue)
 
 	chevronStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	selectedStyle = lipgloss.NewStyle().Background(lipgloss.Color("238"))
@@ -65,7 +64,10 @@ type projectsMsg struct {
 }
 type spinnerMsg struct{}
 type reconciledMsg struct{ errs []error }
-type attentionMsg struct{ states map[string]attentionState }
+type attentionMsg struct {
+	states map[string]attentionState
+	hashes map[string]uint64 // session name -> pane fingerprint, for idle tracking
+}
 type focusedMsg struct{ err error }
 type savedMsg struct{ err error }
 
@@ -76,6 +78,7 @@ type model struct {
 	collapsed     map[string]bool           // collapse key -> collapsed
 	detached      map[string]bool           // session name -> pane detached (tmux still running)
 	attention     map[string]attentionState // session name -> latest detected attention state
+	idle          idleTracker               // per-session pane-stability clock for idle-kill
 	cursor        int                       // index into rows()
 	spinnerFrame  int                       // animation frame for busy-session glyphs
 	prompt        *agentPrompt              // non-nil while the agent-picker overlay is open
@@ -122,11 +125,15 @@ func newModel(mgr *Manager, scopeDir string) model {
 	if scopeDir != "" {
 		scopeName = filepath.Base(scopeDir)
 	}
+	// Resolve the idle-kill timeout from config; a read error falls back to the
+	// default, matching the optional, best-effort handling of the rest of config.
+	cfg, _ := LoadConfig()
 	return model{
 		mgr:       mgr,
 		collapsed: map[string]bool{},
 		detached:  detached,
 		attention: map[string]attentionState{},
+		idle:      newIdleTracker(cfg.IdleDuration()),
 		scopeDir:  scopeDir,
 		scopeName: scopeName,
 	}
@@ -164,15 +171,20 @@ func attentionCmd(sessions []string) tea.Cmd {
 	snap := append([]string(nil), sessions...)
 	return func() tea.Msg {
 		states := make(map[string]attentionState, len(snap))
+		hashes := make(map[string]uint64, len(snap))
 		for _, s := range snap {
 			text, err := CapturePane(s)
 			if err != nil {
+				// No hash recorded: the idle tracker treats this session as gone
+				// for this poll and resets its clock when capture recovers, so a
+				// flaky capture never causes a kill.
 				states[s] = attnUnknown
 				continue
 			}
 			states[s] = classifyAttention(AgentKind(s), text)
+			hashes[s] = hashPane(text)
 		}
-		return attentionMsg{states: states}
+		return attentionMsg{states: states, hashes: hashes}
 	}
 }
 
@@ -295,6 +307,13 @@ func lazygitCmd(dir string) tea.Cmd {
 	}
 }
 
+// editorCmd opens (or focuses) an editor for dir off the UI goroutine.
+func editorCmd(dir string) tea.Cmd {
+	return func() tea.Msg {
+		return focusedMsg{err: OpenEditor(dir)}
+	}
+}
+
 // openAgentTabCmd attaches an agent session in a new standalone kitty tab (not a
 // managed pane), off the UI goroutine. When agentCmd is non-empty it first
 // ensures a detached tmux session exists; for an already-running session pass an
@@ -403,10 +422,6 @@ const (
 	folderOpenGlyph = "" // nf-fa-folder_open_o
 )
 
-// gitGlyph is the git icon (nf-md-git, U+F02A2) shown at the start of a
-// worktree/project leaf row.
-const gitGlyph = "\U000F02A2"
-
 // branchSuffix renders the dim " <glyph> <branch>" tail, or "" when no branch.
 func branchSuffix(branch string) string {
 	if branch == "" {
@@ -415,11 +430,21 @@ func branchSuffix(branch string) string {
 	return dimStyle.Render(" " + branchGlyph + " " + branch)
 }
 
-// branchLabel labels a worktree/project leaf: a leading git glyph (mirroring the
-// folder glyph on collapsible headers), the project name (green when active), and
-// the dim branch tail.
-func branchLabel(name, branch string, active bool) string {
-	return gitStyle.Render(gitGlyph) + " " + projectName(name, active) + branchSuffix(branch)
+// branchLabel labels a worktree/project leaf: a leading git-status mark (in place
+// of a plain git glyph), the project name (green when active), and the dim branch
+// tail.
+func branchLabel(name, branch string, active, dirty bool) string {
+	return gitStatusGlyph(dirty) + " " + projectName(name, active) + branchSuffix(branch)
+}
+
+// gitStatusGlyph marks a worktree's git state at the head of its row: a red "M"
+// when it has uncommitted (staged or unstaged) changes, a green check when it is
+// clean.
+func gitStatusGlyph(dirty bool) string {
+	if dirty {
+		return errStyle.Render("M")
+	}
+	return okStyle.Render("✓")
 }
 
 // projectName renders a project/worktree name, colored green when it has a live
@@ -433,7 +458,7 @@ func projectName(name string, active bool) string {
 
 // projectLeaf labels a single-worktree project (name + branch).
 func (rowDeco) projectLeaf(p Project, active bool) string {
-	return branchLabel(p.Name, p.Branch, active)
+	return branchLabel(p.Name, p.Branch, active, p.Dirty)
 }
 
 // projectFolder labels a multi-worktree project header (folder glyph + name).
@@ -444,7 +469,28 @@ func (rowDeco) projectFolder(p Project, open, active bool) string {
 	if open {
 		glyph = folderOpenGlyph
 	}
-	return folderStyle.Render(glyph) + " " + projectName(p.Name, active)
+	label := folderStyle.Render(glyph) + " " + projectName(p.Name, active)
+	// When collapsed the worktree rows (with their own marks) are hidden, so the
+	// header carries an aggregate status: dirty if the main worktree or any linked
+	// worktree has changes. Expanded, the per-row marks below say it instead.
+	if !open {
+		label += " " + gitStatusGlyph(projectDirty(p))
+	}
+	return label
+}
+
+// projectDirty reports whether a project's main worktree or any of its linked
+// worktrees has uncommitted changes.
+func projectDirty(p Project) bool {
+	if p.Dirty {
+		return true
+	}
+	for _, w := range p.Worktrees {
+		if w.Dirty {
+			return true
+		}
+	}
+	return false
 }
 
 // sessionFolder labels a multi-session project header in the Sessions panel,
@@ -462,11 +508,11 @@ func (rowDeco) sessionFolder(name string, open bool) string {
 // mainWorktree labels the main worktree row (repo name + branch), listed first
 // inside an expanded project folder.
 func (rowDeco) mainWorktree(p Project, active bool) string {
-	return branchLabel(p.Name, p.Branch, active)
+	return branchLabel(p.Name, p.Branch, active, p.Dirty)
 }
 
 func (rowDeco) worktree(w Worktree, active bool) string {
-	return branchLabel(w.Name, w.Branch, active)
+	return branchLabel(w.Name, w.Branch, active, w.Dirty)
 }
 
 // rows builds the combined, navigable row list: session rows first, then
@@ -589,6 +635,16 @@ func (m model) lazygitDir(r *row) string {
 	return m.projectPath(proj, wt)
 }
 
+// editorDir resolves the directory to open the editor in for row r. It reuses
+// lazygitDir (project/worktree leaves and session rows) and falls back to the
+// project root so a multi-worktree folder header opens its editor too.
+func (m model) editorDir(r *row) string {
+	if dir := m.lazygitDir(r); dir != "" {
+		return dir
+	}
+	return m.projectRoot(r)
+}
+
 // projectRoot returns the main-worktree path of the project that Projects-panel
 // row r belongs to, for any of its rows: the folder header (project name encoded
 // in its collapse key), the main-worktree leaf, or a linked-worktree leaf. It
@@ -700,7 +756,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case attentionMsg:
 		m.attention = msg.states // display-only: no reconcile, no pane churn
-		return m, nil
+		// Reap agent sessions whose pane has sat unchanged past idleTimeout,
+		// freeing the memory their idle agent processes hold.
+		busy := make(map[string]bool, len(msg.states))
+		for s, st := range msg.states {
+			busy[s] = st == attnBusy
+		}
+		kill := m.idle.reap(time.Now(), msg.hashes, busy)
+		if len(kill) == 0 {
+			return m, nil
+		}
+		cmds := make([]tea.Cmd, len(kill))
+		for i, name := range kill {
+			cmds[i] = killSessionCmd(name)
+		}
+		return m, tea.Batch(cmds...)
 
 	case focusedMsg:
 		if msg.err != nil {
@@ -803,6 +873,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "g":
 		if dir := m.lazygitDir(rowAt(rows, m.cursor)); dir != "" {
 			return m, lazygitCmd(dir)
+		}
+
+	case "e":
+		// Open (or focus) the editor for the selected row's directory. Works in
+		// both panels, mirroring lazygit.
+		if dir := m.editorDir(rowAt(rows, m.cursor)); dir != "" {
+			return m, editorCmd(dir)
 		}
 
 	case "t":
@@ -1092,6 +1169,7 @@ func helpHints(focused section) []keyHint {
 			{"d", "Detach"},
 			{"D", "Kill session"},
 			{"g", "Lazygit"},
+			{"e", "Editor"},
 			{"q", "Quit"},
 		}
 	}
@@ -1104,6 +1182,7 @@ func helpHints(focused section) []keyHint {
 		{"t", "Kmux project in tab"},
 		{"D", "Kill session"},
 		{"g", "Lazygit"},
+		{"e", "Editor"},
 		{"q", "Quit"},
 	}
 }

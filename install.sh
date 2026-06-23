@@ -77,6 +77,7 @@ if [ -f "$SCRIPT_DIR/go.mod" ]; then
   info "Installing to $DEST/$BIN_NAME ..."
   $SUDO install -m 0755 "$TMP_BIN" "$DEST/$BIN_NAME"
   rm -f "$TMP_BIN"
+  HELPER_SRC="$SCRIPT_DIR/scripts/nvim-tab.sh"
 else
   info "No local checkout found; fetching via 'go install' from $REPO_URL ..."
   TMP_GOBIN="$(mktemp -d)"
@@ -85,6 +86,20 @@ else
   info "Installing to $DEST/$BIN_NAME ..."
   $SUDO install -m 0755 "$TMP_GOBIN/$BIN_NAME" "$DEST/$BIN_NAME"
   rm -rf "$TMP_GOBIN"
+  HELPER_SRC=""
+fi
+
+# ---------------------------------------------------------------------------
+# Install the nvim-tab.sh helper next to the binary.
+# kmux's 'e' (editor) binding execs it from beside the installed binary; the
+# aerospace leader-key binding can point at the same $DEST/nvim-tab.sh.
+# Only available from a source checkout (the 'go install' path has no scripts/).
+# ---------------------------------------------------------------------------
+if [ -n "$HELPER_SRC" ] && [ -f "$HELPER_SRC" ]; then
+  info "Installing nvim-tab.sh to $DEST/nvim-tab.sh ..."
+  $SUDO install -m 0755 "$HELPER_SRC" "$DEST/nvim-tab.sh"
+else
+  warn "nvim-tab.sh helper not installed (no local scripts/); the editor binding needs $DEST/nvim-tab.sh."
 fi
 
 # ---------------------------------------------------------------------------
