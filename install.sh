@@ -19,8 +19,8 @@ have()  { command -v "$1" >/dev/null 2>&1; }
 # ---------------------------------------------------------------------------
 OS="$(uname -s)"
 case "$OS" in
-  Darwin) PLATFORM="macOS" ;;
-  Linux)  PLATFORM="Linux" ;;
+  Darwin) PLATFORM="macOS"; HELPER_BASENAME="nvim-tab.sh" ;;
+  Linux)  PLATFORM="Linux"; HELPER_BASENAME="nvim-tab-wayland.sh" ;;
   *)      die "unsupported OS: $OS (only macOS and Linux are supported)" ;;
 esac
 info "Detected platform: $PLATFORM ($(uname -m))"
@@ -77,7 +77,7 @@ if [ -f "$SCRIPT_DIR/go.mod" ]; then
   info "Installing to $DEST/$BIN_NAME ..."
   $SUDO install -m 0755 "$TMP_BIN" "$DEST/$BIN_NAME"
   rm -f "$TMP_BIN"
-  HELPER_SRC="$SCRIPT_DIR/scripts/nvim-tab.sh"
+  HELPER_SRC="$SCRIPT_DIR/scripts/$HELPER_BASENAME"
 else
   info "No local checkout found; fetching via 'go install' from $REPO_URL ..."
   TMP_GOBIN="$(mktemp -d)"
@@ -90,9 +90,11 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Install the nvim-tab.sh helper next to the binary.
-# kmux's 'e' (editor) binding execs it from beside the installed binary; the
-# aerospace leader-key binding can point at the same $DEST/nvim-tab.sh.
+# Install the nvim-tab helper next to the binary, always as $DEST/nvim-tab.sh.
+# The source is platform-specific (macOS: scripts/nvim-tab.sh + aerospace;
+# Linux: scripts/nvim-tab-wayland.sh + Hyprland), but the installed name is
+# fixed so kmux's 'e' (editor) binding and the window-manager leader-key binding
+# can both point at $DEST/nvim-tab.sh.
 # Only available from a source checkout (the 'go install' path has no scripts/).
 # ---------------------------------------------------------------------------
 if [ -n "$HELPER_SRC" ] && [ -f "$HELPER_SRC" ]; then
