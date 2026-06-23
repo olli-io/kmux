@@ -8,9 +8,9 @@ import (
 	"strings"
 )
 
-// agentSession matches tmux session names ending in _cl (claude) or _oc
+// agentSession matches tmux session names ending in ~cl (claude) or ~oc
 // (opencode), case-insensitively.
-var agentSession = regexp.MustCompile(`(?i)_(cl|oc)$`)
+var agentSession = regexp.MustCompile(`(?i)~(cl|oc)$`)
 
 // AgentKind returns "claude", "opencode", or "" for a session name. The agent
 // suffix is matched case-insensitively.
@@ -25,13 +25,13 @@ func AgentKind(name string) string {
 	}
 }
 
-// agentSuffix reports whether name ends in "_"+suffix, case-insensitively.
+// agentSuffix reports whether name ends in "~"+suffix, case-insensitively.
 func agentSuffix(name, suffix string) bool {
-	return strings.HasSuffix(strings.ToLower(name), "_"+suffix)
+	return strings.HasSuffix(strings.ToLower(name), "~"+suffix)
 }
 
 // ListAgentSessions returns the sorted names of live tmux sessions whose names
-// end in _cl or _oc. A missing tmux server (no sessions) yields an empty slice,
+// end in ~cl or ~oc. A missing tmux server (no sessions) yields an empty slice,
 // not an error.
 func ListAgentSessions() ([]string, error) {
 	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
@@ -52,6 +52,21 @@ func ListAgentSessions() ([]string, error) {
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+// CapturePane returns the visible pane text of a session's active pane (the live
+// screen, no scrollback). A missing session or dead tmux server yields empty text,
+// not an error, mirroring ListAgentSessions so attention polling never fails the
+// whole cycle over one gone session.
+func CapturePane(session string) (string, error) {
+	out, err := exec.Command("tmux", "capture-pane", "-t", session, "-p").Output()
+	if err != nil {
+		if _, ok := err.(*exec.ExitError); ok {
+			return "", nil // no such session / no server: treat as empty
+		}
+		return "", err
+	}
+	return string(out), nil
 }
 
 // KillSession kills the tmux session named `name` outright, ending the agent

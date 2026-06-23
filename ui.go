@@ -14,15 +14,25 @@ import (
 
 const pollInterval = 2 * time.Second
 
+// spinnerInterval is how often the busy-session animation advances a frame.
+// Faster than pollInterval so the spinner reads as smooth motion without
+// re-listing sessions each tick.
+const spinnerInterval = 150 * time.Millisecond
+
+// spinnerFrames is the rotating braille glyph cycle shown for a busy session: an
+// arc of 4 filled dots (with a 2-dot gap) sweeping clockwise around the perimeter
+// of one braille cell.
+var spinnerFrames = []string{"⠹", "⠼", "⠶", "⠧", "⠏", "⠛"}
+
 var (
-	clStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // claude
-	ocStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // opencode
-	dimStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	detachedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // detached session (tmux alive, no pane)
-	errStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
-	okStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	activeStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // project with a live session
-	gitStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("208")) // git glyph (orange)
+	clStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // claude
+	ocStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("213")) // opencode (pink)
+	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	activeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))  // project with a live session
+	gitStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("208")) // git glyph (orange)
+	folderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))  // folder glyph (blue)
 
 	chevronStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	selectedStyle = lipgloss.NewStyle().Background(lipgloss.Color("238"))
@@ -53,7 +63,9 @@ type projectsMsg struct {
 	projects []Project
 	err      error
 }
+type spinnerMsg struct{}
 type reconciledMsg struct{ errs []error }
+type attentionMsg struct{ states map[string]attentionState }
 type focusedMsg struct{ err error }
 type savedMsg struct{ err error }
 
@@ -61,10 +73,12 @@ type model struct {
 	mgr           *Manager
 	sessions      []string
 	projects      []Project
-	collapsed     map[string]bool // collapse key -> collapsed
-	detached      map[string]bool // session name -> pane detached (tmux still running)
-	cursor        int             // index into rows()
-	prompt        *agentPrompt    // non-nil while the agent-picker overlay is open
+	collapsed     map[string]bool           // collapse key -> collapsed
+	detached      map[string]bool           // session name -> pane detached (tmux still running)
+	attention     map[string]attentionState // session name -> latest detected attention state
+	cursor        int                       // index into rows()
+	spinnerFrame  int                       // animation frame for busy-session glyphs
+	prompt        *agentPrompt              // non-nil while the agent-picker overlay is open
 	lastErr       string
 	width, height int
 
@@ -112,6 +126,7 @@ func newModel(mgr *Manager, scopeDir string) model {
 		mgr:       mgr,
 		collapsed: map[string]bool{},
 		detached:  detached,
+		attention: map[string]attentionState{},
 		scopeDir:  scopeDir,
 		scopeName: scopeName,
 	}
@@ -119,11 +134,16 @@ func newModel(mgr *Manager, scopeDir string) model {
 
 func (m model) Init() tea.Cmd {
 	// Kick off an immediate poll, then tick on the interval.
-	return tea.Batch(pollCmd(), projectsCmd(m.scopeDir), tickCmd())
+	return tea.Batch(pollCmd(), projectsCmd(m.scopeDir), tickCmd(), spinnerCmd())
 }
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(pollInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+// spinnerCmd schedules the next busy-animation frame.
+func spinnerCmd() tea.Cmd {
+	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return spinnerMsg{} })
 }
 
 // pollCmd lists agent sessions off the UI goroutine.
@@ -131,6 +151,28 @@ func pollCmd() tea.Cmd {
 	return func() tea.Msg {
 		names, err := ListAgentSessions()
 		return sessionsMsg{names: names, err: err}
+	}
+}
+
+// attentionCmd captures each session's tmux pane off the UI goroutine and
+// classifies its attention state. It runs sequentially (capture-pane is a cheap
+// local call and there are few sessions) and is best-effort: a capture failure
+// for one session yields attnUnknown for it rather than failing the whole batch.
+// It is fed the full session list (including detached ones — tmux keeps their
+// buffers), so a detached-but-waiting agent still shows its status glyph.
+func attentionCmd(sessions []string) tea.Cmd {
+	snap := append([]string(nil), sessions...)
+	return func() tea.Msg {
+		states := make(map[string]attentionState, len(snap))
+		for _, s := range snap {
+			text, err := CapturePane(s)
+			if err != nil {
+				states[s] = attnUnknown
+				continue
+			}
+			states[s] = classifyAttention(AgentKind(s), text)
+		}
+		return attentionMsg{states: states}
 	}
 }
 
@@ -282,35 +324,82 @@ func openTabCmd(dir string) tea.Cmd {
 }
 
 // rowDeco renders styled row labels/badges. It keeps lipgloss styling out of the
-// pure tree-building code in tree.go.
-type rowDeco struct{}
+// pure tree-building code in tree.go. spinner is the current busy-animation frame,
+// advanced on each spinner tick.
+type rowDeco struct{ spinner int }
 
-func (rowDeco) session(name string, depth int, attached, detached bool) row {
-	var badge string
-	switch AgentKind(name) {
-	case "claude":
-		badge = clStyle.Render("Claude")
-	case "opencode":
-		badge = ocStyle.Render("OpenCode")
+func (d rowDeco) session(name string, depth int, st attentionState, attached, detached bool) row {
+	// The leading mark is the attention glyph (what the agent is doing); the
+	// attach state (A/D) rides on the agent badge instead.
+	return row{
+		section: sectionSessions,
+		depth:   depth,
+		label:   sessionLabel(name),
+		badge:   agentBadge(name, attached, detached),
+		mark:    attentionGlyph(st, d.spinner),
+		session: name,
 	}
-	// ✓ attached (live pane); ○ detached (tmux alive, pane closed); · neither.
-	mark := dimStyle.Render("·")
+}
+
+// sessionLabel strips the agent suffix (~cl / ~oc) from a session name, leaving the
+// project/worktree path the row displays (the agent kind shows as a trailing badge).
+func sessionLabel(name string) string {
+	return strings.TrimSuffix(strings.TrimSuffix(name, "~cl"), "~oc")
+}
+
+// agentBadge renders the styled agent-kind badge for a session name ("CC" for
+// Claude, "OC" for OpenCode), prefixed with its attach state: a green "A" when
+// attached (live pane) or a red "D" when detached (tmux alive, pane closed), so
+// the badge reads "A~CC"/"D~CC"/"CC" or "A~OC"/"D~OC"/"OC". The prefix keeps its own
+// color (green/red) distinct from the agent color. Returns "" for a non-agent name.
+func agentBadge(name string, attached, detached bool) string {
+	prefix := ""
 	switch {
 	case attached:
-		mark = okStyle.Render("✓")
+		prefix = okStyle.Render("A") + dimStyle.Render("~")
 	case detached:
-		mark = detachedStyle.Render("○")
+		prefix = errStyle.Render("D") + dimStyle.Render("~")
 	}
-	return row{section: sectionSessions, depth: depth, label: name, badge: badge, mark: mark}
+	switch AgentKind(name) {
+	case "claude":
+		return prefix + clStyle.Render("CC")
+	case "opencode":
+		return prefix + ocStyle.Render("OC")
+	}
+	return ""
+}
+
+// attentionGlyph returns the styled status glyph for an attention state, shown at
+// the head of a session row. For the busy state it returns the spinner frame
+// selected by frame, producing a rotating braille animation across ticks.
+func attentionGlyph(st attentionState, frame int) string {
+	switch st {
+	case attnPermission:
+		return errStyle.Render("!")
+	case attnWaiting:
+		return okStyle.Render("✓")
+	case attnBusy:
+		return dimStyle.Render(spinnerFrames[frame%len(spinnerFrames)])
+	default: // attnUnknown
+		return dimStyle.Render("·")
+	}
 }
 
 // branchGlyph is the git-branch symbol () shown before a branch name.
 const branchGlyph = ""
 
-// folderGlyph / folderOpenGlyph are the outlined folder symbols shown before a
-// multi-worktree project header: closed when collapsed, open when expanded.
+// chevronCollapsed / chevronExpanded are the nerdfont chevrons shown before a
+// collapsible header: right-pointing when collapsed, down-pointing when expanded.
 const (
-	folderGlyph     = "" // nf-fa-folder_o
+	chevronCollapsed = "" // nf-fa-chevron_right
+	chevronExpanded  = "" // nf-fa-chevron_down
+)
+
+// folderGlyph / folderOpenGlyph are the folder symbols shown before a
+// multi-worktree project header: a filled folder when collapsed, the outlined
+// open folder when expanded.
+const (
+	folderGlyph     = "" // nf-fa-folder
 	folderOpenGlyph = "" // nf-fa-folder_open_o
 )
 
@@ -355,7 +444,19 @@ func (rowDeco) projectFolder(p Project, open, active bool) string {
 	if open {
 		glyph = folderOpenGlyph
 	}
-	return glyph + " " + projectName(p.Name, active)
+	return folderStyle.Render(glyph) + " " + projectName(p.Name, active)
+}
+
+// sessionFolder labels a multi-session project header in the Sessions panel,
+// mirroring projectFolder: a folder glyph (open when expanded) plus the project
+// name. The per-session attention/agent state rides on the child rows, so the
+// header itself stays an uncolored grouping node.
+func (rowDeco) sessionFolder(name string, open bool) string {
+	glyph := folderGlyph
+	if open {
+		glyph = folderOpenGlyph
+	}
+	return folderStyle.Render(glyph) + " " + name
 }
 
 // mainWorktree labels the main worktree row (repo name + branch), listed first
@@ -371,10 +472,14 @@ func (rowDeco) worktree(w Worktree, active bool) string {
 // rows builds the combined, navigable row list: session rows first, then
 // project rows. The cursor indexes into this slice.
 func (m model) rows() []row {
-	deco := rowDeco{}
-	sess := buildSessionRows(m.sessions, projectNames(m.projects), m.collapsed, m.mgr.Attached, m.isDetached, deco)
+	deco := rowDeco{spinner: m.spinnerFrame}
+	names := projectNames(m.projects)
+	sess := buildSessionRows(m.sessions, names, m.collapsed, m.attention, m.mgr.Attached, m.isDetached, deco)
 	proj := buildProjectRows(m.projects, m.collapsed, m.hasSessionAny, deco)
-	return append(sess, proj...)
+	out := make([]row, 0, len(sess)+len(proj))
+	out = append(out, sess...)
+	out = append(out, proj...)
+	return out
 }
 
 // attachable is m.sessions minus detached sessions: the set reconcile keeps
@@ -405,7 +510,7 @@ func (m model) scopedSessions(names []string) []string {
 	scope := []string{m.scopeName}
 	out := make([]string, 0, len(names))
 	for _, s := range names {
-		rem := strings.TrimSuffix(strings.TrimSuffix(s, "_cl"), "_oc")
+		rem := strings.TrimSuffix(strings.TrimSuffix(s, "~cl"), "~oc")
 		if _, _, ok := matchProject(rem, scope); ok {
 			out = append(out, s)
 		}
@@ -436,7 +541,7 @@ func (m model) hasSession(name string) bool {
 }
 
 // hasSessionAny reports whether a project/worktree has a running session of
-// either agent kind. claudeName is the _cl session name (as produced by
+// either agent kind. claudeName is the ~cl session name (as produced by
 // expectedSession); the opencode name is derived by suffix swap. It drives the
 // "active" green coloring of project rows so an opencode-only project still
 // reads as live.
@@ -453,7 +558,7 @@ func (m model) killTarget(r *row) string {
 		return ""
 	}
 	if isSessionLeaf(r) {
-		return r.label
+		return r.session
 	}
 	if r.section == sectionProjects && r.session != "" && m.hasSession(r.session) {
 		return r.session
@@ -476,7 +581,7 @@ func (m model) lazygitDir(r *row) string {
 		return ""
 	}
 	if !r.collapsible {
-		return m.sessionDir(r.label) // session leaf: resolve from its name
+		return m.sessionDir(r.session) // session leaf: resolve from its name
 	}
 	// Sessions-panel group header: derive the dir from its collapse key, which
 	// encodes "sess:<project>" or "sess:<project>/<worktree>".
@@ -516,11 +621,11 @@ func (m model) projectRoot(r *row) string {
 }
 
 // sessionDir resolves the working directory for an agent session by matching its
-// name (<project>[_<worktree>]_<cl|oc>) against the scanned projects, mirroring
+// name (<project>[/<worktree>]~<cl|oc>) against the scanned projects, mirroring
 // how sessions are grouped under projects in the tree. It returns "" when no
 // project matches (e.g. ungrouped sessions).
 func (m model) sessionDir(name string) string {
-	rem := strings.TrimSuffix(strings.TrimSuffix(name, "_cl"), "_oc")
+	rem := strings.TrimSuffix(strings.TrimSuffix(name, "~cl"), "~oc")
 	proj, wt, ok := matchProject(rem, projectNames(m.projects))
 	if !ok {
 		return ""
@@ -560,6 +665,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		return m, tea.Batch(pollCmd(), projectsCmd(m.scopeDir), tickCmd())
 
+	case spinnerMsg:
+		m.spinnerFrame++
+		return m, spinnerCmd()
+
 	case sessionsMsg:
 		if msg.err != nil {
 			m.lastErr = msg.err.Error()
@@ -568,7 +677,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastErr = ""
 		m.sessions = m.scopedSessions(msg.names)
 		pruned := m.pruneDetached()
-		cmd := reconcileCmd(m.mgr, m.attachable())
+		// Refresh attention off the freshest session list (drives the session glyphs).
+		cmd := tea.Batch(reconcileCmd(m.mgr, m.attachable()), attentionCmd(m.sessions))
 		if pruned {
 			cmd = tea.Batch(cmd, saveDetachedCmd(m.detached))
 		}
@@ -586,6 +696,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg.errs) > 0 {
 			m.lastErr = msg.errs[0].Error()
 		}
+		return m, nil
+
+	case attentionMsg:
+		m.attention = msg.states // display-only: no reconcile, no pane churn
 		return m, nil
 
 	case focusedMsg:
@@ -658,8 +772,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// can be re-opened with enter/l. Marking it detached keeps reconcile from
 		// immediately re-attaching a pane; the reconcile below closes the current
 		// pane right away.
-		if r := rowAt(rows, m.cursor); isSessionLeaf(r) && !m.detached[r.label] {
-			m.detached[r.label] = true
+		if r := rowAt(rows, m.cursor); isSessionLeaf(r) && !m.detached[r.session] {
+			m.detached[r.session] = true
 			return m, tea.Batch(reconcileCmd(m.mgr, m.attachable()), saveDetachedCmd(m.detached))
 		}
 	case "D":
@@ -761,15 +875,25 @@ func isSessionLeaf(r *row) bool {
 	return r != nil && r.section == sectionSessions && !r.collapsible
 }
 
-// openOrFocusSession returns a command to focus the agent pane for a session
-// leaf row, re-opening a pane first when the session is running but currently
-// has none (e.g. its pane was closed by hand). It returns nil when r is not a
-// session leaf.
+// actionSession returns the agent session name a focus/open action targets for row
+// r: a session leaf carries it in its session field. It returns "" for any other
+// row.
+func actionSession(r *row) string {
+	if isSessionLeaf(r) {
+		return r.session
+	}
+	return ""
+}
+
+// openOrFocusSession returns a command to focus the agent pane for a session leaf
+// row, re-opening a pane first when the session is running but currently has none
+// (e.g. its pane was closed by hand). It returns nil when r targets no session.
 func (m *model) openOrFocusSession(r *row) tea.Cmd {
-	if !isSessionLeaf(r) {
+	name := actionSession(r)
+	if name == "" {
 		return nil
 	}
-	return m.focusOrReattach(r.label)
+	return m.focusOrReattach(name)
 }
 
 // focusOrReattach focuses a running session's pane, re-opening one first when the
@@ -791,7 +915,7 @@ func (m *model) openSessionTab(r *row) tea.Cmd {
 	if !isSessionLeaf(r) {
 		return nil
 	}
-	return openAgentTabCmd(r.label, "", "")
+	return openAgentTabCmd(r.session, "", "")
 }
 
 // launchProjectTab is the standalone-tab counterpart of launchProject: it opens
@@ -958,7 +1082,8 @@ type keyHint struct{ key, desc string }
 // action keys first, then the shared navigation keys (move / switch panel /
 // quit). The h/l fold keys are omitted as redundant with open/focus.
 func helpHints(focused section) []keyHint {
-	if focused == sectionSessions {
+	switch focused {
+	case sectionSessions:
 		return []keyHint{
 			{"j/k", "Move"},
 			{"1/2", "Switch panel"},
@@ -991,7 +1116,7 @@ func renderPrompt(p *agentPrompt, width int) []string {
 	for i, o := range promptOptions {
 		marker := "  "
 		if i == p.cursor {
-			marker = chevronStyle.Render("▸ ")
+			marker = chevronStyle.Render(chevronCollapsed + " ")
 		}
 		line := marker + o.style.Render(o.label)
 		if i == p.cursor {
@@ -1016,7 +1141,7 @@ func promptBox(p *agentPrompt, maxInner int) string {
 	title := "Launch agent · " + p.title
 	inner := lipgloss.Width(title)
 	for _, o := range promptOptions {
-		if w := lipgloss.Width("▸ " + o.label); w > inner {
+		if w := lipgloss.Width(chevronCollapsed + " " + o.label); w > inner {
 			inner = w
 		}
 	}
@@ -1034,15 +1159,14 @@ func promptBox(p *agentPrompt, maxInner int) string {
 	return panel(title, body, inner+2, len(body)+2, true)
 }
 
-// helpHeight is the body-row count of the keybind panel: the taller of the two
+// helpHeight is the body-row count of the keybind panel: the tallest of the three
 // sections' hint lists, so the panel stays a constant height and the dashboard
-// doesn't jump when switching panels (the shorter list pads with blank rows).
+// doesn't jump when switching panels (shorter lists pad with blank rows).
 func helpHeight() int {
-	s, p := len(helpHints(sectionSessions)), len(helpHints(sectionProjects))
-	if s > p {
-		return s
-	}
-	return p
+	return max(
+		len(helpHints(sectionSessions)),
+		len(helpHints(sectionProjects)),
+	)
 }
 
 // renderHelp formats the keybind hints into panel body lines, keys left-aligned
@@ -1087,20 +1211,22 @@ func (m model) View() string {
 	}
 
 	// Track the selected row's position within its panel so the picker overlay can
-	// anchor to it: selPanelIdx is its index among that panel's body lines (-1 if
-	// the cursor isn't on a real row), selDepth its tree indentation.
+	// anchor to it: selPanel is which panel holds the cursor, selPanelIdx its index
+	// among that panel's body lines (-1 if the cursor isn't on a real row), selDepth
+	// its tree indentation.
 	var sLines, pLines []string
-	selInSessions, selPanelIdx, selDepth := false, -1, 0
+	selPanel, selPanelIdx, selDepth := sectionSessions, -1, 0
 	for i, r := range rows {
 		line := renderRow(r, i == cursor, m.collapsed, contentWidth)
-		if r.section == sectionSessions {
+		switch r.section {
+		case sectionSessions:
 			if i == cursor {
-				selInSessions, selPanelIdx, selDepth = true, len(sLines), r.depth
+				selPanel, selPanelIdx, selDepth = sectionSessions, len(sLines), r.depth
 			}
 			sLines = append(sLines, line)
-		} else {
+		default:
 			if i == cursor {
-				selInSessions, selPanelIdx, selDepth = false, len(pLines), r.depth
+				selPanel, selPanelIdx, selDepth = sectionProjects, len(pLines), r.depth
 			}
 			pLines = append(pLines, line)
 		}
@@ -1119,12 +1245,12 @@ func (m model) View() string {
 	// terminals so the lists keep usable height.
 	hh := helpHeight() + 2
 	avail := m.height - hh
-	if avail < 6 {
+	if avail < 6 { // two list panels need 3 rows each; drop help before starving them
 		hh, avail = 0, m.height
 	}
 
-	// Size the sessions panel to its content (up to half the remaining height);
-	// the projects panel absorbs the rest.
+	// Size the two list panels: Sessions sized to its content up to half the space
+	// (min 3), Projects takes the rest.
 	sh := len(sLines) + 2
 	if max := avail / 2; sh > max {
 		sh = max
@@ -1150,15 +1276,14 @@ func (m model) View() string {
 	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
 	// The agent picker floats just under the selected row rather than docking in a
-	// panel, so launching reads as an action on that row.
+	// panel, so launching reads as an action on that row. The panels stack Sessions
+	// [0, sh), Projects after; +1 skips each panel's top border.
 	if m.prompt != nil && selPanelIdx >= 0 {
-		// Screen row of the selected line: the sessions panel occupies rows
-		// [0, sh) and the projects panel follows; +1 skips each panel's top border.
-		selY := 1 + selPanelIdx
-		if !selInSessions {
-			selY = sh + 1 + selPanelIdx
+		base := 0
+		if selPanel == sectionProjects {
+			base = sh
 		}
-		frame = m.overlayPrompt(frame, selY, selDepth)
+		frame = m.overlayPrompt(frame, base+1+selPanelIdx, selDepth)
 	}
 	return frame
 }
@@ -1214,20 +1339,22 @@ func renderRow(r row, selected bool, collapsed map[string]bool, width int) strin
 	b.WriteString(strings.Repeat("  ", r.depth))
 	if r.collapsible {
 		if collapsed[r.key] {
-			b.WriteString(chevronStyle.Render("▸ "))
+			b.WriteString(chevronStyle.Render(chevronCollapsed + " "))
 		} else {
-			b.WriteString(chevronStyle.Render("▾ "))
+			b.WriteString(chevronStyle.Render(chevronExpanded + " "))
 		}
-	} else {
+	} else if r.section != sectionSessions {
+		// Session leaves sit flush under their project header's chevron; other
+		// panels keep the chevron-width placeholder so labels align.
 		b.WriteString("  ")
 	}
 	if r.mark != "" {
 		b.WriteString(r.mark + " ")
 	}
-	if r.badge != "" {
-		b.WriteString(r.badge + " ")
-	}
 	b.WriteString(r.label)
+	if r.badge != "" {
+		b.WriteString(" " + r.badge)
+	}
 
 	line := b.String()
 	if selected {

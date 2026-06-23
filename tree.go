@@ -25,28 +25,29 @@ type row struct {
 	key         string // collapse-state key; empty for leaves
 	collapsible bool
 	label       string // pre-styled label text
-	badge       string // pre-styled agent badge (sessions only)
-	mark        string // pre-styled attach mark (sessions only)
+	badge       string // pre-styled agent badge with attach state, e.g. ACC/DOC (sessions only)
+	mark        string // pre-styled attention glyph: what the agent is doing (sessions only)
 
-	// Actionable metadata for project-section leaves; empty on folders and
-	// session rows. dir is the directory to operate in (lazygit, new sessions);
-	// session is the claude session name to focus or create.
+	// Actionable metadata. dir is the directory to operate in (lazygit, new
+	// sessions), set on project-section leaves. session is the agent session name
+	// to focus, create, or kill: the claude session for project-section leaves, the
+	// row's own session for session-section leaves; empty on folder headers.
 	dir     string
 	session string
 }
 
 // expectedSession returns the claude session name for a project/worktree pair.
 // wt is "" for the main worktree. It mirrors the naming convention parsed by
-// matchProject and ListAgentSessions (a trailing _cl).
+// matchProject and ListAgentSessions (a trailing ~cl).
 func expectedSession(project, wt string) string {
 	if wt == "" {
-		return tmuxSafe(project + "_cl")
+		return tmuxSafe(project + "~cl")
 	}
-	return tmuxSafe(project + "_" + wt + "_cl")
+	return tmuxSafe(project + "/" + wt + "~cl")
 }
 
 // agentSuffixes maps an agent kind to its tmux session-name suffix.
-var agentSuffixes = map[string]string{"claude": "_cl", "opencode": "_oc"}
+var agentSuffixes = map[string]string{"claude": "~cl", "opencode": "~oc"}
 
 // agentCommand returns the executable launched for an agent kind.
 func agentCommand(kind string) string {
@@ -56,16 +57,16 @@ func agentCommand(kind string) string {
 	return "claude"
 }
 
-// sessionForKind rewrites a claude session name (ending in _cl, as produced by
+// sessionForKind rewrites a claude session name (ending in ~cl, as produced by
 // expectedSession) into the session name for the given agent kind, swapping the
-// trailing suffix. The _cl suffix is invariant under tmuxSafe, so a plain
+// trailing suffix. The ~cl suffix is invariant under tmuxSafe, so a plain
 // suffix swap is safe.
 func sessionForKind(claudeSession, kind string) string {
 	suffix, ok := agentSuffixes[kind]
-	if !ok || suffix == "_cl" {
+	if !ok || suffix == "~cl" {
 		return claudeSession
 	}
-	return strings.TrimSuffix(claudeSession, "_cl") + suffix
+	return strings.TrimSuffix(claudeSession, "~cl") + suffix
 }
 
 // tmuxSafe rewrites a desired session name into the form tmux actually stores.
@@ -78,13 +79,13 @@ func tmuxSafe(name string) string {
 }
 
 // matchProject finds the project whose name is the longest prefix of rem such
-// that rem == name or rem starts with name+"_". It returns the project name and
+// that rem == name or rem starts with name+"/". It returns the project name and
 // the trailing worktree segment ("" when rem == name). ok is false when no
 // project matches.
 func matchProject(rem string, names []string) (proj, wt string, ok bool) {
 	best := ""
 	for _, n := range names {
-		if rem == n || strings.HasPrefix(rem, n+"_") {
+		if rem == n || strings.HasPrefix(rem, n+"/") {
 			if len(n) > len(best) {
 				best = n
 			}
@@ -96,7 +97,7 @@ func matchProject(rem string, names []string) (proj, wt string, ok bool) {
 	if rem == best {
 		return best, "", true
 	}
-	return best, strings.TrimPrefix(rem, best+"_"), true
+	return best, strings.TrimPrefix(rem, best+"/"), true
 }
 
 // projectNames extracts the project names (for prefix matching).
@@ -129,7 +130,7 @@ func groupSessions(sessions, names []string) (map[string]*sessionGroup, []string
 		return g
 	}
 	for _, s := range sessions {
-		rem := strings.TrimSuffix(strings.TrimSuffix(s, "_cl"), "_oc")
+		rem := strings.TrimSuffix(strings.TrimSuffix(s, "~cl"), "~oc")
 		proj, wt, ok := matchProject(rem, names)
 		if !ok {
 			proj, wt = ungrouped, "" // list flat under the ungrouped node
@@ -151,41 +152,92 @@ func groupSessions(sessions, names []string) (map[string]*sessionGroup, []string
 	return groups, order
 }
 
-// buildSessionRows flattens sessions into project > worktree > session rows,
-// honoring collapse state. attached reports whether a session has a live pane;
-// detached reports whether the user detached it (tmux alive, pane closed).
-func buildSessionRows(sessions, names []string, collapsed map[string]bool, attached, detached func(string) bool, deco rowDeco) []row {
+// sessionsOf returns a project group's sessions in display order: main-worktree
+// sessions first, then worktree sessions ordered by worktree segment then session
+// name (no intermediate worktree node).
+func sessionsOf(g *sessionGroup) []string {
+	out := append([]string(nil), g.main...)
+	sort.Strings(out)
+	wtNames := make([]string, 0, len(g.wts))
+	for w := range g.wts {
+		wtNames = append(wtNames, w)
+	}
+	sort.Strings(wtNames)
+	for _, w := range wtNames {
+		ss := append([]string(nil), g.wts[w]...)
+		sort.Strings(ss)
+		out = append(out, ss...)
+	}
+	return out
+}
+
+// buildSessionRows flattens sessions into project > session rows, mirroring the
+// Projects pane's folder rules: a project with a single session is a bare leaf
+// (no folder header), while a project with several sessions becomes a collapsible
+// folder whose children hang directly off it. Folders sort to the top, single-
+// session leaves after, and the ungrouped bucket sinks to the very end.
+// attention carries each session's latest attention state (drives the leading
+// status glyph). attached reports whether a session has a live pane; detached
+// reports whether the user detached it (tmux alive, pane closed).
+func buildSessionRows(sessions, names []string, collapsed map[string]bool, attention map[string]attentionState, attached, detached func(string) bool, deco rowDeco) []row {
 	groups, order := groupSessions(sessions, names)
 
 	var rows []row
-	for _, p := range order {
+	emitFolder := func(p string, ss []string) {
 		pkey := "sess:" + p
-		rows = append(rows, row{section: sectionSessions, key: pkey, collapsible: true, label: p})
+		rows = append(rows, row{
+			section:     sectionSessions,
+			key:         pkey,
+			collapsible: true,
+			label:       deco.sessionFolder(p, !collapsed[pkey]),
+		})
 		if collapsed[pkey] {
-			continue
+			return
 		}
-		g := groups[p]
+		for _, s := range ss {
+			rows = append(rows, deco.session(s, 1, attention[s], attached(s), detached(s)))
+		}
+	}
+	emitLeaf := func(s string) {
+		rows = append(rows, deco.session(s, 0, attention[s], attached(s), detached(s)))
+	}
+	emit := func(p string, ss []string) {
+		if len(ss) > 1 {
+			emitFolder(p, ss)
+		} else {
+			emitLeaf(ss[0])
+		}
+	}
 
-		// Main-worktree sessions hang directly off the project.
-		sort.Strings(g.main)
-		for _, s := range g.main {
-			rows = append(rows, deco.session(s, 1, attached(s), detached(s)))
+	// Split into multi-session folders and single-session leaves, preserving the
+	// alphabetical order within each group; the ungrouped bucket is held back and
+	// emitted last regardless of its size.
+	type grp struct {
+		name string
+		ss   []string
+	}
+	var folders, leaves []grp
+	var ung *grp
+	for _, p := range order {
+		ss := sessionsOf(groups[p])
+		switch {
+		case p == ungrouped:
+			g := grp{p, ss}
+			ung = &g
+		case len(ss) > 1:
+			folders = append(folders, grp{p, ss})
+		default:
+			leaves = append(leaves, grp{p, ss})
 		}
-
-		// Worktree sessions hang off the same project header (no intermediate
-		// worktree node), ordered by worktree segment then session name.
-		wtNames := make([]string, 0, len(g.wts))
-		for w := range g.wts {
-			wtNames = append(wtNames, w)
-		}
-		sort.Strings(wtNames)
-		for _, w := range wtNames {
-			ss := g.wts[w]
-			sort.Strings(ss)
-			for _, s := range ss {
-				rows = append(rows, deco.session(s, 1, attached(s), detached(s)))
-			}
-		}
+	}
+	for _, f := range folders {
+		emitFolder(f.name, f.ss)
+	}
+	for _, l := range leaves {
+		emitLeaf(l.ss[0])
+	}
+	if ung != nil {
+		emit(ung.name, ung.ss)
 	}
 	return rows
 }

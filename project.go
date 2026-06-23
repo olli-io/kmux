@@ -20,7 +20,7 @@ type Worktree struct {
 // directory basename with a leading "<project><sep>" stripped, where sep is one
 // of '.', '_', or '-'. Worktrees are conventionally placed in sibling dirs named
 // "<project>.<branch>" (and similar), yet the tmux session convention is
-// "<project>_<segment>_cl" (see expectedSession / matchProject). Stripping the
+// "<project>/<segment>~cl" (see expectedSession / matchProject). Stripping the
 // redundant project prefix keeps the two in sync, so a worktree's row resolves to
 // the same session name its live tmux session carries — without it the project
 // row never matches its session (no active coloring) and launching it spawns a

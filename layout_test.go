@@ -7,10 +7,10 @@ import (
 
 func TestAgentKind(t *testing.T) {
 	cases := map[string]string{
-		"proj_wt_cl": "claude",
-		"proj_wt_oc": "opencode",
+		"proj/wt~cl": "claude",
+		"proj/wt~oc": "opencode",
 		"scratch":    "",
-		"foo_clx":    "",
+		"foo~clx":    "",
 	}
 	for name, want := range cases {
 		if got := AgentKind(name); got != want {
@@ -20,8 +20,8 @@ func TestAgentKind(t *testing.T) {
 }
 
 func TestAgentSessionRegex(t *testing.T) {
-	match := []string{"a_cl", "a_b_oc", "x_y_z_cl"}
-	noMatch := []string{"scratch", "cl", "_clx", "oc_thing"}
+	match := []string{"a~cl", "a/b~oc", "x/y/z~cl"}
+	noMatch := []string{"scratch", "cl", "~clx", "oc_thing"}
 	for _, s := range match {
 		if !agentSession.MatchString(s) {
 			t.Errorf("expected %q to match", s)
@@ -160,14 +160,14 @@ func TestColumnAnchors(t *testing.T) {
 func TestForget(t *testing.T) {
 	m := NewManager(100)
 	m.columns = [][]int{{1, 4}, {2}, {3}}
-	m.bySession = map[string]int{"a_cl": 1, "b_cl": 4, "c_oc": 2, "d_oc": 3}
+	m.bySession = map[string]int{"a~cl": 1, "b~cl": 4, "c~oc": 2, "d~oc": 3}
 
-	m.forget("c_oc", 2) // empties column index 1
+	m.forget("c~oc", 2) // empties column index 1
 	want := [][]int{{1, 4}, {3}}
 	if !reflect.DeepEqual(m.columns, want) {
 		t.Fatalf("after forget columns = %v, want %v", m.columns, want)
 	}
-	if _, ok := m.bySession["c_oc"]; ok {
-		t.Fatal("c_oc should be forgotten")
+	if _, ok := m.bySession["c~oc"]; ok {
+		t.Fatal("c~oc should be forgotten")
 	}
 }

@@ -67,7 +67,7 @@ deduplicated.
 
 ## Usage
 
-- Polls tmux every 2s for sessions named `*_cl` (claude) or `*_oc` (opencode),
+- Polls tmux every 2s for sessions named `*~cl` (claude) or `*~oc` (opencode),
   attaching each into its own pane and closing it when the session ends.
 - The sidebar has two panels: **[1] Sessions** (live agents, grouped by project
   and worktree) and **[2] Projects** (git repos under `~/git`, plus any folders
