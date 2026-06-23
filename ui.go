@@ -47,7 +47,8 @@ var (
 		return ""
 	}()
 
-	keyStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // keybind hint (yellow)
+	keyStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // keybind hint (yellow)
+	syncStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // ahead/behind-origin arrow (yellow)
 
 	borderIdle = lipgloss.Color("240") // unfocused panel border (grey)
 )
@@ -430,21 +431,52 @@ func branchSuffix(branch string) string {
 	return dimStyle.Render(" " + branchGlyph + " " + branch)
 }
 
+// gitStatus is the per-checkout git state a row's leading mark renders: whether
+// the working tree is dirty and how it sits relative to its upstream (origin).
+type gitStatus struct {
+	dirty    bool
+	ahead    int
+	behind   int
+	upstream bool
+}
+
+func (w Worktree) git() gitStatus {
+	return gitStatus{dirty: w.Dirty, ahead: w.Ahead, behind: w.Behind, upstream: w.Upstream}
+}
+
+func (p Project) git() gitStatus {
+	return gitStatus{dirty: p.Dirty, ahead: p.Ahead, behind: p.Behind, upstream: p.Upstream}
+}
+
 // branchLabel labels a worktree/project leaf: a leading git-status mark (in place
 // of a plain git glyph), the project name (green when active), and the dim branch
 // tail.
-func branchLabel(name, branch string, active, dirty bool) string {
-	return gitStatusGlyph(dirty) + " " + projectName(name, active) + branchSuffix(branch)
+func branchLabel(name, branch string, active bool, gs gitStatus) string {
+	return gitStatusGlyph(gs) + " " + projectName(name, active) + branchSuffix(branch)
 }
 
-// gitStatusGlyph marks a worktree's git state at the head of its row: a red "M"
-// when it has uncommitted (staged or unstaged) changes, a green check when it is
-// clean.
-func gitStatusGlyph(dirty bool) string {
-	if dirty {
+// gitStatusGlyph marks a checkout's git state at the head of its row. A dirty
+// working tree (staged or unstaged changes) always shows a red "M", as before.
+// Otherwise the mark reports how the branch sits against its upstream (origin):
+// a yellow ↑ when ahead, ↓ when behind, a red ⇕ when diverged (both), and a
+// green "=" when it matches. A clean checkout with no upstream configured is
+// local-only and shows a dim "L" — distinct from "=" so a branch never pushed
+// doesn't masquerade as one in sync with origin.
+func gitStatusGlyph(gs gitStatus) string {
+	switch {
+	case gs.dirty:
 		return errStyle.Render("M")
+	case !gs.upstream:
+		return dimStyle.Render("L")
+	case gs.ahead > 0 && gs.behind > 0:
+		return errStyle.Render("⇕")
+	case gs.ahead > 0:
+		return syncStyle.Render("↑")
+	case gs.behind > 0:
+		return syncStyle.Render("↓")
+	default:
+		return okStyle.Render("=")
 	}
-	return okStyle.Render("✓")
 }
 
 // projectName renders a project/worktree name, colored green when it has a live
@@ -458,7 +490,7 @@ func projectName(name string, active bool) string {
 
 // projectLeaf labels a single-worktree project (name + branch).
 func (rowDeco) projectLeaf(p Project, active bool) string {
-	return branchLabel(p.Name, p.Branch, active, p.Dirty)
+	return branchLabel(p.Name, p.Branch, active, p.git())
 }
 
 // projectFolder labels a multi-worktree project header (folder glyph + name).
@@ -471,26 +503,28 @@ func (rowDeco) projectFolder(p Project, open, active bool) string {
 	}
 	label := folderStyle.Render(glyph) + " " + projectName(p.Name, active)
 	// When collapsed the worktree rows (with their own marks) are hidden, so the
-	// header carries an aggregate status: dirty if the main worktree or any linked
-	// worktree has changes. Expanded, the per-row marks below say it instead.
+	// header carries an aggregate status rolled up across the main worktree and
+	// every linked one. Expanded, the per-row marks below say it instead.
 	if !open {
-		label += " " + gitStatusGlyph(projectDirty(p))
+		label += " " + gitStatusGlyph(projectStatus(p))
 	}
 	return label
 }
 
-// projectDirty reports whether a project's main worktree or any of its linked
-// worktrees has uncommitted changes.
-func projectDirty(p Project) bool {
-	if p.Dirty {
-		return true
-	}
+// projectStatus rolls a project's main worktree and every linked worktree into
+// one git status for the collapsed-folder mark: dirty if any is dirty, ahead/
+// behind if any is, and upstream-tracked if any has an upstream. The rollup
+// favors action — a single behind worktree shows ↓ for the whole folder — so a
+// collapsed project never hides changes that an expanded one would surface.
+func projectStatus(p Project) gitStatus {
+	gs := p.git()
 	for _, w := range p.Worktrees {
-		if w.Dirty {
-			return true
-		}
+		gs.dirty = gs.dirty || w.Dirty
+		gs.ahead += w.Ahead
+		gs.behind += w.Behind
+		gs.upstream = gs.upstream || w.Upstream
 	}
-	return false
+	return gs
 }
 
 // sessionFolder labels a multi-session project header in the Sessions panel,
@@ -508,11 +542,11 @@ func (rowDeco) sessionFolder(name string, open bool) string {
 // mainWorktree labels the main worktree row (repo name + branch), listed first
 // inside an expanded project folder.
 func (rowDeco) mainWorktree(p Project, active bool) string {
-	return branchLabel(p.Name, p.Branch, active, p.Dirty)
+	return branchLabel(p.Name, p.Branch, active, p.git())
 }
 
 func (rowDeco) worktree(w Worktree, active bool) string {
-	return branchLabel(w.Name, w.Branch, active, w.Dirty)
+	return branchLabel(w.Name, w.Branch, active, w.git())
 }
 
 // rows builds the combined, navigable row list: session rows first, then

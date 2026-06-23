@@ -7,15 +7,19 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
 // Worktree is a linked git worktree of a project (never the main worktree).
 type Worktree struct {
-	Name   string // short name relative to the project (see worktreeSegment)
-	Path   string
-	Branch string // short branch name, or "(detached)"
-	Dirty  bool   // has staged or unstaged changes (see isDirty)
+	Name     string // short name relative to the project (see worktreeSegment)
+	Path     string
+	Branch   string // short branch name, or "(detached)"
+	Dirty    bool   // has staged or unstaged changes (see isDirty)
+	Ahead    int    // commits ahead of upstream (see gitSync)
+	Behind   int    // commits behind upstream (see gitSync)
+	Upstream bool   // an upstream branch is configured (see gitSync)
 }
 
 // worktreeSegment derives a worktree's short name relative to its project: the
@@ -46,6 +50,9 @@ type Project struct {
 	Path      string
 	Branch    string // current branch of the main worktree, or "(detached)"
 	Dirty     bool   // main worktree has staged or unstaged changes (see isDirty)
+	Ahead     int    // main worktree commits ahead of upstream (see gitSync)
+	Behind    int    // main worktree commits behind upstream (see gitSync)
+	Upstream  bool   // an upstream branch is configured (see gitSync)
 	Worktrees []Worktree
 }
 
@@ -94,7 +101,7 @@ func ScanProjects() ([]Project, error) {
 			Branch:    branch,
 			Worktrees: worktrees,
 		}
-		markDirty(&p)
+		markStatus(&p)
 		projects = append(projects, p)
 		seen[path] = true
 	}
@@ -141,7 +148,7 @@ func ScanProject(dir string) (*Project, error) {
 		Branch:    branch,
 		Worktrees: worktrees,
 	}
-	markDirty(p)
+	markStatus(p)
 	return p, nil
 }
 
@@ -158,13 +165,39 @@ func isDirty(dir string) bool {
 	return len(bytes.TrimSpace(out)) > 0
 }
 
-// markDirty fills the Dirty flag of a project and each of its worktrees from the
-// working tree at each path. It is the only place a scan spends a git status
-// call per worktree, kept to one cheap invocation each.
-func markDirty(p *Project) {
+// gitSync reports how far the branch checked out at dir is ahead of and behind
+// its upstream (origin): ahead counts local commits the upstream lacks, behind
+// counts upstream commits the local branch lacks. upstream is false when no
+// upstream is configured (a fresh branch, a detached HEAD), in which case ahead
+// and behind are zero. Best-effort: any git error reads as no upstream so a
+// status hiccup never fails a scan.
+func gitSync(dir string) (ahead, behind int, upstream bool) {
+	out, err := exec.Command("git", "-C", dir, "rev-list", "--count", "--left-right", "@{upstream}...HEAD").Output()
+	if err != nil {
+		return 0, 0, false
+	}
+	// --left-right with @{upstream}...HEAD prints "<behind>\t<ahead>": the left
+	// side counts commits unique to the upstream, the right side those unique to
+	// HEAD.
+	fields := strings.Fields(string(out))
+	if len(fields) != 2 {
+		return 0, 0, false
+	}
+	behind, _ = strconv.Atoi(fields[0])
+	ahead, _ = strconv.Atoi(fields[1])
+	return ahead, behind, true
+}
+
+// markStatus fills the working-tree (Dirty) and upstream-sync (Ahead/Behind/
+// Upstream) status of a project and each of its worktrees from the checkout at
+// each path. It is the only place a scan spends git status calls per worktree,
+// kept to two cheap invocations each.
+func markStatus(p *Project) {
 	p.Dirty = isDirty(p.Path)
+	p.Ahead, p.Behind, p.Upstream = gitSync(p.Path)
 	for i := range p.Worktrees {
 		p.Worktrees[i].Dirty = isDirty(p.Worktrees[i].Path)
+		p.Worktrees[i].Ahead, p.Worktrees[i].Behind, p.Worktrees[i].Upstream = gitSync(p.Worktrees[i].Path)
 	}
 }
 
