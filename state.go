@@ -23,37 +23,43 @@ func stateFile() (string, error) {
 
 // persistedState is the on-disk shape of the state kmux remembers across runs.
 type persistedState struct {
-	Detached []string `json:"detached"` // session names the user detached
+	Detached []string              `json:"detached"`       // session names the user detached
+	Idle     map[string]idleRecord `json:"idle,omitempty"` // session -> persisted idle clock
 }
 
-// LoadDetached reads the set of detached session names persisted by a previous
-// run. A missing state file yields an empty set, not an error.
-func LoadDetached() (map[string]bool, error) {
+// LoadState reads the state persisted by a previous run: the set of detached
+// session names and the per-session idle clocks (see idleRecord). A missing state
+// file yields empty, non-nil maps, not an error.
+func LoadState() (detached map[string]bool, idle map[string]idleRecord, err error) {
 	path, err := stateFile()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string]bool{}, nil
+			return map[string]bool{}, map[string]idleRecord{}, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 	var st persistedState
 	if err := json.Unmarshal(data, &st); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	set := make(map[string]bool, len(st.Detached))
+	detached = make(map[string]bool, len(st.Detached))
 	for _, s := range st.Detached {
-		set[s] = true
+		detached[s] = true
 	}
-	return set, nil
+	if st.Idle == nil {
+		st.Idle = map[string]idleRecord{}
+	}
+	return detached, st.Idle, nil
 }
 
-// SaveDetached persists the set of detached session names so they stay detached
-// across restarts. The names are sorted for a stable, diff-friendly file.
-func SaveDetached(detached map[string]bool) error {
+// SaveState persists the detached-session set and the per-session idle clocks so
+// both survive a restart. Detached names are sorted for a stable, diff-friendly
+// file; the idle map is written verbatim.
+func SaveState(detached map[string]bool, idle map[string]idleRecord) error {
 	path, err := stateFile()
 	if err != nil {
 		return err
@@ -65,7 +71,7 @@ func SaveDetached(detached map[string]bool) error {
 		}
 	}
 	sort.Strings(names)
-	data, err := json.MarshalIndent(persistedState{Detached: names}, "", "  ")
+	data, err := json.MarshalIndent(persistedState{Detached: names, Idle: idle}, "", "  ")
 	if err != nil {
 		return err
 	}

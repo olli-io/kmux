@@ -25,12 +25,12 @@ const spinnerInterval = 150 * time.Millisecond
 var spinnerFrames = []string{"⠹", "⠼", "⠶", "⠧", "⠏", "⠛"}
 
 var (
-	clStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // claude
+	clStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))  // claude
 	ocStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("213")) // opencode (pink)
 	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
-	activeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))  // project with a live session
+	activeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // project with a live session
 	folderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // folder glyph (blue)
 
 	chevronStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
@@ -116,11 +116,11 @@ var promptOptions = []struct {
 // newModel builds the dashboard model. scopeDir, when non-empty, is the main
 // worktree of the single project kmux is scoped to (see model.scopeDir).
 func newModel(mgr *Manager, scopeDir string) model {
-	// Restore detached sessions from a previous run; best-effort (a read error
-	// just starts with an empty set).
-	detached, err := LoadDetached()
+	// Restore detached sessions and idle clocks from a previous run; best-effort
+	// (a read error just starts with empty sets).
+	detached, idle, err := LoadState()
 	if err != nil || detached == nil {
-		detached = map[string]bool{}
+		detached, idle = map[string]bool{}, map[string]idleRecord{}
 	}
 	scopeName := ""
 	if scopeDir != "" {
@@ -128,13 +128,15 @@ func newModel(mgr *Manager, scopeDir string) model {
 	}
 	// Resolve the idle-kill timeout from config; a read error falls back to the
 	// default, matching the optional, best-effort handling of the rest of config.
+	// Seeding the tracker with the persisted clocks lets idle time accumulated
+	// before this launch keep counting instead of resetting to zero.
 	cfg, _ := LoadConfig()
 	return model{
 		mgr:       mgr,
 		collapsed: map[string]bool{},
 		detached:  detached,
 		attention: map[string]attentionState{},
-		idle:      newIdleTracker(cfg.IdleDuration()),
+		idle:      newIdleTrackerFrom(cfg.IdleDuration(), idle),
 		scopeDir:  scopeDir,
 		scopeName: scopeName,
 	}
@@ -287,17 +289,19 @@ func reattachSessionCmd(mgr *Manager, name string) tea.Cmd {
 	}
 }
 
-// saveDetachedCmd persists the detached-session set off the UI goroutine. It
-// snapshots the map first so a later mutation can't race the write.
-func saveDetachedCmd(detached map[string]bool) tea.Cmd {
-	snap := make(map[string]bool, len(detached))
-	for k, on := range detached {
+// saveStateCmd persists the detached-session set and the idle clocks off the UI
+// goroutine. It snapshots both maps first so a later mutation can't race the
+// write. (idle.snapshot already returns a fresh copy.)
+func (m model) saveStateCmd() tea.Cmd {
+	detached := make(map[string]bool, len(m.detached))
+	for k, on := range m.detached {
 		if on {
-			snap[k] = true
+			detached[k] = true
 		}
 	}
+	idle := m.idle.snapshot()
 	return func() tea.Msg {
-		return savedMsg{err: SaveDetached(snap)}
+		return savedMsg{err: SaveState(detached, idle)}
 	}
 }
 
@@ -770,7 +774,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Refresh attention off the freshest session list (drives the session glyphs).
 		cmd := tea.Batch(reconcileCmd(m.mgr, m.attachable()), attentionCmd(m.sessions))
 		if pruned {
-			cmd = tea.Batch(cmd, saveDetachedCmd(m.detached))
+			cmd = tea.Batch(cmd, m.saveStateCmd())
 		}
 		return m, cmd
 
@@ -797,12 +801,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			busy[s] = st == attnBusy
 		}
 		kill := m.idle.reap(time.Now(), msg.hashes, busy)
-		if len(kill) == 0 {
-			return m, nil
-		}
-		cmds := make([]tea.Cmd, len(kill))
-		for i, name := range kill {
-			cmds[i] = killSessionCmd(name)
+		// Persist the freshly advanced idle clocks so a restart resumes them and
+		// the launch sweep can reap sessions that stayed idle while kmux was off.
+		cmds := []tea.Cmd{m.saveStateCmd()}
+		for _, name := range kill {
+			cmds = append(cmds, killSessionCmd(name))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -878,7 +881,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// pane right away.
 		if r := rowAt(rows, m.cursor); isSessionLeaf(r) && !m.detached[r.session] {
 			m.detached[r.session] = true
-			return m, tea.Batch(reconcileCmd(m.mgr, m.attachable()), saveDetachedCmd(m.detached))
+			return m, tea.Batch(reconcileCmd(m.mgr, m.attachable()), m.saveStateCmd())
 		}
 	case "D":
 		// Kill the agent: ends the tmux session and its pane.
@@ -1143,7 +1146,7 @@ func (m *model) clearDetached(name string) tea.Cmd {
 		return nil
 	}
 	delete(m.detached, name)
-	return saveDetachedCmd(m.detached)
+	return m.saveStateCmd()
 }
 
 func (m *model) clampCursor(rows []row) {

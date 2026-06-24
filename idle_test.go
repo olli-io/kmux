@@ -75,6 +75,56 @@ func TestIdleTrackerReap(t *testing.T) {
 	})
 }
 
+// TestIdleTrackerFromPersisted covers the launch-sweep decision: a tracker
+// seeded with records from a previous run, reaped once against freshly captured
+// pane hashes (exactly what sweepIdleAtLaunch does), kills only sessions whose
+// pane is unchanged and stale.
+func TestIdleTrackerFromPersisted(t *testing.T) {
+	t0 := time.Unix(0, 0)
+	old := t0.Add(-idleTimeout - time.Minute) // changed safely before the timeout
+	persisted := map[string]idleRecord{
+		"stale~cl":  {Hash: 1, Changed: old}, // unchanged + past timeout -> kill
+		"worked~cl": {Hash: 1, Changed: old}, // pane changed since -> spare
+		"recent~cl": {Hash: 1, Changed: t0},  // unchanged but fresh -> spare
+	}
+	// "unknown~cl" has no persisted record -> spared (no idle evidence).
+	hashes := map[string]uint64{
+		"stale~cl":   1, // matches persisted fingerprint
+		"worked~cl":  2, // differs: agent produced output (e.g. detached + working)
+		"recent~cl":  1,
+		"unknown~cl": 9,
+	}
+
+	tr := newIdleTrackerFrom(idleTimeout, persisted)
+	got := tr.reap(t0, hashes, nil)
+	if !slices.Equal(got, []string{"stale~cl"}) {
+		t.Fatalf("launch sweep: got %v, want [stale~cl]", got)
+	}
+}
+
+// TestIdleTrackerSnapshotRoundTrip checks that snapshotting then reseeding a
+// tracker preserves the idle clock, so persistence does not reset idle time.
+func TestIdleTrackerSnapshotRoundTrip(t *testing.T) {
+	t0 := time.Unix(0, 0)
+	past := idleTimeout + time.Minute
+
+	tr := newIdleTracker(idleTimeout)
+	tr.reap(t0, map[string]uint64{"a~cl": 7}, nil) // clock starts at t0
+
+	snap := tr.snapshot()
+	if rec := snap["a~cl"]; rec.Hash != 7 || !rec.Changed.Equal(t0) {
+		t.Fatalf("snapshot: got %+v, want {Hash:7 Changed:%v}", rec, t0)
+	}
+
+	// A new run reseeded from the snapshot must reap on the original deadline,
+	// not restart the clock from launch.
+	tr2 := newIdleTrackerFrom(idleTimeout, snap)
+	got := tr2.reap(t0.Add(past), map[string]uint64{"a~cl": 7}, nil)
+	if !slices.Equal(got, []string{"a~cl"}) {
+		t.Fatalf("reseeded tracker: got %v, want [a~cl] (clock preserved)", got)
+	}
+}
+
 func TestIdleTrackerDisabled(t *testing.T) {
 	tr := newIdleTracker(0)
 	h := map[string]uint64{"a~cl": 1}

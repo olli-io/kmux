@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -39,6 +40,14 @@ func main() {
 	if err := GotoLayoutSplits(); err != nil {
 		fmt.Fprintf(os.Stderr, "kmux: could not switch to splits layout: %v\n", err)
 		os.Exit(1)
+	}
+
+	// Reap sessions that were already idle past the timeout when this run
+	// started, before the dashboard attaches panes to them. Best-effort: config
+	// or state read errors just skip the sweep.
+	cfg, _ := LoadConfig()
+	if _, idle, err := LoadState(); err == nil {
+		sweepIdleAtLaunch(time.Now(), cfg.IdleDuration(), idle)
 	}
 
 	mgr := NewManager(sidebarID)
