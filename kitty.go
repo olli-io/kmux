@@ -39,14 +39,19 @@ func GotoLayoutSplits() error {
 // `cmd...`. It returns the new window id. bias (0 disables) is the percentage of
 // the split given to the new window.
 //
-// Note: launch's --match selects a *tab*, and --location splits relative to the
-// active window. To split a specific window we must use --next-to; otherwise
-// every split would target the focused sidebar (placing panes under it).
+// --next-to picks the window to split relative to, but kitty *ignores* it unless
+// the matched window lives in the target tab — which defaults to the currently
+// active tab. Since kmux also opens unrelated kitty tabs (lazygit, agent attach,
+// project sessions, nvim), the active tab is often not the dashboard's, and a
+// reconcile firing then would drop the new pane into the wrong tab / under the
+// sidebar. So we pin the target tab to the one containing nextToID via
+// --match window_id:..., making --next-to reliable no matter which tab is focused.
 func Launch(loc SplitLocation, nextToID, bias int, title string, cmd ...string) (int, error) {
 	args := []string{
 		"launch",
 		"--type=window",
 		"--location=" + string(loc),
+		"--match", "window_id:" + strconv.Itoa(nextToID),
 		"--next-to", "id:" + strconv.Itoa(nextToID),
 		"--title", title,
 		"--keep-focus",
