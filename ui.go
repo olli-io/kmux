@@ -218,6 +218,19 @@ func reconcileCmd(mgr *Manager, active []string) tea.Cmd {
 		if err != nil {
 			live = nil // best-effort: skip the manual-close prune this round
 		}
+		// A reconcile that adds a pane pulls the kitty app to the macOS foreground
+		// even with --keep-focus, stealing system focus from whatever the user was
+		// doing. These spawns are automatic (a session appeared on its own, not via
+		// a manual open), so capture the frontmost app first and hand focus back
+		// afterwards to keep the spawn in the background. Only query when an add is
+		// actually pending, so the idle tick stays cheap.
+		var prevApp string
+		for _, s := range active {
+			if !mgr.Attached(s) {
+				prevApp = frontmostApp()
+				break
+			}
+		}
 		changed, errs := mgr.Reconcile(active, live)
 		// Lift stacked panes into any slot a removed column just freed, before
 		// padding, so a collapsed split fills the gap instead of an idle slot.
@@ -227,6 +240,9 @@ func reconcileCmd(mgr *Manager, active []string) tea.Cmd {
 		errs = append(errs, perrs...)
 		if changed || cchanged || pchanged {
 			errs = append(errs, mgr.Rebalance()...)
+		}
+		if changed && prevApp != "" {
+			restoreFrontmostApp(prevApp)
 		}
 		return reconciledMsg{errs: errs}
 	}
