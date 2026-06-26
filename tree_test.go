@@ -96,8 +96,8 @@ func TestSessionForKind(t *testing.T) {
 }
 
 func TestAgentCommand(t *testing.T) {
-	if got := agentCommand("claude"); got != "claude" {
-		t.Errorf("claude cmd = %q, want %q", got, "claude")
+	if got := agentCommand("claude"); got != "claude --continue" {
+		t.Errorf("claude cmd = %q, want %q", got, "claude --continue")
 	}
 	if got := agentCommand("opencode"); got != "opencode" {
 		t.Errorf("opencode cmd = %q, want %q", got, "opencode")

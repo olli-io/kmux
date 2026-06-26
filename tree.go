@@ -49,12 +49,15 @@ func expectedSession(project, wt string) string {
 // agentSuffixes maps an agent kind to its tmux session-name suffix.
 var agentSuffixes = map[string]string{"claude": "~cl", "opencode": "~oc"}
 
-// agentCommand returns the executable launched for an agent kind.
+// agentCommand returns the command launched for an agent kind. Claude is
+// launched with --continue so a respawned session (e.g. after idle reap)
+// resumes the most recent conversation in that directory; on a first-ever
+// launch with no prior conversation, claude --continue starts a fresh session.
 func agentCommand(kind string) string {
 	if kind == "opencode" {
 		return "opencode"
 	}
-	return "claude"
+	return "claude --continue"
 }
 
 // sessionForKind rewrites a claude session name (ending in ~cl, as produced by
