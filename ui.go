@@ -10,6 +10,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/olli-io/kmux/internal/kitty"
 )
 
 const pollInterval = 2 * time.Second
@@ -214,7 +216,7 @@ func projectsCmd(scopeDir string) tea.Cmd {
 // Rebalance to pin the sidebar width and even out the agent columns.
 func reconcileCmd(mgr *Manager, active []string) tea.Cmd {
 	return func() tea.Msg {
-		live, err := LiveWindowIDs()
+		live, err := kitty.LiveWindowIDs()
 		if err != nil {
 			live = nil // best-effort: skip the manual-close prune this round
 		}
@@ -251,7 +253,7 @@ func reconcileCmd(mgr *Manager, active []string) tea.Cmd {
 // focusCmd gives keyboard focus to a session's kitty pane off the UI goroutine.
 func focusCmd(id int) tea.Cmd {
 	return func() tea.Msg {
-		return focusedMsg{err: FocusWindow(id)}
+		return focusedMsg{err: kitty.FocusWindow(id)}
 	}
 }
 
@@ -264,7 +266,7 @@ func openSessionCmd(mgr *Manager, name, dir, agentCmd string) tea.Cmd {
 		if err := mgr.Open(name, dir, agentCmd); err != nil {
 			return reconciledMsg{errs: []error{err}}
 		}
-		live, err := LiveWindowIDs()
+		live, err := kitty.LiveWindowIDs()
 		if err != nil {
 			live = nil // best-effort: skip the manual-close prune this round
 		}
@@ -295,7 +297,7 @@ func reattachSessionCmd(mgr *Manager, name string) tea.Cmd {
 		if err := mgr.Reattach(name); err != nil {
 			return reconciledMsg{errs: []error{err}}
 		}
-		live, err := LiveWindowIDs()
+		live, err := kitty.LiveWindowIDs()
 		if err != nil {
 			live = nil // best-effort: skip the manual-close prune this round
 		}
@@ -324,7 +326,7 @@ func (m model) saveStateCmd() tea.Cmd {
 // lazygitCmd opens lazygit for dir in a new kitty tab.
 func lazygitCmd(dir string) tea.Cmd {
 	return func() tea.Msg {
-		return focusedMsg{err: OpenLazygit(dir)}
+		return focusedMsg{err: kitty.OpenLazygit(dir)}
 	}
 }
 
@@ -346,7 +348,7 @@ func openAgentTabCmd(name, dir, agentCmd string) tea.Cmd {
 				return focusedMsg{err: err}
 			}
 		}
-		return focusedMsg{err: OpenAgentTab(name, name)}
+		return focusedMsg{err: kitty.OpenAgentTab(name, name)}
 	}
 }
 
@@ -359,7 +361,7 @@ func openTabCmd(dir string) tea.Cmd {
 		if err != nil {
 			return focusedMsg{err: err}
 		}
-		return focusedMsg{err: OpenTab(exe, dir, "kmux::"+filepath.Base(dir))}
+		return focusedMsg{err: kitty.OpenTab(exe, dir, "kmux::"+filepath.Base(dir))}
 	}
 }
 

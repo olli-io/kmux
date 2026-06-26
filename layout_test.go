@@ -3,6 +3,8 @@ package main
 import (
 	"reflect"
 	"testing"
+
+	"github.com/olli-io/kmux/internal/kitty"
 )
 
 func TestAgentKind(t *testing.T) {
@@ -42,21 +44,21 @@ func TestPlacement(t *testing.T) {
 
 	// Agent 1 -> col 0, vsplit from sidebar with the sidebar bias.
 	loc, match, bias, col := m.placement()
-	if loc != VSplit || match != 100 || bias != sidebarBias || col != 0 {
+	if loc != kitty.VSplit || match != 100 || bias != sidebarBias || col != 0 {
 		t.Fatalf("agent1 placement = (%s,%d,%d,%d)", loc, match, bias, col)
 	}
 	m.columns = append(m.columns, []int{1}) // pretend launch returned id 1
 
 	// Agent 2 -> col 1, vsplit from rightmost column anchor (id 1).
 	loc, match, bias, col = m.placement()
-	if loc != VSplit || match != 1 || bias != 0 || col != 1 {
+	if loc != kitty.VSplit || match != 1 || bias != 0 || col != 1 {
 		t.Fatalf("agent2 placement = (%s,%d,%d,%d)", loc, match, bias, col)
 	}
 	m.columns = append(m.columns, []int{2})
 
 	// Agent 3 -> col 2, vsplit from rightmost column anchor (id 2).
 	loc, match, _, col = m.placement()
-	if loc != VSplit || match != 2 || col != 2 {
+	if loc != kitty.VSplit || match != 2 || col != 2 {
 		t.Fatalf("agent3 placement = (%s,%d,_,%d)", loc, match, col)
 	}
 	m.columns = append(m.columns, []int{3})
@@ -64,14 +66,14 @@ func TestPlacement(t *testing.T) {
 	// Agent 4 -> hsplit under the shortest column (all len 1 -> leftmost col 0),
 	// splitting that column's bottom window (id 1).
 	loc, match, _, col = m.placement()
-	if loc != HSplit || match != 1 || col != 0 {
+	if loc != kitty.HSplit || match != 1 || col != 0 {
 		t.Fatalf("agent4 placement = (%s,%d,_,%d)", loc, match, col)
 	}
 	m.columns[0] = append(m.columns[0], 4)
 
 	// Agent 5 -> col 0 now has 2, cols 1&2 have 1 -> target col 1, bottom id 2.
 	loc, match, _, col = m.placement()
-	if loc != HSplit || match != 2 || col != 1 {
+	if loc != kitty.HSplit || match != 2 || col != 1 {
 		t.Fatalf("agent5 placement = (%s,%d,_,%d)", loc, match, col)
 	}
 }

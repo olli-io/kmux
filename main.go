@@ -7,6 +7,8 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/olli-io/kmux/internal/kitty"
 )
 
 func main() {
@@ -57,7 +59,7 @@ func runDashboard(pathArg string) {
 		scopeDir = proj.Path
 	}
 
-	if err := GotoLayoutSplits(); err != nil {
+	if err := kitty.GotoLayoutSplits(); err != nil {
 		fmt.Fprintf(os.Stderr, "kmux: could not switch to splits layout: %v\n", err)
 		os.Exit(1)
 	}

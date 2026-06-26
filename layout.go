@@ -3,6 +3,8 @@ package main
 import (
 	"math"
 	"sort"
+
+	"github.com/olli-io/kmux/internal/kitty"
 )
 
 const (
@@ -92,7 +94,7 @@ func (m *Manager) Reconcile(active []string, live map[int]bool) (changed bool, e
 	// Remove panes for sessions that disappeared.
 	for session, id := range m.bySession {
 		if !activeSet[session] {
-			if err := CloseWindow(id); err != nil {
+			if err := kitty.CloseWindow(id); err != nil {
 				errs = append(errs, err)
 			}
 			m.forget(session, id)
@@ -151,7 +153,7 @@ func (m *Manager) add(session string) error {
 	}
 
 	loc, matchID, bias, col := m.placement()
-	id, err := Launch(loc, matchID, bias, session, "tmux", "attach", "-t", session)
+	id, err := kitty.Launch(loc, matchID, bias, session, "tmux", "attach", "-t", session)
 	if err != nil {
 		return err
 	}
@@ -171,13 +173,13 @@ func (m *Manager) add(session string) error {
 // existing agent column.
 func (m *Manager) addInPlaceholderSlot(session string) error {
 	ph := m.placeholders[0]
-	id, err := Launch(VSplit, ph, 0, session, "tmux", "attach", "-t", session)
+	id, err := kitty.Launch(kitty.VSplit, ph, 0, session, "tmux", "attach", "-t", session)
 	if err != nil {
 		return err
 	}
 	// Drop the placeholder so the new column expands to fill its slot. Best
 	// effort: even if the close call fails, SyncPlaceholders prunes it later.
-	_ = CloseWindow(ph)
+	_ = kitty.CloseWindow(ph)
 	m.placeholders = m.placeholders[1:]
 	m.columns = append(m.columns, []int{id})
 	m.bySession[session] = id
@@ -190,16 +192,16 @@ func (m *Manager) addInPlaceholderSlot(session string) error {
 //
 // It returns the split location, the window id to split from, the bias, and the
 // index of the target column.
-func (m *Manager) placement() (SplitLocation, int, int, int) {
+func (m *Manager) placement() (kitty.SplitLocation, int, int, int) {
 	if len(m.columns) < maxColumns {
 		col := len(m.columns)
 		if col == 0 {
 			// First agent column splits the sidebar; bias keeps sidebar narrow.
-			return VSplit, m.sidebarID, sidebarBias, col
+			return kitty.VSplit, m.sidebarID, sidebarBias, col
 		}
 		// New column lands to the right of the current rightmost column.
 		rightmostAnchor := m.columns[col-1][0]
-		return VSplit, rightmostAnchor, 0, col
+		return kitty.VSplit, rightmostAnchor, 0, col
 	}
 
 	// All columns exist: stack under the shortest one (ties -> leftmost).
@@ -210,7 +212,7 @@ func (m *Manager) placement() (SplitLocation, int, int, int) {
 		}
 	}
 	bottom := m.columns[target][len(m.columns[target])-1]
-	return HSplit, bottom, 0, target
+	return kitty.HSplit, bottom, 0, target
 }
 
 // sessionFor returns the session name attached to a window id, or "" if none.
@@ -266,7 +268,7 @@ func (m *Manager) Compact() (changed bool, errs []error) {
 		}
 		// Detach the stacked pane and re-attach it as its own column. add lands it
 		// in a free slot (vsplit) since columns < maxColumns here.
-		if err := CloseWindow(id); err != nil {
+		if err := kitty.CloseWindow(id); err != nil {
 			errs = append(errs, err)
 		}
 		m.forget(session, id)
@@ -360,7 +362,7 @@ func (m *Manager) SyncPlaceholders(live map[int]bool) (changed bool, errs []erro
 	// the real agent that just claimed it).
 	for len(m.placeholders) > want {
 		last := m.placeholders[len(m.placeholders)-1]
-		if err := CloseWindow(last); err != nil {
+		if err := kitty.CloseWindow(last); err != nil {
 			errs = append(errs, err)
 		}
 		m.placeholders = m.placeholders[:len(m.placeholders)-1]
@@ -369,7 +371,7 @@ func (m *Manager) SyncPlaceholders(live map[int]bool) (changed bool, errs []erro
 
 	// Open missing placeholders as new rightmost columns.
 	for len(m.placeholders) < want {
-		id, err := Launch(VSplit, m.rightmostAnchor(), 0, placeholderTitle, placeholderCmd()...)
+		id, err := kitty.Launch(kitty.VSplit, m.rightmostAnchor(), 0, placeholderTitle, placeholderCmd()...)
 		if err != nil {
 			errs = append(errs, err)
 			break
@@ -429,7 +431,7 @@ func (m *Manager) Rebalance() []error {
 	type step struct{ id, target int }
 	var errs []error
 	for pass := 0; pass < rebalanceMaxPasses; pass++ {
-		widths, err := WindowColumns()
+		widths, err := kitty.WindowColumns()
 		if err != nil {
 			return append(errs, err)
 		}
@@ -452,7 +454,7 @@ func (m *Manager) Rebalance() []error {
 		converged := true
 		for _, s := range steps {
 			// Re-read because each resize shifts the widths of the windows to its right.
-			cur, err := WindowColumns()
+			cur, err := kitty.WindowColumns()
 			if err != nil {
 				errs = append(errs, err)
 				continue
@@ -461,7 +463,7 @@ func (m *Manager) Rebalance() []error {
 			if delta > rebalanceTolerance || delta < -rebalanceTolerance {
 				converged = false
 			}
-			if err := ResizeWindowHoriz(s.id, delta); err != nil {
+			if err := kitty.ResizeWindowHoriz(s.id, delta); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -475,10 +477,10 @@ func (m *Manager) Rebalance() []error {
 // CloseAll closes every pane kmux spawned (detaching tmux, not killing it).
 func (m *Manager) CloseAll() {
 	for _, id := range m.bySession {
-		_ = CloseWindow(id)
+		_ = kitty.CloseWindow(id)
 	}
 	for _, id := range m.placeholders {
-		_ = CloseWindow(id)
+		_ = kitty.CloseWindow(id)
 	}
 	m.columns = nil
 	m.placeholders = nil

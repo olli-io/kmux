@@ -1,4 +1,4 @@
-package main
+package kitty
 
 import (
 	"encoding/json"
