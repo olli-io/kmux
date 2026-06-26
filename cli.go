@@ -1,0 +1,106 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+)
+
+// parsedArgs is the routed kmux command line. agent is "" for the default
+// dashboard mode and "claude"/"opencode" for the agent-launcher mode; path is
+// the optional directory argument ("" means the current directory).
+type parsedArgs struct {
+	path  string
+	agent string
+}
+
+// parseArgs routes the kmux command line. With no --agent flag it selects the
+// dashboard (the historical behaviour); with --agent it selects the agent
+// launcher. The path and the flag may appear in either order, so both
+// `kmux PATH --agent claude` and `kmux --agent claude PATH` parse the same.
+// --agent accepts either `--agent claude` or `--agent=claude`.
+func parseArgs(args []string) (parsedArgs, error) {
+	var pa parsedArgs
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--agent", a == "-agent":
+			if i+1 >= len(args) {
+				return pa, fmt.Errorf("--agent requires a value (claude or opencode)")
+			}
+			i++
+			pa.agent = args[i]
+		case strings.HasPrefix(a, "--agent="):
+			pa.agent = strings.TrimPrefix(a, "--agent=")
+		case strings.HasPrefix(a, "-"):
+			return pa, fmt.Errorf("unknown flag: %s", a)
+		default:
+			if pa.path != "" {
+				return pa, fmt.Errorf("unexpected argument: %s", a)
+			}
+			pa.path = a
+		}
+	}
+	if pa.agent != "" && pa.agent != "claude" && pa.agent != "opencode" {
+		return pa, fmt.Errorf("--agent must be 'claude' or 'opencode', got %q", pa.agent)
+	}
+	return pa, nil
+}
+
+// runAgent creates (if needed) and attaches the current terminal to the tmux
+// session for the given agent kind in the project containing path. The session
+// name follows kmux's convention (expectedSession + sessionForKind), so the
+// session the dashboard would spawn and the one this launches are one and the
+// same — launching here, then opening the dashboard, focuses the same agent.
+func runAgent(path, kind string) error {
+	if path == "" {
+		path = "."
+	}
+	proj, err := ScanProject(path)
+	if err != nil {
+		return err
+	}
+	dir, wt := resolveWorktree(path, proj)
+	name := sessionForKind(expectedSession(proj.Name, wt), kind)
+	return attachAgentSession(name, dir, agentCommand(kind))
+}
+
+// resolveWorktree locates which of a project's worktrees contains path, returning
+// that worktree's root directory and its session-name segment ("" for the main
+// worktree). ScanProject always anchors proj at the main worktree regardless of
+// which worktree path lives in, so the actual checkout is resolved separately
+// here from git's toplevel. A path that resolves to no known worktree (or an
+// unreadable toplevel) falls back to the main worktree.
+func resolveWorktree(path string, proj *Project) (dir, wt string) {
+	top, err := gitToplevel(path)
+	if err != nil || top == "" || top == proj.Path {
+		return proj.Path, ""
+	}
+	for _, w := range proj.Worktrees {
+		if w.Path == top {
+			return top, w.Name
+		}
+	}
+	return top, ""
+}
+
+// gitToplevel returns the root directory of the git worktree containing dir.
+func gitToplevel(dir string) (string, error) {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// attachAgentSession attaches the current terminal to tmux session `name`,
+// creating it first (running agentCmd in dir) when it doesn't already exist.
+// `tmux new-session -A` does both: it attaches to an existing session, or
+// creates and attaches otherwise (in which case -c/the command take effect).
+// stdio is inherited so the agent runs in the foreground of the calling terminal.
+func attachAgentSession(name, dir, agentCmd string) error {
+	cmd := exec.Command("tmux", "new-session", "-A", "-s", name, "-c", dir, agentCmd)
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	return cmd.Run()
+}

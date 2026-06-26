@@ -46,6 +46,23 @@ worktree, a linked worktree, or any subdirectory of one:
 kmux ~/git/myproject   # or: cd into the repo and run `kmux .`
 ```
 
+## Launch an agent directly
+
+With `--agent`, kmux skips the dashboard and creates (or attaches to) the tmux
+session for one agent in the project containing the given path, attaching it to
+the current terminal. This needs only tmux — no kitty:
+
+```sh
+kmux ~/git/myproject --agent claude     # path then flag
+kmux --agent opencode ~/git/myproject   # flag then path, equivalent
+kmux --agent claude                     # omit the path to use the current dir
+```
+
+The session name follows the same convention the dashboard uses (`<project>~cl`
+for claude, `~oc` for opencode; worktrees become `<project>/<worktree>~…`), so an
+agent launched this way is the very same session the dashboard manages — launch
+it here, then open `kmux`, and it focuses that running agent.
+
 ## Config
 
 An optional `~/.config/kmux/config.yaml` lets you list extra git project folders

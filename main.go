@@ -10,6 +10,29 @@ import (
 )
 
 func main() {
+	// Route the command line: `--agent` selects the agent launcher (create/attach
+	// a tmux session in the current terminal, no kitty needed); otherwise kmux
+	// runs the dashboard as before.
+	pa, err := parseArgs(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
+		os.Exit(1)
+	}
+	if pa.agent != "" {
+		if err := runAgent(pa.path, pa.agent); err != nil {
+			fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	runDashboard(pa.path)
+}
+
+// runDashboard launches the kmux dashboard. pathArg, when non-empty, scopes kmux
+// to the single git project containing it: the Sessions and Projects panels then
+// show only that project (and its worktrees). Without it, kmux scans ~/git plus
+// any configured folders. The dashboard requires kitty with remote control.
+func runDashboard(pathArg string) {
 	if os.Getenv("KITTY_LISTEN_ON") == "" {
 		fmt.Fprintln(os.Stderr, "kmux: KITTY_LISTEN_ON is not set.")
 		fmt.Fprintln(os.Stderr, "Run kmux inside kitty with remote control enabled:")
@@ -24,12 +47,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// An optional directory argument scopes kmux to a single git project: the
-	// Sessions and Projects panels then show only that project (and its
-	// worktrees). Without it, kmux scans ~/git plus any configured folders.
 	var scopeDir string
-	if len(os.Args) > 1 {
-		proj, err := ScanProject(os.Args[1])
+	if pathArg != "" {
+		proj, err := ScanProject(pathArg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
 			os.Exit(1)
