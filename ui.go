@@ -967,9 +967,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "1":
-		m.cursor = sectionStart(rows, sectionSessions)
-	case "2":
 		m.cursor = sectionStart(rows, sectionProjects)
+	case "2":
+		m.cursor = sectionStart(rows, sectionSessions)
 	}
 	return m, nil
 }
@@ -1395,11 +1395,11 @@ func (m model) View() string {
 		ph = 3
 	}
 
-	projTitle := "[2]─Projects"
+	projTitle := "[1]─Projects"
 	if m.scopeName != "" {
-		projTitle = "[2]─Project · " + m.scopeName
+		projTitle = "[1]─Project · " + m.scopeName
 	}
-	sessions := panel("[1]─Sessions", sLines, m.width, sh, focused == sectionSessions)
+	sessions := panel("[2]─Sessions", sLines, m.width, sh, focused == sectionSessions)
 	projects := panel(projTitle, pLines, m.width, ph, focused == sectionProjects)
 	parts := []string{sessions, projects}
 	if hh > 0 {
