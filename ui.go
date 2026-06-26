@@ -1381,12 +1381,9 @@ func (m model) View() string {
 		hh, avail = 0, m.height
 	}
 
-	// Size the two list panels: Sessions sized to its content up to half the space
-	// (min 3), Projects takes the rest.
-	sh := len(sLines) + 2
-	if max := avail / 2; sh > max {
-		sh = max
-	}
+	// Split the available height evenly between the two list panels (min 3 each);
+	// Projects takes any odd leftover row.
+	sh := avail / 2
 	if sh < 3 {
 		sh = 3
 	}
@@ -1401,19 +1398,19 @@ func (m model) View() string {
 	}
 	sessions := panel("[2]─Sessions", sLines, m.width, sh, focused == sectionSessions)
 	projects := panel(projTitle, pLines, m.width, ph, focused == sectionProjects)
-	parts := []string{sessions, projects}
+	parts := []string{projects, sessions}
 	if hh > 0 {
 		parts = append(parts, panel("Keys", renderHelp(focused), m.width, hh, false))
 	}
 	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
 	// The agent picker floats just under the selected row rather than docking in a
-	// panel, so launching reads as an action on that row. The panels stack Sessions
-	// [0, sh), Projects after; +1 skips each panel's top border.
+	// panel, so launching reads as an action on that row. The panels stack Projects
+	// [0, ph), Sessions after; +1 skips each panel's top border.
 	if m.prompt != nil && selPanelIdx >= 0 {
 		base := 0
-		if selPanel == sectionProjects {
-			base = sh
+		if selPanel == sectionSessions {
+			base = ph
 		}
 		frame = m.overlayPrompt(frame, base+1+selPanelIdx, selDepth)
 	}
