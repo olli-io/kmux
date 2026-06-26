@@ -1,0 +1,6 @@
+# Built binary (produced by `go build` / install.sh)
+/kmux
+
+# Go workspace files
+go.work
+go.work.sum
