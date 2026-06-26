@@ -99,8 +99,8 @@ func TestAgentCommand(t *testing.T) {
 	if got := agentCommand("claude"); got != "claude --continue" {
 		t.Errorf("claude cmd = %q, want %q", got, "claude --continue")
 	}
-	if got := agentCommand("opencode"); got != "opencode" {
-		t.Errorf("opencode cmd = %q, want %q", got, "opencode")
+	if got := agentCommand("opencode"); got != "opencode --continue" {
+		t.Errorf("opencode cmd = %q, want %q", got, "opencode --continue")
 	}
 }
 
