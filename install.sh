@@ -73,7 +73,7 @@ fi
 if [ -f "$SCRIPT_DIR/go.mod" ]; then
   info "Building $BIN_NAME from source in $SCRIPT_DIR ..."
   TMP_BIN="$(mktemp -d)/$BIN_NAME"
-  ( cd "$SCRIPT_DIR" && go build -trimpath -ldflags "-s -w" -o "$TMP_BIN" . )
+  ( cd "$SCRIPT_DIR" && go build -trimpath -ldflags "-s -w" -o "$TMP_BIN" ./cmd/kmux )
   info "Installing to $DEST/$BIN_NAME ..."
   $SUDO install -m 0755 "$TMP_BIN" "$DEST/$BIN_NAME"
   rm -f "$TMP_BIN"
@@ -81,7 +81,7 @@ if [ -f "$SCRIPT_DIR/go.mod" ]; then
 else
   info "No local checkout found; fetching via 'go install' from $REPO_URL ..."
   TMP_GOBIN="$(mktemp -d)"
-  GOBIN="$TMP_GOBIN" GOFLAGS="-trimpath" go install "${REPO_URL#https://}@latest" \
+  GOBIN="$TMP_GOBIN" GOFLAGS="-trimpath" go install "${REPO_URL#https://}/cmd/kmux@latest" \
     || die "go install failed. Clone the repo and re-run ./install.sh from inside it."
   info "Installing to $DEST/$BIN_NAME ..."
   $SUDO install -m 0755 "$TMP_GOBIN/$BIN_NAME" "$DEST/$BIN_NAME"
