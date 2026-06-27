@@ -280,11 +280,13 @@ func renderRow(r row, selected bool, collapsed map[string]bool, width int) strin
 		b.WriteString("  ")
 	}
 	if r.mark != "" {
-		b.WriteString(r.mark + " ")
+		b.WriteString(r.mark)
+		b.WriteString(" ")
 	}
 	b.WriteString(r.label)
 	if r.badge != "" {
-		b.WriteString(" " + r.badge)
+		b.WriteString(" ")
+		b.WriteString(r.badge)
 	}
 
 	line := b.String()

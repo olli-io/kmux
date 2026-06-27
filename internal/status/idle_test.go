@@ -142,7 +142,8 @@ func TestHashPaneDistinguishesContent(t *testing.T) {
 	if HashPane("idle screen") == HashPane("idle screen\n> typing") {
 		t.Fatal("different pane content must hash differently")
 	}
-	if HashPane("same") != HashPane("same") {
+	a, b := HashPane("same"), HashPane("same")
+	if a != b {
 		t.Fatal("identical pane content must hash identically")
 	}
 }
