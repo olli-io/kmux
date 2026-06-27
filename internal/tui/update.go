@@ -2,10 +2,12 @@ package tui
 
 import (
 	"path/filepath"
+	"slices"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/olli-io/kmux/internal/agent"
+	"github.com/olli-io/kmux/internal/config"
 	"github.com/olli-io/kmux/internal/status"
 )
 
@@ -77,6 +79,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case commandErrMsg:
+		// Float a dismissible error rather than using the bottom-of-panel line.
+		if msg.err != nil {
+			m.cmdErr = &commandError{title: msg.title, msg: msg.err.Error()}
+		}
+		return m, nil
+
 	case savedMsg:
 		if msg.err != nil {
 			m.lastErr = msg.err.Error()
@@ -88,6 +97,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // handleKey processes navigation and fold keys (arrows + vim).
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// A command-error float captures all input until dismissed.
+	if m.cmdErr != nil {
+		return m.handleErrKey(msg)
+	}
 	// The agent picker captures all input while open.
 	if m.prompt != nil {
 		return m.handlePromptKey(msg)
@@ -96,61 +109,57 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	rows := m.rows()
 	m.clampCursor(rows)
 
+	// ctrl+c and the panel-focus digits are fixed keys that always win, handled
+	// before the rebindable actions so a user binding can never shadow them.
 	switch msg.String() {
-	case "q", "ctrl+c":
+	case "ctrl+c":
+		m.mgr.CloseAll()
+		return m, tea.Quit
+	case "1":
+		m.cursor = sectionStart(rows, sectionProjects)
+		return m, nil
+	case "2":
+		m.cursor = sectionStart(rows, sectionSessions)
+		return m, nil
+	}
+
+	// Dispatch on the action the pressed key resolves to (keyAction is built from
+	// the resolved keybindings). An unbound key falls through to user commands.
+	switch m.keyAction[msg.String()] {
+	case config.ActionQuit:
 		m.mgr.CloseAll()
 		return m, tea.Quit
 
-	case "j", "down":
+	case config.ActionNextItem, config.ActionNextItemAlt:
 		if m.cursor < len(rows)-1 {
 			m.cursor++
 		}
-	case "k", "up":
+	case config.ActionPrevItem, config.ActionPrevItemAlt:
 		if m.cursor > 0 {
 			m.cursor--
 		}
 
-	case "l", "right":
-		r := rowAt(rows, m.cursor)
-		if r == nil {
-			break
-		}
-		if cmd := m.openOrFocusSession(r); cmd != nil {
-			return m, cmd
-		}
-		if cmd, ok := m.launchProject(r); ok {
-			return m, cmd
-		}
-		if r.collapsible && m.collapsed[r.key] {
-			delete(m.collapsed, r.key)
-		}
-	case "h", "left":
-		r := rowAt(rows, m.cursor)
-		if r == nil {
-			break
-		}
-		if r.collapsible && !m.collapsed[r.key] {
-			m.collapsed[r.key] = true
-		} else {
-			m.cursor = parentIndex(rows, m.cursor)
-		}
+	case config.ActionNextPanel, config.ActionNextPanelAlt:
+		m.focusPanel(rows, true)
+	case config.ActionPrevPanel, config.ActionPrevPanelAlt:
+		m.focusPanel(rows, false)
 
-	case "d":
+	case config.ActionDetachAgent:
 		// Detach a session leaf: close the agent's kitty pane while leaving the
 		// tmux session running, so the row stays in the panel (now unattached) and
-		// can be re-opened with enter/l. Marking it detached keeps reconcile from
-		// immediately re-attaching a pane; the reconcile below closes the current
-		// pane right away.
+		// can be re-opened with createOrAttachAgent. Marking it detached keeps
+		// reconcile from immediately re-attaching a pane; the reconcile below closes
+		// the current pane right away.
 		if r := rowAt(rows, m.cursor); isSessionLeaf(r) && !m.detached[r.session] {
 			m.detached[r.session] = true
 			return m, tea.Batch(reconcileCmd(m.mgr, m.attachable()), m.saveStateCmd())
 		}
-	case "D":
+	case config.ActionKillAgent:
 		// Kill the agent: ends the tmux session and its pane.
 		if name := m.killTarget(rowAt(rows, m.cursor)); name != "" {
 			return m, killSessionCmd(name)
 		}
-	case "enter", " ":
+	case config.ActionCreateOrAttachAgent:
 		r := rowAt(rows, m.cursor)
 		if r == nil {
 			break
@@ -169,26 +178,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-	case "g":
-		if dir := m.lazygitDir(rowAt(rows, m.cursor)); dir != "" {
-			return m, lazygitCmd(dir)
-		}
-
-	case "e":
-		// Open (or focus) the editor for the selected row's directory. Works in
-		// both panels, mirroring lazygit.
-		if dir := m.editorDir(rowAt(rows, m.cursor)); dir != "" {
-			return m, editorCmd(dir)
-		}
-
-	case "t":
+	case config.ActionLaunchKmuxInProject:
 		// Open the selected project's root/main worktree in a new kitty tab
 		// running its own kmux. Projects panel only (no-op for session rows).
 		if dir := m.projectRoot(rowAt(rows, m.cursor)); dir != "" {
 			return m, openTabCmd(dir)
 		}
 
-	case "f":
+	case config.ActionFullscreenAgent:
 		// Open the selected agent in its own kitty tab instead of a managed pane.
 		// Works in both panels: a session leaf attaches its session; a project row
 		// launches (or attaches) an agent, opening the picker when the kind is
@@ -201,22 +198,53 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 
-	case "c":
+	case config.ActionCreateOrFocusClaude:
 		// Launch (or focus) Claude for the selected project, skipping the picker.
 		if cmd := m.launchKindOn(rowAt(rows, m.cursor), "claude"); cmd != nil {
 			return m, cmd
 		}
-	case "o":
+	case config.ActionCreateOrFocusOpencode:
 		// Launch (or focus) OpenCode for the selected project, skipping the picker.
 		if cmd := m.launchKindOn(rowAt(rows, m.cursor), "opencode"); cmd != nil {
 			return m, cmd
 		}
 
-	case "1":
-		m.cursor = sectionStart(rows, sectionProjects)
-	case "2":
-		m.cursor = sectionStart(rows, sectionSessions)
+	default:
+		// Any other key may be a user-configured command (e.g. editor, lazygit)
+		// bound for the focused panel. Fixed keys above take precedence.
+		if cmd := m.runUserCommand(msg.String(), rows); cmd != nil {
+			return m, cmd
+		}
 	}
+	return m, nil
+}
+
+// focusPanel moves the cursor to the start of the previous or next panel, cycling
+// through the panel order. With only two panels prev and next land on the same
+// other panel, but it's written generically over the panel list so a third panel
+// would just work.
+func (m *model) focusPanel(rows []row, next bool) {
+	panels := []section{sectionProjects, sectionSessions}
+	cur := m.focusedSection(rows)
+	idx := slices.Index(panels, cur)
+	if idx < 0 {
+		idx = 0
+	}
+	delta := 1
+	if !next {
+		delta = -1
+	}
+	target := panels[(idx+delta+len(panels))%len(panels)]
+	m.cursor = sectionStart(rows, target)
+}
+
+// handleErrKey dismisses the command-error float on any keypress; ctrl+c quits.
+func (m model) handleErrKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+c" {
+		m.mgr.CloseAll()
+		return m, tea.Quit
+	}
+	m.cmdErr = nil
 	return m, nil
 }
 
@@ -425,20 +453,6 @@ func rowAt(rows []row, i int) *row {
 		return nil
 	}
 	return &rows[i]
-}
-
-// parentIndex returns the index of the nearest preceding row at a shallower
-// depth, or the current index if none exists.
-func parentIndex(rows []row, i int) int {
-	if i < 0 || i >= len(rows) {
-		return i
-	}
-	for j := i - 1; j >= 0; j-- {
-		if rows[j].depth < rows[i].depth {
-			return j
-		}
-	}
-	return i
 }
 
 // sectionStart returns the index of the first row in sec, or 0 if absent.

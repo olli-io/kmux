@@ -10,7 +10,7 @@ opencode) that each run in their own tmux session. It runs as a left sidebar
 inside a kitty window and auto-attaches every matching tmux session into its own
 pane.
 
-![kmux screenshot](screenshot.png)
+![kmux screenshot](docs/screenshot.png)
 
 ## Prerequisites
 
@@ -73,20 +73,33 @@ it here, then open `kmux`, and it focuses that running agent.
 
 ## Config
 
-An optional `~/.config/kmux/config.yaml` lets you list extra git project folders
-to show in the **Projects** panel, alongside the repos found under `~/git`:
+kmux reads a **default config shipped beside the binary** (installed as
+`config.yaml` next to `kmux`), then overlays your optional
+`~/.config/kmux/config.yaml` on top. You don't need to copy the default — just
+create your own file with the keys you want to change.
 
 ```yaml
-# Extra project folders for the Projects panel.
+# Extra project folders for the Projects panel (added to the ~/git discovery).
 projects:
   - ~/work/some-repo
-  - /opt/code/another-repo
 
-# Kill an agent whose pane sits unchanged this long, to free memory.
-# A Go duration (e.g. 2h, 90m); 0, off, or never disables it. Default: 2h.
+# Kill an agent whose pane sits unchanged this long (Go duration; off disables).
 idle_timeout: 2h
+
+# Custom command keybindings (the editor and lazygit bindings live here).
+customCommands:
+  - key: e
+    title: Editor
+    cmd: $EDITOR {dir}
+  - key: g
+    title: Lazygit
+    cmd: lazygit
+
+# Navigation keybindings — remap any action's key (defaults live in the binary).
+# keybindings:
+#   killAgent: x
 ```
 
-Paths may use `~` and `$ENV` references and point at a main worktree, a linked
-worktree, or a subdirectory of one. Entries that already live under `~/git` are
-deduplicated.
+See **[docs/configuration.md](docs/configuration.md)** for the full reference:
+how config layers combine, all `customCommands` fields and `cmd:` placeholders,
+`target:` modes, and the complete list of rebindable navigation keybindings.

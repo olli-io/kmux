@@ -20,6 +20,28 @@ const (
 // ungrouped holds sessions whose project prefix matches no ~/git project.
 const ungrouped = "(ungrouped)"
 
+// liveState is a project/worktree row's aggregate session state, driving its name
+// color: no running session (default), a running session whose pane the user
+// detached (red, mirroring the Sessions panel's "D"), or a running session with a
+// live pane (green). Ordered by precedence so a numeric max rolls several sessions
+// up to the strongest state.
+type liveState int
+
+const (
+	liveNone liveState = iota
+	liveDetached
+	liveAttached
+)
+
+// maxLive returns the higher-precedence of two live states (attached > detached >
+// none), used to roll a folder's worktrees into one header state.
+func maxLive(a, b liveState) liveState {
+	if b > a {
+		return b
+	}
+	return a
+}
+
 // row is one visible line in the dashboard tree. Rows for both panels live in a
 // single flat slice so a single cursor can traverse them; section tells the
 // renderer which panel each belongs to.
@@ -178,7 +200,7 @@ func buildSessionRows(sessions, names []string, collapsed map[string]bool, atten
 // worktrees is a single actionable leaf. A multi-worktree project becomes a
 // collapsible folder whose expanded children list the main worktree first,
 // then each linked worktree; every child is an actionable leaf.
-func buildProjectRows(projects []project.Project, collapsed map[string]bool, hasSession func(string) bool, deco rowDeco) []row {
+func buildProjectRows(projects []project.Project, collapsed map[string]bool, live func(string) liveState, deco rowDeco) []row {
 	// Folders (multi-worktree projects) sort to the top, single-worktree leaves
 	// after; order within each group is preserved.
 	ordered := make([]project.Project, 0, len(projects))
@@ -199,21 +221,18 @@ func buildProjectRows(projects []project.Project, collapsed map[string]bool, has
 		if len(p.Worktrees) == 0 {
 			rows = append(rows, row{
 				section: sectionProjects,
-				label:   deco.projectLeaf(p, hasSession(mainSession)),
+				label:   deco.projectLeaf(p, live(mainSession)),
 				dir:     p.Path,
 				session: mainSession,
 			})
 			continue
 		}
 
-		// The collapsed folder header turns green when any of its worktrees
-		// (main or linked) has a live session.
-		folderActive := hasSession(mainSession)
+		// The collapsed folder header rolls up its worktrees (main or linked):
+		// green when any has a live pane, red when any has only a detached one.
+		folderLive := live(mainSession)
 		for _, w := range p.Worktrees {
-			if hasSession(agent.ExpectedSession(p.Name, w.Name)) {
-				folderActive = true
-				break
-			}
+			folderLive = maxLive(folderLive, live(agent.ExpectedSession(p.Name, w.Name)))
 		}
 
 		pkey := "proj:" + p.Name
@@ -221,7 +240,7 @@ func buildProjectRows(projects []project.Project, collapsed map[string]bool, has
 			section:     sectionProjects,
 			key:         pkey,
 			collapsible: true,
-			label:       deco.projectFolder(p, !collapsed[pkey], folderActive),
+			label:       deco.projectFolder(p, !collapsed[pkey], folderLive),
 		})
 		if collapsed[pkey] {
 			continue
@@ -230,7 +249,7 @@ func buildProjectRows(projects []project.Project, collapsed map[string]bool, has
 		rows = append(rows, row{
 			section: sectionProjects,
 			depth:   1,
-			label:   deco.mainWorktree(p, hasSession(mainSession)),
+			label:   deco.mainWorktree(p, live(mainSession)),
 			dir:     p.Path,
 			session: mainSession,
 		})
@@ -239,7 +258,7 @@ func buildProjectRows(projects []project.Project, collapsed map[string]bool, has
 			rows = append(rows, row{
 				section: sectionProjects,
 				depth:   1,
-				label:   deco.worktree(w, hasSession(wtSession)),
+				label:   deco.worktree(w, live(wtSession)),
 				dir:     w.Path,
 				session: wtSession,
 			})

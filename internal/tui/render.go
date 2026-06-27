@@ -13,7 +13,8 @@ var (
 	clStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))  // claude
 	ocStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("213")) // opencode (pink)
 	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
-	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
+	errColor    = lipgloss.Color("9") // error red (border, glyphs, text)
+	errStyle    = lipgloss.NewStyle().Foreground(errColor)
 	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	activeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("10")) // project with a live session
 	folderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("12")) // folder glyph (blue)
@@ -144,10 +145,10 @@ func projectGit(p project.Project) gitStatus {
 }
 
 // branchLabel labels a worktree/project leaf: a leading git-status mark (in place
-// of a plain git glyph), the project name (green when active), and the dim branch
-// tail.
-func branchLabel(name, branch string, active bool, gs gitStatus) string {
-	return gitStatusGlyph(gs) + " " + projectName(name, active) + branchSuffix(branch)
+// of a plain git glyph), the project name (colored by live session state), and the
+// dim branch tail.
+func branchLabel(name, branch string, live liveState, gs gitStatus) string {
+	return gitStatusGlyph(gs) + " " + projectName(name, live) + branchSuffix(branch)
 }
 
 // gitStatusGlyph marks a checkout's git state at the head of its row. A dirty
@@ -174,29 +175,33 @@ func gitStatusGlyph(gs gitStatus) string {
 	}
 }
 
-// projectName renders a project/worktree name, colored green when it has a live
-// agent session.
-func projectName(name string, active bool) string {
-	if active {
+// projectName renders a project/worktree name, colored by its live session state:
+// green when a session has a live pane, red when its only session is detached
+// (mirroring the Sessions panel's "D"), uncolored when it has no session.
+func projectName(name string, live liveState) string {
+	switch live {
+	case liveAttached:
 		return activeStyle.Render(name)
+	case liveDetached:
+		return errStyle.Render(name)
 	}
 	return name
 }
 
 // projectLeaf labels a single-worktree project (name + branch).
-func (rowDeco) projectLeaf(p project.Project, active bool) string {
-	return branchLabel(p.Name, p.Branch, active, projectGit(p))
+func (rowDeco) projectLeaf(p project.Project, live liveState) string {
+	return branchLabel(p.Name, p.Branch, live, projectGit(p))
 }
 
 // projectFolder labels a multi-worktree project header (folder glyph + name).
 // The glyph is the open variant when expanded, the closed variant otherwise.
 // The branch moves onto the main-worktree child row inside the expanded list.
-func (rowDeco) projectFolder(p project.Project, open, active bool) string {
+func (rowDeco) projectFolder(p project.Project, open bool, live liveState) string {
 	glyph := folderGlyph
 	if open {
 		glyph = folderOpenGlyph
 	}
-	label := folderStyle.Render(glyph) + " " + projectName(p.Name, active)
+	label := folderStyle.Render(glyph) + " " + projectName(p.Name, live)
 	// When collapsed the worktree rows (with their own marks) are hidden, so the
 	// header carries an aggregate status rolled up across the main worktree and
 	// every linked one. Expanded, the per-row marks below say it instead.
@@ -236,10 +241,10 @@ func (rowDeco) sessionFolder(name string, open bool) string {
 
 // mainWorktree labels the main worktree row (repo name + branch), listed first
 // inside an expanded project folder.
-func (rowDeco) mainWorktree(p project.Project, active bool) string {
-	return branchLabel(p.Name, p.Branch, active, projectGit(p))
+func (rowDeco) mainWorktree(p project.Project, live liveState) string {
+	return branchLabel(p.Name, p.Branch, live, projectGit(p))
 }
 
-func (rowDeco) worktree(w project.Worktree, active bool) string {
-	return branchLabel(w.Name, w.Branch, active, worktreeGit(w))
+func (rowDeco) worktree(w project.Worktree, live liveState) string {
+	return branchLabel(w.Name, w.Branch, live, worktreeGit(w))
 }

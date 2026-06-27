@@ -1,0 +1,46 @@
+# kmux default configuration.
+#
+# kmux reads this file, then overlays ~/.config/kmux/config.yaml on top. To
+# customize, just create that file with the keys you want to change — no need to
+# copy this one.
+#
+# Full reference: https://github.com/olli-io/kmux/blob/main/docs/configuration.md
+
+# Extra git project folders for the Projects panel.
+# projects:
+#   - ~/work/some-repo
+
+# Kill an idle agent's pane after this long. Go duration; 0/off/never disables.
+# idle_timeout: 2h
+
+# Bind a key to a shell command run in a new kitty tab at the selected folder.
+customCommands:
+  - key: e
+    panel: both
+    title: Editor
+    cmd: $EDITOR {dir}
+    target: detach
+  - key: g
+    panel: both
+    title: View git diff
+    cmd: git diff -- {dir}
+
+# Remap navigation keys. Defaults live in the binary; uncomment only what you
+# want to change. (1/2/ctrl+c are fixed.)
+# keybindings:
+#   prevItem:               k       # move cursor up
+#   nextItem:               j       # move cursor down
+#   prevItemAlt:            up      # move cursor up (alias)
+#   nextItemAlt:            down    # move cursor down (alias)
+#   prevPanel:              h       # focus the other panel
+#   nextPanel:              l       # focus the other panel
+#   prevPanelAlt:           left    # focus the other panel (alias)
+#   nextPanelAlt:           right   # focus the other panel (alias)
+#   createOrAttachAgent:    enter   # open/focus/launch the selection (or toggle a folder)
+#   detachAgent:            d       # detach a session's pane (tmux keeps running)
+#   killAgent:              D       # kill the agent's tmux session
+#   fullscreenAgent:        f       # open the agent in its own kitty tab
+#   createOrFocusClaude:    c       # launch/focus Claude for the project
+#   createOrFocusOpencode:  o       # launch/focus OpenCode for the project
+#   launchKmuxInProject:    t       # open the project in a new kmux tab
+#   quit:                   q       # quit kmux

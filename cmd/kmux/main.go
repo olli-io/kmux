@@ -41,6 +41,19 @@ func main() {
 // show only that project (and its worktrees). Without it, kmux scans ~/git plus
 // any configured folders. The dashboard requires kitty with remote control.
 func runDashboard(pathArg string) {
+	// kmux drives its split-pane dashboard through kitty's remote control, so it
+	// only works inside the kitty terminal. Detect a non-kitty host first and fail
+	// with a clear compatibility message, rather than the remote-control hint below
+	// (which wrongly implies the user is already in kitty).
+	if !kitty.InKitty() {
+		fmt.Fprintln(os.Stderr, "kmux: incompatible terminal — kmux only runs inside the kitty terminal.")
+		if term := os.Getenv("TERM"); term != "" {
+			fmt.Fprintf(os.Stderr, "Detected TERM=%s.\n", term)
+		}
+		fmt.Fprintln(os.Stderr, "Install kitty and run kmux inside it: https://sw.kovidgoyal.net/kitty/")
+		os.Exit(1)
+	}
+
 	if os.Getenv("KITTY_LISTEN_ON") == "" {
 		fmt.Fprintln(os.Stderr, "kmux: KITTY_LISTEN_ON is not set.")
 		fmt.Fprintln(os.Stderr, "Run kmux inside kitty with remote control enabled:")

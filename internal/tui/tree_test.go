@@ -15,7 +15,7 @@ func TestBuildProjectRows(t *testing.T) {
 		}},
 	}
 
-	noSession := func(string) bool { return false }
+	noSession := func(string) liveState { return liveNone }
 	rows := buildProjectRows(projects, map[string]bool{}, noSession, rowDeco{})
 
 	// Multi-worktree folders sort to the top, single-worktree leaves after.

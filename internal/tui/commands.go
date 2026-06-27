@@ -2,7 +2,10 @@ package tui
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -44,6 +47,13 @@ type attentionMsg struct {
 }
 type focusedMsg struct{ err error }
 type savedMsg struct{ err error }
+
+// commandErrMsg reports a user-configured command that failed to launch; it
+// drives the dismissible error float.
+type commandErrMsg struct {
+	title string
+	err   error
+}
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(pollInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
@@ -219,18 +229,111 @@ func (m model) saveStateCmd() tea.Cmd {
 	}
 }
 
-// lazygitCmd opens lazygit for dir in a new kitty tab.
-func lazygitCmd(dir string) tea.Cmd {
+// runUserCommand dispatches the configured command bound to key in the focused
+// panel: it resolves the selected row's directory, substitutes {dir}, and runs
+// the command in a new kitty tab. It returns nil when no command matches the key
+// and panel, or when the row has no associated directory.
+func (m model) runUserCommand(key string, rows []row) tea.Cmd {
+	panel := panelName(m.focusedSection(rows))
+	r := rowAt(rows, m.cursor)
+	for _, c := range m.commands {
+		if c.Key != key || !c.Matches(panel) {
+			continue
+		}
+		vars := m.commandVars(r)
+		if vars["dir"] == "" {
+			return nil // no directory to run in (e.g. an ungrouped session)
+		}
+		runline := expandCommandVars(c.Cmd, vars)
+		title := c.Title
+		if title == "" {
+			title = filepath.Base(vars["dir"])
+		}
+		switch c.EffectiveTarget() {
+		case "detach":
+			return detachProcessCmd(vars["dir"], title, runline)
+		case "window":
+			return userCommandCmd(vars["dir"], title, holdOnError(runline, title), kitty.OpenCommandWindow)
+		default: // "tab"
+			return userCommandCmd(vars["dir"], title, holdOnError(runline, title), kitty.OpenCommandTab)
+		}
+	}
+	return nil
+}
+
+// holdOnError wraps a tab/window command so a non-zero exit keeps its kitty
+// surface open with a labeled notice (awaiting a keypress) instead of flashing
+// shut; a zero exit closes normally. It runs out of kmux's reach, so this is how
+// a tab/window command's own failure surfaces. label is shell-escaped.
+func holdOnError(runline, label string) string {
+	return runline +
+		`; __kmux_st=$?; if [ "$__kmux_st" -ne 0 ]; then ` +
+		`printf '\n\033[1;31m%s failed (exit %s)\033[0m\nPress any key to close… ' ` + shellQuote(label) + ` "$__kmux_st"; ` +
+		`__kmux_stty=$(stty -g 2>/dev/null); stty -echo -icanon 2>/dev/null; ` +
+		`dd bs=1 count=1 >/dev/null 2>&1; ` +
+		`[ -n "$__kmux_stty" ] && stty "$__kmux_stty" 2>/dev/null; fi`
+}
+
+// expandCommandVars substitutes each {name} placeholder in run with its
+// shell-escaped value from vars; placeholders with no matching key are left
+// as-is. See commandVars for the available names.
+func expandCommandVars(run string, vars map[string]string) string {
+	for k, v := range vars {
+		run = strings.ReplaceAll(run, "{"+k+"}", shellQuote(v))
+	}
+	return run
+}
+
+// userCommandCmd runs a configured command's expanded run line off the UI
+// goroutine via open (OpenCommandTab or OpenCommandWindow), with cwd set to dir.
+func userCommandCmd(dir, title, runline string, open func(dir, title, runline string) error) tea.Cmd {
 	return func() tea.Msg {
-		return focusedMsg{err: kitty.OpenLazygit(dir)}
+		if err := open(dir, title, runline); err != nil {
+			return commandErrMsg{title: title, err: err}
+		}
+		return focusedMsg{}
 	}
 }
 
-// editorCmd opens (or focuses) an editor for dir off the UI goroutine.
-func editorCmd(dir string) tea.Cmd {
+// detachGrace bounds how long detachProcessCmd waits for a just-started command
+// to fail before treating it as a launched, live app.
+const detachGrace = 600 * time.Millisecond
+
+// detachProcessCmd runs runline (via `sh -c`) as a detached background process in
+// dir with no kitty surface — for fork-and-return GUI apps (Zed, VS Code). The
+// child gets its own process group, survives kmux, and has stdio at /dev/null.
+// As kmux's own child its exit is observable: a failure within detachGrace floats
+// a commandErrMsg; anything still alive is reaped in the background and reported
+// launched.
+func detachProcessCmd(dir, title, runline string) tea.Cmd {
 	return func() tea.Msg {
-		return focusedMsg{err: openEditor(dir)}
+		c := exec.Command("sh", "-c", runline)
+		c.Dir = dir
+		c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if devnull, err := os.Open(os.DevNull); err == nil {
+			c.Stdin, c.Stdout, c.Stderr = devnull, devnull, devnull
+		}
+		if err := c.Start(); err != nil {
+			return commandErrMsg{title: title, err: err}
+		}
+		done := make(chan error, 1)
+		go func() { done <- c.Wait() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				return commandErrMsg{title: title, err: err}
+			}
+			return focusedMsg{}
+		case <-time.After(detachGrace):
+			return focusedMsg{} // still running: a live app, reaped by the goroutine
+		}
 	}
+}
+
+// shellQuote wraps s in single quotes for safe interpolation into a `sh -c` line,
+// escaping any embedded single quotes.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // openAgentTabCmd attaches an agent session in a new standalone kitty tab (not a

@@ -3,11 +3,23 @@ package kitty
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
+
+// InKitty reports whether the current process is running inside the kitty
+// terminal. kitty exports KITTY_PID and KITTY_WINDOW_ID into every window's
+// environment (independent of whether remote control is enabled) and sets
+// TERM=xterm-kitty; any of these is a reliable signal that the host terminal is
+// kitty. Used to fail fast with a compatibility error in other terminals before
+// kmux tries to drive kitty over remote control.
+func InKitty() bool {
+	return os.Getenv("KITTY_PID") != "" ||
+		os.Getenv("KITTY_WINDOW_ID") != "" ||
+		os.Getenv("TERM") == "xterm-kitty"
+}
 
 // SplitLocation is the kitty `--location` value for the splits layout.
 type SplitLocation string
@@ -102,17 +114,30 @@ func OpenAgentTab(name, title string) error {
 	return err
 }
 
-// OpenLazygit opens lazygit for dir in a new kitty tab in the current OS window
-// and focuses it. The tab runs lazygit with its cwd set to dir. This is
+// OpenCommandTab runs runline (via `sh -c`) in a new kitty tab in the current OS
+// window with its cwd set to dir, and focuses it. It backs the user-configurable
+// command keybindings (editor, lazygit, …). Like the other tab launchers it is
 // fire-and-forget: it is NOT a managed pane, so Manager/Reconcile/Rebalance never
-// see it; closing lazygit closes the tab.
-func OpenLazygit(dir string) error {
+// see it; closing the tab closes the command.
+func OpenCommandTab(dir, title, runline string) error {
 	_, err := kittenAt(
 		"launch",
 		"--type=tab",
 		"--cwd", dir,
-		"--tab-title", "lazygit · "+filepath.Base(dir),
-		"lazygit")
+		"--tab-title", title,
+		"sh", "-c", runline)
+	return err
+}
+
+// OpenCommandWindow is like OpenCommandTab but opens runline in a new kitty OS
+// window (a separate kitty instance) instead of a tab.
+func OpenCommandWindow(dir, title, runline string) error {
+	_, err := kittenAt(
+		"launch",
+		"--type=os-window",
+		"--cwd", dir,
+		"--window-title", title,
+		"sh", "-c", runline)
 	return err
 }
 

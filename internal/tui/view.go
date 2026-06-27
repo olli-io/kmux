@@ -1,45 +1,113 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/olli-io/kmux/internal/config"
 )
 
 // keyHint is one row in the bottom keybind panel: the key(s) and what they do.
 type keyHint struct{ key, desc string }
 
-// helpHints returns the keybind hints for the focused section: the section's
-// action keys first, then the shared navigation keys (move / switch panel /
-// quit). The h/l fold keys are omitted as redundant with open/focus.
-func helpHints(focused section) []keyHint {
+// maxConflictLines caps how many keybinding-conflict lines the Keys panel shows,
+// so a badly broken config can't grow the footer without bound.
+const maxConflictLines = 6
+
+// keyLabel renders a resolved key for the footer, swapping the names that don't
+// read well literally (enter, arrows, space) for glyphs or words. An empty key
+// (an action with no binding) renders empty.
+func keyLabel(key string) string {
+	switch key {
+	case "":
+		return ""
+	case "enter":
+		return "↵"
+	case "up":
+		return "↑"
+	case "down":
+		return "↓"
+	case "left":
+		return "←"
+	case "right":
+		return "→"
+	case " ":
+		return "space"
+	}
+	return key
+}
+
+// helpHints returns the keybind hints for the focused section, labeled from the
+// resolved keybindings (m.keys): the section's action keys, then the
+// user-configured commands that apply to the panel (e.g. editor, lazygit), then
+// quit. The panel-focus digits 1/2 are documented by the panel titles instead, and
+// the arrow-alias actions are omitted as conventional.
+func (m model) helpHints(focused section) []keyHint {
+	kb := func(action string) string { return keyLabel(m.keys[action]) }
+	pair := func(a, b string) string { return kb(a) + "/" + kb(b) }
+
+	move := keyHint{pair(config.ActionNextItem, config.ActionPrevItem), "Move"}
+	switchPanel := keyHint{pair(config.ActionPrevPanel, config.ActionNextPanel), "Switch panel"}
+
+	var hints []keyHint
 	switch focused {
 	case sectionSessions:
-		return []keyHint{
-			{"j/k", "Move"},
-			{"1/2", "Switch panel"},
-			{"↵/space", "Focus pane"},
-			{"f", "Fullscreen agent"},
-			{"d", "Detach"},
-			{"D", "Kill session"},
-			{"g", "Lazygit"},
-			{"e", "Editor"},
-			{"q", "Quit"},
+		hints = []keyHint{
+			move,
+			switchPanel,
+			{kb(config.ActionCreateOrAttachAgent), "Focus pane"},
+			{kb(config.ActionFullscreenAgent), "Fullscreen agent"},
+			{kb(config.ActionDetachAgent), "Detach"},
+			{kb(config.ActionKillAgent), "Kill session"},
+		}
+	default:
+		hints = []keyHint{
+			move,
+			switchPanel,
+			{kb(config.ActionCreateOrAttachAgent), "Launch agent"},
+			{pair(config.ActionCreateOrFocusClaude, config.ActionCreateOrFocusOpencode), "Launch claude/opencode"},
+			{kb(config.ActionFullscreenAgent), "Fullscreen agent"},
+			{kb(config.ActionLaunchKmuxInProject), "Kmux project in tab"},
+			{kb(config.ActionKillAgent), "Kill session"},
 		}
 	}
-	return []keyHint{
-		{"j/k", "Move"},
-		{"1/2", "Switch panel"},
-		{"↵/space", "Launch agent"},
-		{"c/o", "Launch claude/opencode"},
-		{"f", "Fullscreen agent"},
-		{"t", "Kmux project in tab"},
-		{"D", "Kill session"},
-		{"g", "Lazygit"},
-		{"e", "Editor"},
-		{"q", "Quit"},
+	panel := panelName(focused)
+	for _, c := range m.commands {
+		if !c.Matches(panel) {
+			continue
+		}
+		label := c.Title
+		if label == "" {
+			label = c.Cmd
+		}
+		hints = append(hints, keyHint{keyLabel(c.Key), label})
 	}
+	return append(hints, keyHint{kb(config.ActionQuit), "Quit"})
+}
+
+// conflictLines renders the keybinding-conflict report (m.conflicts) as
+// error-styled body lines, capped at maxConflictLines with a "+N more" summary
+// when there are more. It returns nil when there are no conflicts.
+func (m model) conflictLines() []string {
+	if len(m.conflicts) == 0 {
+		return nil
+	}
+	if len(m.conflicts) <= maxConflictLines {
+		lines := make([]string, len(m.conflicts))
+		for i, c := range m.conflicts {
+			lines[i] = errStyle.Render("! " + c)
+		}
+		return lines
+	}
+	lines := make([]string, maxConflictLines)
+	for i := 0; i < maxConflictLines-1; i++ {
+		lines[i] = errStyle.Render("! " + m.conflicts[i])
+	}
+	more := len(m.conflicts) - (maxConflictLines - 1)
+	lines[maxConflictLines-1] = errStyle.Render(fmt.Sprintf("! … %d more conflict(s)", more))
+	return lines
 }
 
 // renderPrompt formats the agent picker's body lines: one row per agent kind,
@@ -93,20 +161,27 @@ func promptBox(p *agentPrompt, maxInner int) string {
 	return panel(title, body, inner+2, len(body)+2, true)
 }
 
-// helpHeight is the body-row count of the keybind panel: the tallest of the three
-// sections' hint lists, so the panel stays a constant height and the dashboard
-// doesn't jump when switching panels (shorter lists pad with blank rows).
-func helpHeight() int {
-	return max(
-		len(helpHints(sectionSessions)),
-		len(helpHints(sectionProjects)),
+// helpHeight is the body-row count of the keybind panel: the tallest of the
+// sections' hint lists or the (capped) conflict report, so the panel stays a
+// constant height, the dashboard doesn't jump when switching panels, and a
+// conflict report is never clipped (shorter content pads with blank rows).
+func (m model) helpHeight() int {
+	hints := max(
+		len(m.helpHints(sectionSessions)),
+		len(m.helpHints(sectionProjects)),
 	)
+	return max(hints, min(len(m.conflicts), maxConflictLines))
 }
 
 // renderHelp formats the keybind hints into panel body lines, keys left-aligned
-// to a common width with dim descriptions.
-func renderHelp(focused section) []string {
-	hints := helpHints(focused)
+// to a common width with dim descriptions. While the config has keybinding
+// conflicts the hints are replaced by the error-styled conflict report, so a
+// broken config is visible rather than silently mis-behaving.
+func (m model) renderHelp(focused section) []string {
+	if lines := m.conflictLines(); lines != nil {
+		return lines
+	}
+	hints := m.helpHints(focused)
 	kw := 0
 	for _, h := range hints {
 		if w := lipgloss.Width(h.key); w > kw {
@@ -177,7 +252,7 @@ func (m model) View() string {
 
 	// Reserve the bottom rows for the keybind panel, but drop it on very short
 	// terminals so the lists keep usable height.
-	hh := helpHeight() + 2
+	hh := m.helpHeight() + 2
 	avail := m.height - hh
 	if avail < 6 { // two list panels need 3 rows each; drop help before starving them
 		hh, avail = 0, m.height
@@ -202,7 +277,7 @@ func (m model) View() string {
 	projects := panel(projTitle, pLines, m.width, ph, focused == sectionProjects)
 	parts := []string{projects, sessions}
 	if hh > 0 {
-		parts = append(parts, panel("Keys", renderHelp(focused), m.width, hh, false))
+		parts = append(parts, panel("Keys", m.renderHelp(focused), m.width, hh, false))
 	}
 	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
@@ -215,6 +290,10 @@ func (m model) View() string {
 			base = ph
 		}
 		frame = m.overlayPrompt(frame, base+1+selPanelIdx, selDepth)
+	}
+	// Command-error float sits on top, centered.
+	if m.cmdErr != nil {
+		frame = m.overlayError(frame)
 	}
 	return frame
 }
@@ -246,6 +325,55 @@ func (m model) overlayPrompt(frame string, selY, depth int) string {
 	for i, bl := range boxLines {
 		if row := y + i; row >= 0 && row < len(lines) {
 			lines[row] = overlayLine(lines[row], bl, x)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// errorBox renders the command-error float: a red-bordered box titled with the
+// failed command, the wrapped message, and a dismiss hint. maxInner/maxHeight cap
+// its size; overflow message lines are dropped with an ellipsis.
+func errorBox(e *commandError, maxInner, maxHeight int) string {
+	bs := lipgloss.NewStyle().Foreground(errColor)
+	ts := bs.Bold(true)
+
+	title := "Command failed"
+	if e.title != "" {
+		title += " · " + e.title
+	}
+	hint := keyStyle.Render("esc") + dimStyle.Render(" dismiss")
+
+	inner := max(lipgloss.Width(title), lipgloss.Width(hint), 40)
+	if inner > maxInner {
+		inner = maxInner
+	}
+	if inner < 1 {
+		inner = 1
+	}
+
+	msg := strings.Split(ansi.Wrap(strings.TrimSpace(e.msg), inner, ""), "\n")
+	// Cap height; ellipsize the last line when the message overflows.
+	if maxBody := maxHeight - 4; maxBody >= 1 && len(msg) > maxBody {
+		msg = msg[:maxBody]
+		msg[maxBody-1] = ansi.Truncate(msg[maxBody-1], inner-1, "…")
+	}
+	body := append(msg, "", hint)
+	return box(title, body, inner+2, len(body)+2, bs, ts)
+}
+
+// overlayError composites the command-error float centered on the frame.
+func (m model) overlayError(frame string) string {
+	box := errorBox(m.cmdErr, m.width-2, m.height-2)
+	boxLines := strings.Split(box, "\n")
+	boxW, boxH := lipgloss.Width(boxLines[0]), len(boxLines)
+
+	x := max((m.width-boxW)/2, 0)
+	y := max((m.height-boxH)/2, 0)
+
+	lines := strings.Split(frame, "\n")
+	for i, bl := range boxLines {
+		if r := y + i; r >= 0 && r < len(lines) {
+			lines[r] = overlayLine(lines[r], bl, x)
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -322,7 +450,13 @@ func panel(title string, body []string, width, height int, focused bool) string 
 		bs = bs.Foreground(borderIdle)
 		ts = ts.Foreground(borderIdle)
 	}
+	return box(title, body, width, height, bs, ts)
+}
 
+// box draws a rounded, titled frame with border style bs and title style ts
+// (panel and the error float differ only in color). width/height include the
+// border; body lines are clipped/padded to the inner width.
+func box(title string, body []string, width, height int, bs, ts lipgloss.Style) string {
 	inner := width - 2 // columns between the vertical borders
 	if inner < 1 {
 		inner = 1

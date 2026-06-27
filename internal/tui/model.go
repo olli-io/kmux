@@ -25,8 +25,19 @@ type model struct {
 	cursor        int                              // index into rows()
 	spinnerFrame  int                              // animation frame for busy-session glyphs
 	prompt        *agentPrompt                     // non-nil while the agent-picker overlay is open
+	commands      []config.CustomCommand           // user-configurable command keybindings (editor, lazygit, …)
+	cmdErr        *commandError                    // non-nil while a failed-command error float is shown
 	lastErr       string
 	width, height int
+
+	// keys is the resolved action→key map (config.KeyActions → key) used to label
+	// the Keys footer. keyAction is its reverse (key→action), built in KeyActions
+	// order so the first action listed wins a shared key; the dispatch in handleKey
+	// switches on it. conflicts holds any duplicate-key report lines from
+	// config.KeybindingConflicts, shown in place of the hints while non-empty.
+	keys      map[string]string
+	keyAction map[string]string
+	conflicts []string
 
 	// scopeDir is the main-worktree path kmux is scoped to (from the CLI
 	// directory argument); scopeName is its project name. Both empty in the
@@ -34,6 +45,13 @@ type model struct {
 	// project and the Sessions panel only its sessions.
 	scopeDir  string
 	scopeName string
+}
+
+// commandError backs the error float for a failed command: title names it, msg
+// is the failure. Dismissed by any keypress.
+type commandError struct {
+	title string
+	msg   string
 }
 
 // agentPrompt is the state of the agent-picker shown when launching a project:
@@ -73,15 +91,77 @@ func NewModel(mgr *layout.Manager, scopeDir string) tea.Model {
 	// Seeding the tracker with the persisted clocks lets idle time accumulated
 	// before this launch keep counting instead of resetting to zero.
 	cfg, _ := config.LoadConfig()
+	keys := cfg.Keybindings
+	reserved := reservedKeys(keys)
 	return model{
 		mgr:       mgr,
 		collapsed: map[string]bool{},
 		detached:  detached,
 		attention: map[string]status.AttentionState{},
 		idle:      status.NewIdleTrackerFrom(cfg.IdleDuration(), idle),
+		commands:  effectiveCommands(cfg.CustomCommands, reserved),
+		keys:      keys,
+		keyAction: keyActionMap(keys),
+		conflicts: cfg.KeybindingConflicts(),
 		scopeDir:  scopeDir,
 		scopeName: scopeName,
 	}
+}
+
+// reservedKeys is the set of keys user commands cannot override: every resolved
+// keybinding plus the always-fixed 1, 2, and ctrl+c. A configured command landing
+// on one is dropped by effectiveCommands, so the fixed/rebindable action wins and
+// the command never shows in the Keys footer.
+func reservedKeys(keys map[string]string) map[string]bool {
+	reserved := map[string]bool{"1": true, "2": true, "ctrl+c": true}
+	for _, k := range keys {
+		reserved[k] = true
+	}
+	return reserved
+}
+
+// keyActionMap inverts the action→key map into key→action for dispatch. It
+// iterates config.KeyActions in canonical order so that when two actions share a
+// key the first-listed action wins (matching KeybindingConflicts' resolution).
+func keyActionMap(keys map[string]string) map[string]string {
+	out := make(map[string]string, len(keys))
+	for _, action := range config.KeyActions() {
+		if k := keys[action]; k != "" {
+			if _, taken := out[k]; !taken {
+				out[k] = action
+			}
+		}
+	}
+	return out
+}
+
+// effectiveCommands drops command bindings that can't take effect: those with an
+// empty cmd line and those whose key collides with a reserved binding.
+func effectiveCommands(cmds []config.CustomCommand, reserved map[string]bool) []config.CustomCommand {
+	out := make([]config.CustomCommand, 0, len(cmds))
+	for _, c := range cmds {
+		if c.Cmd == "" || reserved[c.Key] {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// focusedSection reports which panel holds the cursor, matching View's logic.
+func (m model) focusedSection(rows []row) section {
+	if r := rowAt(rows, m.cursor); r != nil {
+		return r.section
+	}
+	return sectionSessions
+}
+
+// panelName maps a section to the config panel-scope name used by CustomCommand.Matches.
+func panelName(s section) string {
+	if s == sectionProjects {
+		return "projects"
+	}
+	return "sessions"
 }
 
 func (m model) Init() tea.Cmd {
@@ -95,7 +175,7 @@ func (m model) rows() []row {
 	deco := rowDeco{spinner: m.spinnerFrame}
 	names := agent.ProjectNames(m.projects)
 	sess := buildSessionRows(m.sessions, names, m.collapsed, m.attention, m.mgr.Attached, m.isDetached, deco)
-	proj := buildProjectRows(m.projects, m.collapsed, m.hasSessionAny, deco)
+	proj := buildProjectRows(m.projects, m.collapsed, m.projectLive, deco)
 	out := make([]row, 0, len(sess)+len(proj))
 	out = append(out, sess...)
 	out = append(out, proj...)
@@ -160,13 +240,25 @@ func (m model) hasSession(name string) bool {
 	return slices.Contains(m.sessions, name)
 }
 
-// hasSessionAny reports whether a project/worktree has a running session of
-// either agent kind. claudeName is the ~cl session name (as produced by
-// agent.ExpectedSession); the opencode name is derived by suffix swap. It drives the
-// "active" green coloring of project rows so an opencode-only project still
-// reads as live.
-func (m model) hasSessionAny(claudeName string) bool {
-	return m.hasSession(claudeName) || m.hasSession(agent.SessionForKind(claudeName, "opencode"))
+// projectLive reports a project/worktree's aggregate live state for row coloring,
+// considering both agent kinds. claudeName is the ~cl session name (as produced by
+// agent.ExpectedSession); the opencode name is derived by suffix swap. It returns
+// liveAttached if any running session has a live pane, liveDetached if it has a
+// running session but every one is detached, and liveNone if none is running — so
+// an opencode-only project still reads as live and a detached one reads red.
+func (m model) projectLive(claudeName string) liveState {
+	live := liveNone
+	for _, name := range [2]string{claudeName, agent.SessionForKind(claudeName, "opencode")} {
+		if !m.hasSession(name) {
+			continue
+		}
+		if m.isDetached(name) {
+			live = maxLive(live, liveDetached)
+		} else {
+			live = maxLive(live, liveAttached)
+		}
+	}
+	return live
 }
 
 // killTarget returns the agent session a `d` press should kill for row r: a
@@ -217,6 +309,53 @@ func (m model) editorDir(r *row) string {
 		return dir
 	}
 	return m.projectRoot(r)
+}
+
+// commandVars builds the placeholder values exposed to user-configured commands
+// for the selected row r (see config.CustomCommand.Cmd). Every key is always present
+// (empty when it doesn't apply), so a command never sees a literal {name}:
+//
+//	{dir}          working directory of the row (the command's cwd)
+//	{project}      project name (e.g. kmux)
+//	{worktree}     linked-worktree name, empty on the main worktree
+//	{project_root} main-worktree path of the project
+//	{tmux_session} agent session name (<project>[/<worktree>]~cl|~oc)
+//
+// dir is resolved via editorDir, so it's set for any actionable row; project,
+// worktree, and project_root come from matching that dir to a scanned project.
+func (m model) commandVars(r *row) map[string]string {
+	dir := m.editorDir(r)
+	vars := map[string]string{
+		"dir":          dir,
+		"project":      "",
+		"worktree":     "",
+		"project_root": "",
+		"tmux_session": "",
+	}
+	if r != nil {
+		vars["tmux_session"] = r.session
+	}
+	for _, p := range m.projects {
+		if p.Path == dir {
+			vars["project"], vars["project_root"] = p.Name, p.Path
+			break
+		}
+		if w, ok := worktreeAt(p, dir); ok {
+			vars["project"], vars["worktree"], vars["project_root"] = p.Name, w.Name, p.Path
+			break
+		}
+	}
+	return vars
+}
+
+// worktreeAt returns p's linked worktree whose path is dir, if any.
+func worktreeAt(p project.Project, dir string) (project.Worktree, bool) {
+	for _, w := range p.Worktrees {
+		if w.Path == dir {
+			return w, true
+		}
+	}
+	return project.Worktree{}, false
 }
 
 // projectRoot returns the main-worktree path of the project that Projects-panel

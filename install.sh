@@ -19,8 +19,8 @@ have()  { command -v "$1" >/dev/null 2>&1; }
 # ---------------------------------------------------------------------------
 OS="$(uname -s)"
 case "$OS" in
-  Darwin) PLATFORM="macOS"; HELPER_BASENAME="nvim-tab.sh" ;;
-  Linux)  PLATFORM="Linux"; HELPER_BASENAME="nvim-tab-wayland.sh" ;;
+  Darwin) PLATFORM="macOS" ;;
+  Linux)  PLATFORM="Linux" ;;
   *)      die "unsupported OS: $OS (only macOS and Linux are supported)" ;;
 esac
 info "Detected platform: $PLATFORM ($(uname -m))"
@@ -43,15 +43,13 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
 # ---------------------------------------------------------------------------
 # Choose an install directory.
-# Prefer a user-writable dir on PATH; fall back to /usr/local/bin via sudo.
+# Defaults to /usr/local/bin (via sudo if needed).
 # Override with PREFIX or INSTALL_DIR env vars.
 # ---------------------------------------------------------------------------
 if [ -n "${INSTALL_DIR:-}" ]; then
   DEST="$INSTALL_DIR"
 elif [ -n "${PREFIX:-}" ]; then
   DEST="$PREFIX/bin"
-elif [ -d "$HOME/.local/bin" ] || mkdir -p "$HOME/.local/bin" 2>/dev/null; then
-  DEST="$HOME/.local/bin"
 else
   DEST="/usr/local/bin"
 fi
@@ -77,7 +75,7 @@ if [ -f "$SCRIPT_DIR/go.mod" ]; then
   info "Installing to $DEST/$BIN_NAME ..."
   $SUDO install -m 0755 "$TMP_BIN" "$DEST/$BIN_NAME"
   rm -f "$TMP_BIN"
-  HELPER_SRC="$SCRIPT_DIR/scripts/$HELPER_BASENAME"
+  CONFIG_SRC="$SCRIPT_DIR/scripts/config.yaml"
 else
   info "No local checkout found; fetching via 'go install' from $REPO_URL ..."
   TMP_GOBIN="$(mktemp -d)"
@@ -86,22 +84,19 @@ else
   info "Installing to $DEST/$BIN_NAME ..."
   $SUDO install -m 0755 "$TMP_GOBIN/$BIN_NAME" "$DEST/$BIN_NAME"
   rm -rf "$TMP_GOBIN"
-  HELPER_SRC=""
+  CONFIG_SRC=""
 fi
 
 # ---------------------------------------------------------------------------
-# Install the nvim-tab helper next to the binary, always as $DEST/nvim-tab.sh.
-# The source is platform-specific (macOS: scripts/nvim-tab.sh + aerospace;
-# Linux: scripts/nvim-tab-wayland.sh + Hyprland), but the installed name is
-# fixed so kmux's 'e' (editor) binding and the window-manager leader-key binding
-# can both point at $DEST/nvim-tab.sh.
-# Only available from a source checkout (the 'go install' path has no scripts/).
+# Install the default config next to the binary as $DEST/config.yaml. kmux reads
+# it as the base layer for command keybindings (editor, lazygit) and overlays
+# the user's ~/.config/kmux/config.yaml on top. Only available from a checkout.
 # ---------------------------------------------------------------------------
-if [ -n "$HELPER_SRC" ] && [ -f "$HELPER_SRC" ]; then
-  info "Installing nvim-tab.sh to $DEST/nvim-tab.sh ..."
-  $SUDO install -m 0755 "$HELPER_SRC" "$DEST/nvim-tab.sh"
+if [ -n "$CONFIG_SRC" ] && [ -f "$CONFIG_SRC" ]; then
+  info "Installing default config to $DEST/config.yaml ..."
+  $SUDO install -m 0644 "$CONFIG_SRC" "$DEST/config.yaml"
 else
-  warn "nvim-tab.sh helper not installed (no local scripts/); the editor binding needs $DEST/nvim-tab.sh."
+  warn "default config.yaml not installed (no local scripts/); editor/lazygit bindings need $DEST/config.yaml."
 fi
 
 # ---------------------------------------------------------------------------
