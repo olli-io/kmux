@@ -1,5 +1,10 @@
 # kmux
 
+> [!WARNING]
+> Kmux has a lot of very specific dependencies unique to my own workflow
+> (lazygit, worktrunk, sidekick.nvim). As such, it's not intended to be general
+> or particularly configurable.
+
 `kmux` is a barebones TUI for monitoring parallel AI coding agents (claude,
 opencode) that each run in their own tmux session. It runs as a left sidebar
 inside a kitty window and auto-attaches every matching tmux session into its own
@@ -8,6 +13,7 @@ pane.
 ## Prerequisites
 
 - **kitty** with remote control enabled. In `~/.config/kitty/kitty.conf`:
+
   ```
   allow_remote_control yes
   listen_on unix:@kitty
