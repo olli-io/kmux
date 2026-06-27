@@ -10,6 +10,8 @@ opencode) that each run in their own tmux session. It runs as a left sidebar
 inside a kitty window and auto-attaches every matching tmux session into its own
 pane.
 
+![kmux screenshot](screenshot.png)
+
 ## Prerequisites
 
 - **kitty** with remote control enabled. In `~/.config/kitty/kitty.conf`:
