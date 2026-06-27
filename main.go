@@ -8,7 +8,9 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/olli-io/kmux/internal/config"
 	"github.com/olli-io/kmux/internal/kitty"
+	"github.com/olli-io/kmux/internal/project"
 )
 
 func main() {
@@ -51,7 +53,7 @@ func runDashboard(pathArg string) {
 
 	var scopeDir string
 	if pathArg != "" {
-		proj, err := ScanProject(pathArg)
+		proj, err := project.ScanProject(pathArg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
 			os.Exit(1)
@@ -67,7 +69,7 @@ func runDashboard(pathArg string) {
 	// Reap sessions that were already idle past the timeout when this run
 	// started, before the dashboard attaches panes to them. Best-effort: config
 	// or state read errors just skip the sweep.
-	cfg, _ := LoadConfig()
+	cfg, _ := config.LoadConfig()
 	if _, idle, err := LoadState(); err == nil {
 		sweepIdleAtLaunch(time.Now(), cfg.IdleDuration(), idle)
 	}

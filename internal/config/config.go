@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"bufio"
@@ -8,6 +8,12 @@ import (
 	"strings"
 	"time"
 )
+
+// DefaultIdleTimeout is the built-in default for how long an agent session may
+// sit with a completely unchanged pane before kmux kills it to free the memory
+// its agent process holds. The `idle_timeout:` config key overrides it; see
+// IdleDuration.
+const DefaultIdleTimeout = 2 * time.Hour
 
 // Config is kmux's optional, user-authored configuration, read from
 // ~/.config/kmux/config.yaml.
@@ -31,12 +37,12 @@ type Config struct {
 
 // IdleDuration resolves the effective idle-kill timeout: the configured value if
 // idle_timeout was set (including an explicit 0, which disables reaping), else
-// the built-in idleTimeout default.
+// DefaultIdleTimeout.
 func (c Config) IdleDuration() time.Duration {
 	if c.idleSet {
 		return c.IdleTimeout
 	}
-	return idleTimeout
+	return DefaultIdleTimeout
 }
 
 // configFile returns the path to kmux's config file

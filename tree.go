@@ -3,6 +3,8 @@ package main
 import (
 	"sort"
 	"strings"
+
+	"github.com/olli-io/kmux/internal/project"
 )
 
 // section identifies which panel a row belongs to.
@@ -104,7 +106,7 @@ func matchProject(rem string, names []string) (proj, wt string, ok bool) {
 }
 
 // projectNames extracts the project names (for prefix matching).
-func projectNames(ps []Project) []string {
+func projectNames(ps []project.Project) []string {
 	n := make([]string, len(ps))
 	for i, p := range ps {
 		n[i] = p.Name
@@ -249,10 +251,10 @@ func buildSessionRows(sessions, names []string, collapsed map[string]bool, atten
 // worktrees is a single actionable leaf. A multi-worktree project becomes a
 // collapsible folder whose expanded children list the main worktree first,
 // then each linked worktree; every child is an actionable leaf.
-func buildProjectRows(projects []Project, collapsed map[string]bool, hasSession func(string) bool, deco rowDeco) []row {
+func buildProjectRows(projects []project.Project, collapsed map[string]bool, hasSession func(string) bool, deco rowDeco) []row {
 	// Folders (multi-worktree projects) sort to the top, single-worktree leaves
 	// after; order within each group is preserved.
-	ordered := make([]Project, 0, len(projects))
+	ordered := make([]project.Project, 0, len(projects))
 	for _, p := range projects {
 		if len(p.Worktrees) > 0 {
 			ordered = append(ordered, p)

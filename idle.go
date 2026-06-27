@@ -8,17 +8,14 @@ import (
 	"github.com/olli-io/kmux/internal/tmux"
 )
 
-// idleTimeout is the default for how long an agent session may sit completely
-// unchanged before kmux kills it to free the memory its agent process holds; the
-// `idle_timeout:` config key overrides it (see Config.IdleDuration). Idleness is
-// measured by pane stability, not the attention state: a session counts as idle
-// only while its captured pane is byte-for-byte identical across polls. A
-// generating agent (animated spinner), or one a user is actively typing into,
-// keeps changing its pane and so never accrues idle time, while a finished agent
-// left waiting at a static screen does. Detached sessions are tracked too — tmux
-// keeps their buffers and the agent process alive, so they cost memory just the
-// same.
-const idleTimeout = 2 * time.Hour
+// Idleness is measured by pane stability, not the attention state: a session
+// counts as idle only while its captured pane is byte-for-byte identical across
+// polls. A generating agent (animated spinner), or one a user is actively typing
+// into, keeps changing its pane and so never accrues idle time, while a finished
+// agent left waiting at a static screen does. Detached sessions are tracked too —
+// tmux keeps their buffers and the agent process alive, so they cost memory just
+// the same. How long a session may stay idle before it is killed is the timeout
+// passed to the tracker (config.DefaultIdleTimeout unless the user overrides it).
 
 // hashPane reduces a captured pane to a 64-bit fingerprint so the idle tracker
 // can detect "unchanged since last poll" without retaining the full text.

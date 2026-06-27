@@ -6,12 +6,16 @@ import (
 	"time"
 )
 
+// testTimeout is a representative idle timeout for the tracker tests, matching
+// the production default (config.DefaultIdleTimeout) without depending on it.
+const testTimeout = 2 * time.Hour
+
 func TestIdleTrackerReap(t *testing.T) {
 	t0 := time.Unix(0, 0)
-	past := idleTimeout + time.Minute // safely beyond the timeout
+	past := testTimeout + time.Minute // safely beyond the timeout
 
 	t.Run("unchanged pane is reaped once it crosses the timeout", func(t *testing.T) {
-		tr := newIdleTracker(idleTimeout)
+		tr := newIdleTracker(testTimeout)
 		// First sighting: records the fingerprint, nothing to kill yet.
 		if got := tr.reap(t0, map[string]uint64{"a~cl": 1}, nil); len(got) != 0 {
 			t.Fatalf("first poll: got %v, want none", got)
@@ -28,7 +32,7 @@ func TestIdleTrackerReap(t *testing.T) {
 	})
 
 	t.Run("a changing pane keeps resetting the clock", func(t *testing.T) {
-		tr := newIdleTracker(idleTimeout)
+		tr := newIdleTracker(testTimeout)
 		tr.reap(t0, map[string]uint64{"a~cl": 1}, nil)
 		// Fingerprint changes right before the deadline: clock resets.
 		tr.reap(t0.Add(past-time.Minute), map[string]uint64{"a~cl": 2}, nil)
@@ -39,7 +43,7 @@ func TestIdleTrackerReap(t *testing.T) {
 	})
 
 	t.Run("busy agent is never reaped even with a stable pane", func(t *testing.T) {
-		tr := newIdleTracker(idleTimeout)
+		tr := newIdleTracker(testTimeout)
 		tr.reap(t0, map[string]uint64{"a~cl": 1}, map[string]bool{"a~cl": true})
 		got := tr.reap(t0.Add(past), map[string]uint64{"a~cl": 1}, map[string]bool{"a~cl": true})
 		if len(got) != 0 {
@@ -48,7 +52,7 @@ func TestIdleTrackerReap(t *testing.T) {
 	})
 
 	t.Run("a vanished session is dropped, not killed", func(t *testing.T) {
-		tr := newIdleTracker(idleTimeout)
+		tr := newIdleTracker(testTimeout)
 		tr.reap(t0, map[string]uint64{"a~cl": 1}, nil)
 		// Session gone this poll: cleared from tracking.
 		if got := tr.reap(t0.Add(time.Minute), map[string]uint64{}, nil); len(got) != 0 {
@@ -65,7 +69,7 @@ func TestIdleTrackerReap(t *testing.T) {
 	})
 
 	t.Run("multiple idle sessions returned sorted", func(t *testing.T) {
-		tr := newIdleTracker(idleTimeout)
+		tr := newIdleTracker(testTimeout)
 		h := map[string]uint64{"b~cl": 1, "a~oc": 1}
 		tr.reap(t0, h, nil)
 		got := tr.reap(t0.Add(past), h, nil)
@@ -81,7 +85,7 @@ func TestIdleTrackerReap(t *testing.T) {
 // pane is unchanged and stale.
 func TestIdleTrackerFromPersisted(t *testing.T) {
 	t0 := time.Unix(0, 0)
-	old := t0.Add(-idleTimeout - time.Minute) // changed safely before the timeout
+	old := t0.Add(-testTimeout - time.Minute) // changed safely before the timeout
 	persisted := map[string]idleRecord{
 		"stale~cl":  {Hash: 1, Changed: old}, // unchanged + past timeout -> kill
 		"worked~cl": {Hash: 1, Changed: old}, // pane changed since -> spare
@@ -95,7 +99,7 @@ func TestIdleTrackerFromPersisted(t *testing.T) {
 		"unknown~cl": 9,
 	}
 
-	tr := newIdleTrackerFrom(idleTimeout, persisted)
+	tr := newIdleTrackerFrom(testTimeout, persisted)
 	got := tr.reap(t0, hashes, nil)
 	if !slices.Equal(got, []string{"stale~cl"}) {
 		t.Fatalf("launch sweep: got %v, want [stale~cl]", got)
@@ -106,9 +110,9 @@ func TestIdleTrackerFromPersisted(t *testing.T) {
 // tracker preserves the idle clock, so persistence does not reset idle time.
 func TestIdleTrackerSnapshotRoundTrip(t *testing.T) {
 	t0 := time.Unix(0, 0)
-	past := idleTimeout + time.Minute
+	past := testTimeout + time.Minute
 
-	tr := newIdleTracker(idleTimeout)
+	tr := newIdleTracker(testTimeout)
 	tr.reap(t0, map[string]uint64{"a~cl": 7}, nil) // clock starts at t0
 
 	snap := tr.snapshot()
@@ -118,7 +122,7 @@ func TestIdleTrackerSnapshotRoundTrip(t *testing.T) {
 
 	// A new run reseeded from the snapshot must reap on the original deadline,
 	// not restart the clock from launch.
-	tr2 := newIdleTrackerFrom(idleTimeout, snap)
+	tr2 := newIdleTrackerFrom(testTimeout, snap)
 	got := tr2.reap(t0.Add(past), map[string]uint64{"a~cl": 7}, nil)
 	if !slices.Equal(got, []string{"a~cl"}) {
 		t.Fatalf("reseeded tracker: got %v, want [a~cl] (clock preserved)", got)
@@ -129,7 +133,7 @@ func TestIdleTrackerDisabled(t *testing.T) {
 	tr := newIdleTracker(0)
 	h := map[string]uint64{"a~cl": 1}
 	tr.reap(time.Unix(0, 0), h, nil)
-	if got := tr.reap(time.Unix(0, 0).Add(idleTimeout*10), h, nil); got != nil {
+	if got := tr.reap(time.Unix(0, 0).Add(testTimeout*10), h, nil); got != nil {
 		t.Fatalf("disabled tracker reaped %v, want nil", got)
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/olli-io/kmux/internal/project"
 )
 
 // parsedArgs is the routed kmux command line. agent is "" for the default
@@ -57,7 +59,7 @@ func runAgent(path, kind string) error {
 	if path == "" {
 		path = "."
 	}
-	proj, err := ScanProject(path)
+	proj, err := project.ScanProject(path)
 	if err != nil {
 		return err
 	}
@@ -72,7 +74,7 @@ func runAgent(path, kind string) error {
 // which worktree path lives in, so the actual checkout is resolved separately
 // here from git's toplevel. A path that resolves to no known worktree (or an
 // unreadable toplevel) falls back to the main worktree.
-func resolveWorktree(path string, proj *Project) (dir, wt string) {
+func resolveWorktree(path string, proj *project.Project) (dir, wt string) {
 	top, err := gitToplevel(path)
 	if err != nil || top == "" || top == proj.Path {
 		return proj.Path, ""

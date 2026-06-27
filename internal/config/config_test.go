@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"slices"
@@ -14,7 +14,7 @@ func TestParseConfigIdleTimeout(t *testing.T) {
 		want   time.Duration // expected IdleDuration()
 		setRaw bool          // expected idleSet
 	}{
-		{"unset uses default", "projects:\n  - ~/work\n", idleTimeout, false},
+		{"unset uses default", "projects:\n  - ~/work\n", DefaultIdleTimeout, false},
 		{"duration", "idle_timeout: 90m\n", 90 * time.Minute, true},
 		{"hours", "idle_timeout: 3h\n", 3 * time.Hour, true},
 		{"zero disables", "idle_timeout: 0\n", 0, true},
@@ -22,7 +22,7 @@ func TestParseConfigIdleTimeout(t *testing.T) {
 		{"never disables", "idle_timeout: never\n", 0, true},
 		{"quoted value", `idle_timeout: "45m"` + "\n", 45 * time.Minute, true},
 		{"inline comment", "idle_timeout: 2h # reap after two hours\n", 2 * time.Hour, true},
-		{"garbage falls back to default", "idle_timeout: soon\n", idleTimeout, false},
+		{"garbage falls back to default", "idle_timeout: soon\n", DefaultIdleTimeout, false},
 	}
 	for _, c := range cases {
 		cfg, err := parseConfig(strings.NewReader(c.body))

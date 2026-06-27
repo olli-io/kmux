@@ -11,7 +11,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/olli-io/kmux/internal/config"
 	"github.com/olli-io/kmux/internal/kitty"
+	"github.com/olli-io/kmux/internal/project"
 	"github.com/olli-io/kmux/internal/tmux"
 )
 
@@ -63,7 +65,7 @@ type sessionsMsg struct {
 	err   error
 }
 type projectsMsg struct {
-	projects []Project
+	projects []project.Project
 	err      error
 }
 type spinnerMsg struct{}
@@ -78,7 +80,7 @@ type savedMsg struct{ err error }
 type model struct {
 	mgr           *Manager
 	sessions      []string
-	projects      []Project
+	projects      []project.Project
 	collapsed     map[string]bool           // collapse key -> collapsed
 	detached      map[string]bool           // session name -> pane detached (tmux still running)
 	attention     map[string]attentionState // session name -> latest detected attention state
@@ -133,7 +135,7 @@ func newModel(mgr *Manager, scopeDir string) model {
 	// default, matching the optional, best-effort handling of the rest of config.
 	// Seeding the tracker with the persisted clocks lets idle time accumulated
 	// before this launch keep counting instead of resetting to zero.
-	cfg, _ := LoadConfig()
+	cfg, _ := config.LoadConfig()
 	return model{
 		mgr:       mgr,
 		collapsed: map[string]bool{},
@@ -200,13 +202,13 @@ func attentionCmd(sessions []string) tea.Cmd {
 func projectsCmd(scopeDir string) tea.Cmd {
 	return func() tea.Msg {
 		if scopeDir != "" {
-			p, err := ScanProject(scopeDir)
+			p, err := project.ScanProject(scopeDir)
 			if err != nil {
 				return projectsMsg{err: err}
 			}
-			return projectsMsg{projects: []Project{*p}}
+			return projectsMsg{projects: []project.Project{*p}}
 		}
-		projects, err := ScanProjects()
+		projects, err := project.ScanProjects()
 		return projectsMsg{projects: projects, err: err}
 	}
 }
@@ -463,11 +465,11 @@ type gitStatus struct {
 	upstream bool
 }
 
-func (w Worktree) git() gitStatus {
+func worktreeGit(w project.Worktree) gitStatus {
 	return gitStatus{dirty: w.Dirty, ahead: w.Ahead, behind: w.Behind, upstream: w.Upstream}
 }
 
-func (p Project) git() gitStatus {
+func projectGit(p project.Project) gitStatus {
 	return gitStatus{dirty: p.Dirty, ahead: p.Ahead, behind: p.Behind, upstream: p.Upstream}
 }
 
@@ -512,14 +514,14 @@ func projectName(name string, active bool) string {
 }
 
 // projectLeaf labels a single-worktree project (name + branch).
-func (rowDeco) projectLeaf(p Project, active bool) string {
-	return branchLabel(p.Name, p.Branch, active, p.git())
+func (rowDeco) projectLeaf(p project.Project, active bool) string {
+	return branchLabel(p.Name, p.Branch, active, projectGit(p))
 }
 
 // projectFolder labels a multi-worktree project header (folder glyph + name).
 // The glyph is the open variant when expanded, the closed variant otherwise.
 // The branch moves onto the main-worktree child row inside the expanded list.
-func (rowDeco) projectFolder(p Project, open, active bool) string {
+func (rowDeco) projectFolder(p project.Project, open, active bool) string {
 	glyph := folderGlyph
 	if open {
 		glyph = folderOpenGlyph
@@ -539,8 +541,8 @@ func (rowDeco) projectFolder(p Project, open, active bool) string {
 // behind if any is, and upstream-tracked if any has an upstream. The rollup
 // favors action — a single behind worktree shows ↓ for the whole folder — so a
 // collapsed project never hides changes that an expanded one would surface.
-func projectStatus(p Project) gitStatus {
-	gs := p.git()
+func projectStatus(p project.Project) gitStatus {
+	gs := projectGit(p)
 	for _, w := range p.Worktrees {
 		gs.dirty = gs.dirty || w.Dirty
 		gs.ahead += w.Ahead
@@ -564,12 +566,12 @@ func (rowDeco) sessionFolder(name string, open bool) string {
 
 // mainWorktree labels the main worktree row (repo name + branch), listed first
 // inside an expanded project folder.
-func (rowDeco) mainWorktree(p Project, active bool) string {
-	return branchLabel(p.Name, p.Branch, active, p.git())
+func (rowDeco) mainWorktree(p project.Project, active bool) string {
+	return branchLabel(p.Name, p.Branch, active, projectGit(p))
 }
 
-func (rowDeco) worktree(w Worktree, active bool) string {
-	return branchLabel(w.Name, w.Branch, active, w.git())
+func (rowDeco) worktree(w project.Worktree, active bool) string {
+	return branchLabel(w.Name, w.Branch, active, worktreeGit(w))
 }
 
 // rows builds the combined, navigable row list: session rows first, then

@@ -1,4 +1,4 @@
-package main
+package project
 
 import (
 	"bytes"
@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/olli-io/kmux/internal/config"
 )
 
 // Worktree is a linked git worktree of a project (never the main worktree).
@@ -110,7 +112,7 @@ func ScanProjects() ([]Project, error) {
 	// its main worktree, deduped against the ~/git scan and one another, so a
 	// configured folder that also lives under ~/git isn't listed twice. Bad
 	// entries (missing dirs, non-repos) are skipped rather than failing the scan.
-	cfg, err := LoadConfig()
+	cfg, err := config.LoadConfig()
 	if err != nil {
 		return nil, err
 	}
