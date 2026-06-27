@@ -79,7 +79,7 @@ func TestPlaceholderTarget(t *testing.T) {
 		columns [][]int
 		want    int
 	}{
-		{nil, 0},                       // no agents -> no padding
+		{nil, 3},                       // no agents -> still pad to 3 idle slots
 		{[][]int{{1}}, 2},              // 1 column  -> pad 2
 		{[][]int{{1}, {2}}, 1},         // 2 columns -> pad 1
 		{[][]int{{1}, {2}, {3}}, 0},    // 3 columns -> full
@@ -106,8 +106,8 @@ func TestPromotable(t *testing.T) {
 		{[][]int{{1}, {2}}, 0, false},         // free slot but no stack
 		{[][]int{{1, 4}, {2}}, 4, true},       // free slot + stack -> lift bottom (4)
 		{[][]int{{1, 4}, {2}, {3}}, 0, false}, // full: no free slot despite stack
-		{[][]int{{1, 4}, {2, 5}}, 4, true},    // two stacks tie -> leftmost bottom (4)
-		{[][]int{{1}, {2, 5, 6}}, 6, true},    // tallest stack wins -> its bottom (6)
+		{[][]int{{1, 4}, {2, 5}}, 5, true},    // two stacks -> rightmost bottom (5), keeps splits left
+		{[][]int{{1}, {2, 5, 6}}, 6, true},    // rightmost stack -> its bottom (6)
 	}
 	for _, tc := range cases {
 		id, ok := promotable(tc.columns)

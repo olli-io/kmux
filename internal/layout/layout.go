@@ -229,24 +229,23 @@ func (m *Manager) sessionFor(id int) string {
 // promotable returns the window id of a stacked pane that should be lifted into
 // its own column, and whether one exists. A pane is promotable when the layout
 // has a free column slot (fewer than maxColumns columns) yet some column still
-// holds more than one pane: it picks the bottom pane of the tallest such column
-// (ties -> leftmost). This is what makes detaching a single-pane column collapse
-// a horizontal split into the freed slot instead of leaving an idle placeholder.
+// holds more than one pane: it picks the bottom pane of the *rightmost* such
+// column. The freed slot is always added on the right (see add/placement), so
+// pulling from the rightmost stack keeps horizontal splits packed on the left:
+// e.g. (A-B)|(C-D)|E losing E lifts D, yielding (A-B)|C|D rather than A|(C-D)|B.
+// This is what makes detaching a single-pane column collapse a horizontal split
+// into the freed slot instead of leaving an idle placeholder.
 func promotable(columns [][]int) (id int, ok bool) {
 	if len(columns) >= maxColumns {
 		return 0, false
 	}
-	tallest := -1
-	for c := range columns {
-		if len(columns[c]) > 1 && (tallest == -1 || len(columns[c]) > len(columns[tallest])) {
-			tallest = c
+	for c := len(columns) - 1; c >= 0; c-- {
+		if len(columns[c]) > 1 {
+			col := columns[c]
+			return col[len(col)-1], true
 		}
 	}
-	if tallest == -1 {
-		return 0, false
-	}
-	col := columns[tallest]
-	return col[len(col)-1], true
+	return 0, false
 }
 
 // Compact lifts stacked agent panes into free column slots so that detaching a
@@ -303,12 +302,14 @@ func (m *Manager) forget(session string, id int) {
 }
 
 // placeholderTarget is how many filler panes the layout should currently hold:
-// enough to bring the agent area up to maxColumns once at least one real agent
-// column exists. With no agents there is nothing to keep a fixed width, so the
-// sidebar simply spans the tab; once the columns stack (>= maxColumns) the
-// width is already fixed and no padding is needed.
+// enough to keep the agent area at maxColumns columns so the dashboard and any
+// real agent panes stay a fixed width. It holds even with zero agents: an idle
+// dashboard shows the sidebar beside maxColumns idle slots rather than a lone
+// sidebar stretched across the whole tab (and rather than degrading to a single
+// wide pane as sessions are reaped one by one). Once the columns stack
+// (>= maxColumns) the width is already fixed and no padding is needed.
 func (m *Manager) placeholderTarget() int {
-	if len(m.columns) == 0 || len(m.columns) >= maxColumns {
+	if len(m.columns) >= maxColumns {
 		return 0
 	}
 	return maxColumns - len(m.columns)
