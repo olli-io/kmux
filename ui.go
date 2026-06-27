@@ -14,6 +14,7 @@ import (
 	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/config"
 	"github.com/olli-io/kmux/internal/kitty"
+	"github.com/olli-io/kmux/internal/layout"
 	"github.com/olli-io/kmux/internal/project"
 	"github.com/olli-io/kmux/internal/status"
 	"github.com/olli-io/kmux/internal/tmux"
@@ -80,7 +81,7 @@ type focusedMsg struct{ err error }
 type savedMsg struct{ err error }
 
 type model struct {
-	mgr           *Manager
+	mgr           *layout.Manager
 	sessions      []string
 	projects      []project.Project
 	collapsed     map[string]bool                  // collapse key -> collapsed
@@ -122,7 +123,7 @@ var promptOptions = []struct {
 
 // newModel builds the dashboard model. scopeDir, when non-empty, is the main
 // worktree of the single project kmux is scoped to (see model.scopeDir).
-func newModel(mgr *Manager, scopeDir string) model {
+func newModel(mgr *layout.Manager, scopeDir string) model {
 	// Restore detached sessions and idle clocks from a previous run; best-effort
 	// (a read error just starts with empty sets).
 	detached, idle, err := status.LoadState()
@@ -219,7 +220,7 @@ func projectsCmd(scopeDir string) tea.Cmd {
 // agent panes, then pads the layout with placeholder panes so real agent panes
 // keep a fixed width. When the pane layout changes it follows up with a
 // Rebalance to pin the sidebar width and even out the agent columns.
-func reconcileCmd(mgr *Manager, active []string) tea.Cmd {
+func reconcileCmd(mgr *layout.Manager, active []string) tea.Cmd {
 	return func() tea.Msg {
 		live, err := kitty.LiveWindowIDs()
 		if err != nil {
@@ -266,7 +267,7 @@ func focusCmd(id int) tea.Cmd {
 // UI goroutine, then pads/rebalances the layout the same way reconcileCmd does
 // so the new pane lands at the fixed agent width. agentCmd is the executable the
 // new tmux session runs (e.g. "claude" or "opencode").
-func openSessionCmd(mgr *Manager, name, dir, agentCmd string) tea.Cmd {
+func openSessionCmd(mgr *layout.Manager, name, dir, agentCmd string) tea.Cmd {
 	return func() tea.Msg {
 		if err := mgr.Open(name, dir, agentCmd); err != nil {
 			return reconciledMsg{errs: []error{err}}
@@ -297,7 +298,7 @@ func killSessionCmd(name string) tea.Cmd {
 // reattachSessionCmd re-opens a pane for an already-running session off the UI
 // goroutine (for a session whose pane was lost), then pads/rebalances the layout
 // the same way openSessionCmd does.
-func reattachSessionCmd(mgr *Manager, name string) tea.Cmd {
+func reattachSessionCmd(mgr *layout.Manager, name string) tea.Cmd {
 	return func() tea.Msg {
 		if err := mgr.Reattach(name); err != nil {
 			return reconciledMsg{errs: []error{err}}
