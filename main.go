@@ -11,6 +11,7 @@ import (
 	"github.com/olli-io/kmux/internal/config"
 	"github.com/olli-io/kmux/internal/kitty"
 	"github.com/olli-io/kmux/internal/project"
+	"github.com/olli-io/kmux/internal/status"
 )
 
 func main() {
@@ -70,8 +71,8 @@ func runDashboard(pathArg string) {
 	// started, before the dashboard attaches panes to them. Best-effort: config
 	// or state read errors just skip the sweep.
 	cfg, _ := config.LoadConfig()
-	if _, idle, err := LoadState(); err == nil {
-		sweepIdleAtLaunch(time.Now(), cfg.IdleDuration(), idle)
+	if _, idle, err := status.LoadState(); err == nil {
+		status.SweepIdleAtLaunch(time.Now(), cfg.IdleDuration(), idle)
 	}
 
 	mgr := NewManager(sidebarID)

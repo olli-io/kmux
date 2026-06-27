@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/olli-io/kmux/internal/project"
+	"github.com/olli-io/kmux/internal/status"
 )
 
 func TestMatchProject(t *testing.T) {
@@ -107,7 +108,7 @@ func TestBuildProjectRows(t *testing.T) {
 func TestBuildSessionRows(t *testing.T) {
 	sessions := []string{"kmux~cl", "gstack/feat~cl", "gstack/feat~oc", "orphan~cl"}
 	names := []string{"kmux", "gstack"}
-	attn := map[string]attentionState{}
+	attn := map[string]status.AttentionState{}
 	attached := func(string) bool { return false }
 	detached := func(string) bool { return false }
 

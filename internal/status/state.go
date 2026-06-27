@@ -1,4 +1,4 @@
-package main
+package status
 
 import (
 	"encoding/json"
@@ -24,13 +24,13 @@ func stateFile() (string, error) {
 // persistedState is the on-disk shape of the state kmux remembers across runs.
 type persistedState struct {
 	Detached []string              `json:"detached"`       // session names the user detached
-	Idle     map[string]idleRecord `json:"idle,omitempty"` // session -> persisted idle clock
+	Idle     map[string]IdleRecord `json:"idle,omitempty"` // session -> persisted idle clock
 }
 
 // LoadState reads the state persisted by a previous run: the set of detached
-// session names and the per-session idle clocks (see idleRecord). A missing state
+// session names and the per-session idle clocks (see IdleRecord). A missing state
 // file yields empty, non-nil maps, not an error.
-func LoadState() (detached map[string]bool, idle map[string]idleRecord, err error) {
+func LoadState() (detached map[string]bool, idle map[string]IdleRecord, err error) {
 	path, err := stateFile()
 	if err != nil {
 		return nil, nil, err
@@ -38,7 +38,7 @@ func LoadState() (detached map[string]bool, idle map[string]idleRecord, err erro
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string]bool{}, map[string]idleRecord{}, nil
+			return map[string]bool{}, map[string]IdleRecord{}, nil
 		}
 		return nil, nil, err
 	}
@@ -51,7 +51,7 @@ func LoadState() (detached map[string]bool, idle map[string]idleRecord, err erro
 		detached[s] = true
 	}
 	if st.Idle == nil {
-		st.Idle = map[string]idleRecord{}
+		st.Idle = map[string]IdleRecord{}
 	}
 	return detached, st.Idle, nil
 }
@@ -59,7 +59,7 @@ func LoadState() (detached map[string]bool, idle map[string]idleRecord, err erro
 // SaveState persists the detached-session set and the per-session idle clocks so
 // both survive a restart. Detached names are sorted for a stable, diff-friendly
 // file; the idle map is written verbatim.
-func SaveState(detached map[string]bool, idle map[string]idleRecord) error {
+func SaveState(detached map[string]bool, idle map[string]IdleRecord) error {
 	path, err := stateFile()
 	if err != nil {
 		return err

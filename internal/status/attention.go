@@ -1,15 +1,15 @@
-package main
+package status
 
 import "strings"
 
-// attentionState is what an agent session is doing, derived from its pane text.
-type attentionState int
+// AttentionState is what an agent session is doing, derived from its pane text.
+type AttentionState int
 
 const (
-	attnUnknown    attentionState = iota // capture failed or unrecognized agent kind
-	attnBusy                             // actively generating
-	attnPermission                       // blocked on a permission/confirmation prompt
-	attnWaiting                          // your turn: idle / finished / awaiting input
+	AttnUnknown    AttentionState = iota // capture failed or unrecognized agent kind
+	AttnBusy                             // actively generating
+	AttnPermission                       // blocked on a permission/confirmation prompt
+	AttnWaiting                          // your turn: idle / finished / awaiting input
 )
 
 // attentionMarkers is the single, tunable source of truth for classifying an
@@ -28,7 +28,7 @@ const (
 // claude's bottom hint bar shows "· esc to interrupt ·" only while a turn is
 // interruptible (i.e. busy); idle it reads just "auto mode on … · ← for agents".
 // So the bare phrase is a reliable busy signal — the only false positive is an
-// agent's own transcript echoing it, which classifyAttention rules out by matching
+// agent's own transcript echoing it, which ClassifyAttention rules out by matching
 // only the pane's bottom region (the live chrome), not the scrollback above.
 var attentionMarkers = map[string]struct{ busy, permission []string }{
 	"claude": {
@@ -64,25 +64,25 @@ func paneTail(text string, n int) string {
 	return strings.Join(lines[start:end], "\n")
 }
 
-// classifyAttention maps an agent kind (from AgentKind) and its captured pane text
+// ClassifyAttention maps an agent kind (from AgentKind) and its captured pane text
 // to an attention state. It is pure and order-sensitive: a busy marker wins over a
 // permission marker, which wins over the waiting default. An unrecognized kind (or
-// empty kind, e.g. a non-agent session) is attnUnknown. Only the bottom of the
+// empty kind, e.g. a non-agent session) is AttnUnknown. Only the bottom of the
 // pane is examined (see statusTailLines) so transcript text never spoofs the live
 // status.
-func classifyAttention(kind, paneText string) attentionState {
+func ClassifyAttention(kind, paneText string) AttentionState {
 	mk, ok := attentionMarkers[kind]
 	if !ok {
-		return attnUnknown
+		return AttnUnknown
 	}
 	t := strings.ToLower(paneTail(paneText, statusTailLines))
 	switch {
 	case containsAny(t, mk.busy):
-		return attnBusy
+		return AttnBusy
 	case containsAny(t, mk.permission):
-		return attnPermission
+		return AttnPermission
 	default:
-		return attnWaiting
+		return AttnWaiting
 	}
 }
 

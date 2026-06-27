@@ -1,4 +1,4 @@
-package main
+package status
 
 import (
 	"hash/fnv"
@@ -17,45 +17,45 @@ import (
 // the same. How long a session may stay idle before it is killed is the timeout
 // passed to the tracker (config.DefaultIdleTimeout unless the user overrides it).
 
-// hashPane reduces a captured pane to a 64-bit fingerprint so the idle tracker
+// HashPane reduces a captured pane to a 64-bit fingerprint so the idle tracker
 // can detect "unchanged since last poll" without retaining the full text.
-func hashPane(text string) uint64 {
+func HashPane(text string) uint64 {
 	h := fnv.New64a()
 	h.Write([]byte(text))
 	return h.Sum64()
 }
 
-// idleTracker remembers, per session, the last pane fingerprint seen and the
+// IdleTracker remembers, per session, the last pane fingerprint seen and the
 // time that fingerprint last changed. It is the only mutable state behind the
 // idle-kill policy; everything else (which sessions exist, their busy state) is
-// supplied each poll by reap.
-type idleTracker struct {
+// supplied each poll by Reap.
+type IdleTracker struct {
 	timeout    time.Duration        // idle threshold; <= 0 disables reaping
 	hash       map[string]uint64    // session -> last pane fingerprint
 	lastChange map[string]time.Time // session -> when the fingerprint last changed
 }
 
-func newIdleTracker(timeout time.Duration) idleTracker {
-	return idleTracker{
+func newIdleTracker(timeout time.Duration) IdleTracker {
+	return IdleTracker{
 		timeout:    timeout,
 		hash:       map[string]uint64{},
 		lastChange: map[string]time.Time{},
 	}
 }
 
-// idleRecord is the persisted, per-session shape of the idle clock: the last pane
+// IdleRecord is the persisted, per-session shape of the idle clock: the last pane
 // fingerprint and when it last changed. Persisting it lets idle tracking survive
 // a kmux restart, so a session that sat unchanged across runs is reaped on the
-// next launch instead of having its clock reset to zero (see sweepIdleAtLaunch).
-type idleRecord struct {
+// next launch instead of having its clock reset to zero (see SweepIdleAtLaunch).
+type IdleRecord struct {
 	Hash    uint64    `json:"hash"`
 	Changed time.Time `json:"changed"`
 }
 
-// newIdleTrackerFrom seeds a tracker with idle records persisted by a previous
+// NewIdleTrackerFrom seeds a tracker with idle records persisted by a previous
 // run, so the idle clock continues from where it left off rather than restarting
 // at launch. A nil/empty map yields a fresh tracker.
-func newIdleTrackerFrom(timeout time.Duration, persisted map[string]idleRecord) idleTracker {
+func NewIdleTrackerFrom(timeout time.Duration, persisted map[string]IdleRecord) IdleTracker {
 	t := newIdleTracker(timeout)
 	for name, rec := range persisted {
 		t.hash[name] = rec.Hash
@@ -64,28 +64,28 @@ func newIdleTrackerFrom(timeout time.Duration, persisted map[string]idleRecord) 
 	return t
 }
 
-// snapshot exports the tracker's per-session idle records for persistence. The
+// Snapshot exports the tracker's per-session idle records for persistence. The
 // returned map is a copy, safe to hand to a writer goroutine.
-func (t idleTracker) snapshot() map[string]idleRecord {
-	out := make(map[string]idleRecord, len(t.hash))
+func (t IdleTracker) Snapshot() map[string]IdleRecord {
+	out := make(map[string]IdleRecord, len(t.hash))
 	for name, h := range t.hash {
-		out[name] = idleRecord{Hash: h, Changed: t.lastChange[name]}
+		out[name] = IdleRecord{Hash: h, Changed: t.lastChange[name]}
 	}
 	return out
 }
 
-// reap advances idle tracking by one poll and returns the names of sessions that
+// Reap advances idle tracking by one poll and returns the names of sessions that
 // have been idle (pane unchanged) for at least the tracker's timeout, sorted. A
 // non-positive timeout disables reaping entirely (returns nil). hashes maps
 // each currently-live session to its pane fingerprint; busy reports which of them
-// are actively generating. reap mutates the tracker in place: a session whose
+// are actively generating. Reap mutates the tracker in place: a session whose
 // fingerprint changed (or is newly seen, or is busy) has its clock reset to now;
 // a session that has disappeared from hashes is dropped so tracking can't leak.
 //
 // The busy guard is belt-and-suspenders — a generating agent's pane already
 // changes every poll via its spinner — but it guarantees an agent mid-turn is
 // never reaped even if its pane momentarily hashes stable.
-func (t *idleTracker) reap(now time.Time, hashes map[string]uint64, busy map[string]bool) []string {
+func (t *IdleTracker) Reap(now time.Time, hashes map[string]uint64, busy map[string]bool) []string {
 	if t.timeout <= 0 {
 		return nil // reaping disabled
 	}
@@ -112,7 +112,7 @@ func (t *idleTracker) reap(now time.Time, hashes map[string]uint64, busy map[str
 	return kill
 }
 
-// sweepIdleAtLaunch kills sessions that were already idle past the timeout before
+// SweepIdleAtLaunch kills sessions that were already idle past the timeout before
 // kmux started, so they are gone before the dashboard attaches panes to them. It
 // captures each live session's pane once and compares it against the idle records
 // persisted by the previous run: a session whose pane still hashes to the stored
@@ -126,7 +126,7 @@ func (t *idleTracker) reap(now time.Time, hashes map[string]uint64, busy map[str
 // is likewise spared — there is no evidence it has been idle. A non-positive
 // timeout disables the sweep. All tmux calls are best-effort: a capture or kill
 // failure skips that session rather than aborting the launch.
-func sweepIdleAtLaunch(now time.Time, timeout time.Duration, persisted map[string]idleRecord) {
+func SweepIdleAtLaunch(now time.Time, timeout time.Duration, persisted map[string]IdleRecord) {
 	if timeout <= 0 || len(persisted) == 0 {
 		return
 	}
@@ -140,13 +140,13 @@ func sweepIdleAtLaunch(now time.Time, timeout time.Duration, persisted map[strin
 		if err != nil {
 			continue // flaky capture: treat as unseen this launch, never kill
 		}
-		hashes[name] = hashPane(text)
+		hashes[name] = HashPane(text)
 	}
-	// reap applies the exact spare/kill rules used during normal polling: a
+	// Reap applies the exact spare/kill rules used during normal polling: a
 	// preloaded tracker reaped once against the launch hashes kills only sessions
 	// whose pane is unchanged and stale, and resets (spares) everything else.
-	t := newIdleTrackerFrom(timeout, persisted)
-	for _, name := range t.reap(now, hashes, nil) {
+	t := NewIdleTrackerFrom(timeout, persisted)
+	for _, name := range t.Reap(now, hashes, nil) {
 		_ = tmux.KillSession(name) // best-effort; a missing session is already gone
 	}
 }

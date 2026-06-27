@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/olli-io/kmux/internal/project"
+	"github.com/olli-io/kmux/internal/status"
 )
 
 // section identifies which panel a row belongs to.
@@ -184,7 +185,7 @@ func sessionsOf(g *sessionGroup) []string {
 // attention carries each session's latest attention state (drives the leading
 // status glyph). attached reports whether a session has a live pane; detached
 // reports whether the user detached it (tmux alive, pane closed).
-func buildSessionRows(sessions, names []string, collapsed map[string]bool, attention map[string]attentionState, attached, detached func(string) bool, deco rowDeco) []row {
+func buildSessionRows(sessions, names []string, collapsed map[string]bool, attention map[string]status.AttentionState, attached, detached func(string) bool, deco rowDeco) []row {
 	groups, order := groupSessions(sessions, names)
 
 	var rows []row

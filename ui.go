@@ -14,6 +14,7 @@ import (
 	"github.com/olli-io/kmux/internal/config"
 	"github.com/olli-io/kmux/internal/kitty"
 	"github.com/olli-io/kmux/internal/project"
+	"github.com/olli-io/kmux/internal/status"
 	"github.com/olli-io/kmux/internal/tmux"
 )
 
@@ -71,7 +72,7 @@ type projectsMsg struct {
 type spinnerMsg struct{}
 type reconciledMsg struct{ errs []error }
 type attentionMsg struct {
-	states map[string]attentionState
+	states map[string]status.AttentionState
 	hashes map[string]uint64 // session name -> pane fingerprint, for idle tracking
 }
 type focusedMsg struct{ err error }
@@ -81,13 +82,13 @@ type model struct {
 	mgr           *Manager
 	sessions      []string
 	projects      []project.Project
-	collapsed     map[string]bool           // collapse key -> collapsed
-	detached      map[string]bool           // session name -> pane detached (tmux still running)
-	attention     map[string]attentionState // session name -> latest detected attention state
-	idle          idleTracker               // per-session pane-stability clock for idle-kill
-	cursor        int                       // index into rows()
-	spinnerFrame  int                       // animation frame for busy-session glyphs
-	prompt        *agentPrompt              // non-nil while the agent-picker overlay is open
+	collapsed     map[string]bool                  // collapse key -> collapsed
+	detached      map[string]bool                  // session name -> pane detached (tmux still running)
+	attention     map[string]status.AttentionState // session name -> latest detected attention state
+	idle          status.IdleTracker               // per-session pane-stability clock for idle-kill
+	cursor        int                              // index into rows()
+	spinnerFrame  int                              // animation frame for busy-session glyphs
+	prompt        *agentPrompt                     // non-nil while the agent-picker overlay is open
 	lastErr       string
 	width, height int
 
@@ -123,9 +124,9 @@ var promptOptions = []struct {
 func newModel(mgr *Manager, scopeDir string) model {
 	// Restore detached sessions and idle clocks from a previous run; best-effort
 	// (a read error just starts with empty sets).
-	detached, idle, err := LoadState()
+	detached, idle, err := status.LoadState()
 	if err != nil || detached == nil {
-		detached, idle = map[string]bool{}, map[string]idleRecord{}
+		detached, idle = map[string]bool{}, map[string]status.IdleRecord{}
 	}
 	scopeName := ""
 	if scopeDir != "" {
@@ -140,8 +141,8 @@ func newModel(mgr *Manager, scopeDir string) model {
 		mgr:       mgr,
 		collapsed: map[string]bool{},
 		detached:  detached,
-		attention: map[string]attentionState{},
-		idle:      newIdleTrackerFrom(cfg.IdleDuration(), idle),
+		attention: map[string]status.AttentionState{},
+		idle:      status.NewIdleTrackerFrom(cfg.IdleDuration(), idle),
 		scopeDir:  scopeDir,
 		scopeName: scopeName,
 	}
@@ -172,13 +173,13 @@ func pollCmd() tea.Cmd {
 // attentionCmd captures each session's tmux pane off the UI goroutine and
 // classifies its attention state. It runs sequentially (capture-pane is a cheap
 // local call and there are few sessions) and is best-effort: a capture failure
-// for one session yields attnUnknown for it rather than failing the whole batch.
+// for one session yields status.AttnUnknown for it rather than failing the whole batch.
 // It is fed the full session list (including detached ones — tmux keeps their
 // buffers), so a detached-but-waiting agent still shows its status glyph.
 func attentionCmd(sessions []string) tea.Cmd {
 	snap := append([]string(nil), sessions...)
 	return func() tea.Msg {
-		states := make(map[string]attentionState, len(snap))
+		states := make(map[string]status.AttentionState, len(snap))
 		hashes := make(map[string]uint64, len(snap))
 		for _, s := range snap {
 			text, err := tmux.CapturePane(s)
@@ -186,11 +187,11 @@ func attentionCmd(sessions []string) tea.Cmd {
 				// No hash recorded: the idle tracker treats this session as gone
 				// for this poll and resets its clock when capture recovers, so a
 				// flaky capture never causes a kill.
-				states[s] = attnUnknown
+				states[s] = status.AttnUnknown
 				continue
 			}
-			states[s] = classifyAttention(tmux.AgentKind(s), text)
-			hashes[s] = hashPane(text)
+			states[s] = status.ClassifyAttention(tmux.AgentKind(s), text)
+			hashes[s] = status.HashPane(text)
 		}
 		return attentionMsg{states: states, hashes: hashes}
 	}
@@ -320,9 +321,9 @@ func (m model) saveStateCmd() tea.Cmd {
 			detached[k] = true
 		}
 	}
-	idle := m.idle.snapshot()
+	idle := m.idle.Snapshot()
 	return func() tea.Msg {
-		return savedMsg{err: SaveState(detached, idle)}
+		return savedMsg{err: status.SaveState(detached, idle)}
 	}
 }
 
@@ -373,7 +374,7 @@ func openTabCmd(dir string) tea.Cmd {
 // advanced on each spinner tick.
 type rowDeco struct{ spinner int }
 
-func (d rowDeco) session(name string, depth int, st attentionState, attached, detached bool) row {
+func (d rowDeco) session(name string, depth int, st status.AttentionState, attached, detached bool) row {
 	// The leading mark is the attention glyph (what the agent is doing); the
 	// attach state (A/D) rides on the agent badge instead.
 	return row{
@@ -417,15 +418,15 @@ func agentBadge(name string, attached, detached bool) string {
 // attentionGlyph returns the styled status glyph for an attention state, shown at
 // the head of a session row. For the busy state it returns the spinner frame
 // selected by frame, producing a rotating braille animation across ticks.
-func attentionGlyph(st attentionState, frame int) string {
+func attentionGlyph(st status.AttentionState, frame int) string {
 	switch st {
-	case attnPermission:
+	case status.AttnPermission:
 		return errStyle.Render("!")
-	case attnWaiting:
+	case status.AttnWaiting:
 		return okStyle.Render("✓")
-	case attnBusy:
+	case status.AttnBusy:
 		return dimStyle.Render(spinnerFrames[frame%len(spinnerFrames)])
-	default: // attnUnknown
+	default: // status.AttnUnknown
 		return dimStyle.Render("·")
 	}
 }
@@ -819,9 +820,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// freeing the memory their idle agent processes hold.
 		busy := make(map[string]bool, len(msg.states))
 		for s, st := range msg.states {
-			busy[s] = st == attnBusy
+			busy[s] = st == status.AttnBusy
 		}
-		kill := m.idle.reap(time.Now(), msg.hashes, busy)
+		kill := m.idle.Reap(time.Now(), msg.hashes, busy)
 		// Persist the freshly advanced idle clocks so a restart resumes them and
 		// the launch sweep can reap sessions that stayed idle while kmux was off.
 		cmds := []tea.Cmd{m.saveStateCmd()}
