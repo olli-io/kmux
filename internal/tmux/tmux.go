@@ -1,4 +1,4 @@
-package main
+package tmux
 
 import (
 	"fmt"
@@ -14,6 +14,9 @@ var agentSession = regexp.MustCompile(`(?i)~(cl|oc)$`)
 
 // AgentKind returns "claude", "opencode", or "" for a session name. The agent
 // suffix is matched case-insensitively.
+//
+// TODO(W6): agent identity belongs in internal/agent; move AgentKind and
+// agentSuffix there (the agentSession regex stays here for ListAgentSessions).
 func AgentKind(name string) string {
 	switch {
 	case agentSuffix(name, "cl"):

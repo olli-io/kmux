@@ -5,6 +5,7 @@ import (
 	"sort"
 
 	"github.com/olli-io/kmux/internal/kitty"
+	"github.com/olli-io/kmux/internal/tmux"
 )
 
 const (
@@ -124,7 +125,7 @@ func (m *Manager) Open(name, dir, agentCmd string) error {
 	if m.Attached(name) {
 		return nil
 	}
-	if err := NewDetachedSession(name, dir, agentCmd); err != nil {
+	if err := tmux.NewDetachedSession(name, dir, agentCmd); err != nil {
 		return err
 	}
 	return m.add(name)

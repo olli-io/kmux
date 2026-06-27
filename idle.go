@@ -4,6 +4,8 @@ import (
 	"hash/fnv"
 	"sort"
 	"time"
+
+	"github.com/olli-io/kmux/internal/tmux"
 )
 
 // idleTimeout is the default for how long an agent session may sit completely
@@ -131,13 +133,13 @@ func sweepIdleAtLaunch(now time.Time, timeout time.Duration, persisted map[strin
 	if timeout <= 0 || len(persisted) == 0 {
 		return
 	}
-	names, err := ListAgentSessions()
+	names, err := tmux.ListAgentSessions()
 	if err != nil {
 		return
 	}
 	hashes := make(map[string]uint64, len(names))
 	for _, name := range names {
-		text, err := CapturePane(name)
+		text, err := tmux.CapturePane(name)
 		if err != nil {
 			continue // flaky capture: treat as unseen this launch, never kill
 		}
@@ -148,6 +150,6 @@ func sweepIdleAtLaunch(now time.Time, timeout time.Duration, persisted map[strin
 	// whose pane is unchanged and stale, and resets (spares) everything else.
 	t := newIdleTrackerFrom(timeout, persisted)
 	for _, name := range t.reap(now, hashes, nil) {
-		_ = KillSession(name) // best-effort; a missing session is already gone
+		_ = tmux.KillSession(name) // best-effort; a missing session is already gone
 	}
 }

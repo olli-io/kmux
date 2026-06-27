@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/olli-io/kmux/internal/kitty"
+	"github.com/olli-io/kmux/internal/tmux"
 )
 
 const pollInterval = 2 * time.Second
@@ -161,7 +162,7 @@ func spinnerCmd() tea.Cmd {
 // pollCmd lists agent sessions off the UI goroutine.
 func pollCmd() tea.Cmd {
 	return func() tea.Msg {
-		names, err := ListAgentSessions()
+		names, err := tmux.ListAgentSessions()
 		return sessionsMsg{names: names, err: err}
 	}
 }
@@ -178,7 +179,7 @@ func attentionCmd(sessions []string) tea.Cmd {
 		states := make(map[string]attentionState, len(snap))
 		hashes := make(map[string]uint64, len(snap))
 		for _, s := range snap {
-			text, err := CapturePane(s)
+			text, err := tmux.CapturePane(s)
 			if err != nil {
 				// No hash recorded: the idle tracker treats this session as gone
 				// for this poll and resets its clock when capture recovers, so a
@@ -186,7 +187,7 @@ func attentionCmd(sessions []string) tea.Cmd {
 				states[s] = attnUnknown
 				continue
 			}
-			states[s] = classifyAttention(AgentKind(s), text)
+			states[s] = classifyAttention(tmux.AgentKind(s), text)
 			hashes[s] = hashPane(text)
 		}
 		return attentionMsg{states: states, hashes: hashes}
@@ -281,10 +282,10 @@ func openSessionCmd(mgr *Manager, name, dir, agentCmd string) tea.Cmd {
 // reconcile, which closes the now-orphaned pane).
 func killSessionCmd(name string) tea.Cmd {
 	return func() tea.Msg {
-		if err := KillSession(name); err != nil {
+		if err := tmux.KillSession(name); err != nil {
 			return sessionsMsg{err: err}
 		}
-		names, err := ListAgentSessions()
+		names, err := tmux.ListAgentSessions()
 		return sessionsMsg{names: names, err: err}
 	}
 }
@@ -344,7 +345,7 @@ func editorCmd(dir string) tea.Cmd {
 func openAgentTabCmd(name, dir, agentCmd string) tea.Cmd {
 	return func() tea.Msg {
 		if agentCmd != "" {
-			if err := NewDetachedSession(name, dir, agentCmd); err != nil {
+			if err := tmux.NewDetachedSession(name, dir, agentCmd); err != nil {
 				return focusedMsg{err: err}
 			}
 		}
@@ -402,7 +403,7 @@ func agentBadge(name string, attached, detached bool) string {
 	case detached:
 		prefix = errStyle.Render("D") + dimStyle.Render("~")
 	}
-	switch AgentKind(name) {
+	switch tmux.AgentKind(name) {
 	case "claude":
 		return prefix + clStyle.Render("CC")
 	case "opencode":
