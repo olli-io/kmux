@@ -229,7 +229,7 @@ func lazygitCmd(dir string) tea.Cmd {
 // editorCmd opens (or focuses) an editor for dir off the UI goroutine.
 func editorCmd(dir string) tea.Cmd {
 	return func() tea.Msg {
-		return focusedMsg{err: OpenEditor(dir)}
+		return focusedMsg{err: openEditor(dir)}
 	}
 }
 

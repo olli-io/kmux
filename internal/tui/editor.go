@@ -23,11 +23,11 @@ func nvimTabScriptPath() (string, error) {
 	return filepath.Join(filepath.Dir(exe), "nvim-tab.sh"), nil
 }
 
-// OpenEditor focuses an existing nvim tab for dir, or opens a new one there, via
+// openEditor focuses an existing nvim tab for dir, or opens a new one there, via
 // the installed nvim-tab.sh launcher. Like OpenLazygit it is fire-and-forget:
 // the script raises/launches the kitty window hosting nvim itself, so no managed
 // pane is involved. The script returns promptly once it has handed off to kitty.
-func OpenEditor(dir string) error {
+func openEditor(dir string) error {
 	script, err := nvimTabScriptPath()
 	if err != nil {
 		return err
