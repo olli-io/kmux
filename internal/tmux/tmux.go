@@ -12,27 +12,6 @@ import (
 // (opencode), case-insensitively.
 var agentSession = regexp.MustCompile(`(?i)~(cl|oc)$`)
 
-// AgentKind returns "claude", "opencode", or "" for a session name. The agent
-// suffix is matched case-insensitively.
-//
-// TODO(W6): agent identity belongs in internal/agent; move AgentKind and
-// agentSuffix there (the agentSession regex stays here for ListAgentSessions).
-func AgentKind(name string) string {
-	switch {
-	case agentSuffix(name, "cl"):
-		return "claude"
-	case agentSuffix(name, "oc"):
-		return "opencode"
-	default:
-		return ""
-	}
-}
-
-// agentSuffix reports whether name ends in "~"+suffix, case-insensitively.
-func agentSuffix(name, suffix string) bool {
-	return strings.HasSuffix(strings.ToLower(name), "~"+suffix)
-}
-
 // ListAgentSessions returns the sorted names of live tmux sessions whose names
 // end in ~cl or ~oc. A missing tmux server (no sessions) yields an empty slice,
 // not an error.

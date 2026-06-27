@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/config"
 	"github.com/olli-io/kmux/internal/kitty"
 	"github.com/olli-io/kmux/internal/project"
@@ -18,19 +19,19 @@ func main() {
 	// Route the command line: `--agent` selects the agent launcher (create/attach
 	// a tmux session in the current terminal, no kitty needed); otherwise kmux
 	// runs the dashboard as before.
-	pa, err := parseArgs(os.Args[1:])
+	pa, err := agent.ParseArgs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
 		os.Exit(1)
 	}
-	if pa.agent != "" {
-		if err := runAgent(pa.path, pa.agent); err != nil {
+	if pa.Agent != "" {
+		if err := agent.RunAgent(pa.Path, pa.Agent); err != nil {
 			fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
 			os.Exit(1)
 		}
 		return
 	}
-	runDashboard(pa.path)
+	runDashboard(pa.Path)
 }
 
 // runDashboard launches the kmux dashboard. pathArg, when non-empty, scopes kmux

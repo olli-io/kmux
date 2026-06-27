@@ -11,6 +11,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/config"
 	"github.com/olli-io/kmux/internal/kitty"
 	"github.com/olli-io/kmux/internal/project"
@@ -104,7 +105,7 @@ type model struct {
 // it offers a choice of agent (claude / opencode) for the selected project row.
 type agentPrompt struct {
 	title   string // human label for the project/worktree being launched
-	session string // the row's claude session name (base for sessionForKind)
+	session string // the row's claude session name (base for agent.SessionForKind)
 	dir     string // working directory the agent launches in
 	cursor  int    // index into promptOptions
 	tab     bool   // launch the chosen agent in a standalone kitty tab, not a pane
@@ -190,7 +191,7 @@ func attentionCmd(sessions []string) tea.Cmd {
 				states[s] = status.AttnUnknown
 				continue
 			}
-			states[s] = status.ClassifyAttention(tmux.AgentKind(s), text)
+			states[s] = status.ClassifyAttention(agent.AgentKind(s), text)
 			hashes[s] = status.HashPane(text)
 		}
 		return attentionMsg{states: states, hashes: hashes}
@@ -406,7 +407,7 @@ func agentBadge(name string, attached, detached bool) string {
 	case detached:
 		prefix = errStyle.Render("D") + dimStyle.Render("~")
 	}
-	switch tmux.AgentKind(name) {
+	switch agent.AgentKind(name) {
 	case "claude":
 		return prefix + clStyle.Render("CC")
 	case "opencode":
@@ -579,7 +580,7 @@ func (rowDeco) worktree(w project.Worktree, active bool) string {
 // project rows. The cursor indexes into this slice.
 func (m model) rows() []row {
 	deco := rowDeco{spinner: m.spinnerFrame}
-	names := projectNames(m.projects)
+	names := agent.ProjectNames(m.projects)
 	sess := buildSessionRows(m.sessions, names, m.collapsed, m.attention, m.mgr.Attached, m.isDetached, deco)
 	proj := buildProjectRows(m.projects, m.collapsed, m.hasSessionAny, deco)
 	out := make([]row, 0, len(sess)+len(proj))
@@ -617,7 +618,7 @@ func (m model) scopedSessions(names []string) []string {
 	out := make([]string, 0, len(names))
 	for _, s := range names {
 		rem := strings.TrimSuffix(strings.TrimSuffix(s, "~cl"), "~oc")
-		if _, _, ok := matchProject(rem, scope); ok {
+		if _, _, ok := agent.MatchProject(rem, scope); ok {
 			out = append(out, s)
 		}
 	}
@@ -648,11 +649,11 @@ func (m model) hasSession(name string) bool {
 
 // hasSessionAny reports whether a project/worktree has a running session of
 // either agent kind. claudeName is the ~cl session name (as produced by
-// expectedSession); the opencode name is derived by suffix swap. It drives the
+// agent.ExpectedSession); the opencode name is derived by suffix swap. It drives the
 // "active" green coloring of project rows so an opencode-only project still
 // reads as live.
 func (m model) hasSessionAny(claudeName string) bool {
-	return m.hasSession(claudeName) || m.hasSession(sessionForKind(claudeName, "opencode"))
+	return m.hasSession(claudeName) || m.hasSession(agent.SessionForKind(claudeName, "opencode"))
 }
 
 // killTarget returns the agent session a `d` press should kill for row r: a
@@ -742,7 +743,7 @@ func (m model) projectRoot(r *row) string {
 // project matches (e.g. ungrouped sessions).
 func (m model) sessionDir(name string) string {
 	rem := strings.TrimSuffix(strings.TrimSuffix(name, "~cl"), "~oc")
-	proj, wt, ok := matchProject(rem, projectNames(m.projects))
+	proj, wt, ok := agent.MatchProject(rem, agent.ProjectNames(m.projects))
 	if !ok {
 		return ""
 	}
@@ -1065,7 +1066,7 @@ func (m *model) launchProjectTab(r *row) (tea.Cmd, bool) {
 		return nil, false
 	}
 	claude := r.session
-	opencode := sessionForKind(r.session, "opencode")
+	opencode := agent.SessionForKind(r.session, "opencode")
 	var running []string
 	if m.hasSession(claude) {
 		running = append(running, claude)
@@ -1089,11 +1090,11 @@ func (m *model) launchProjectTab(r *row) (tea.Cmd, bool) {
 // given agent kind's session in a new kitty tab, creating the tmux session first
 // when it isn't already running.
 func (m *model) launchKindTab(session, dir, kind string) tea.Cmd {
-	name := sessionForKind(session, kind)
+	name := agent.SessionForKind(session, kind)
 	if m.hasSession(name) {
 		return openAgentTabCmd(name, "", "")
 	}
-	return openAgentTabCmd(name, dir, agentCommand(kind))
+	return openAgentTabCmd(name, dir, agent.AgentCommand(kind))
 }
 
 // launchProject activates a project/worktree leaf row. When exactly one agent
@@ -1108,7 +1109,7 @@ func (m *model) launchProject(r *row) (tea.Cmd, bool) {
 		return nil, false
 	}
 	claude := r.session
-	opencode := sessionForKind(r.session, "opencode")
+	opencode := agent.SessionForKind(r.session, "opencode")
 	var running []string
 	if m.hasSession(claude) {
 		running = append(running, claude)
@@ -1140,16 +1141,16 @@ func (m *model) confirmPrompt() tea.Cmd {
 
 // launchKind focuses the given agent kind's session if it is already running,
 // otherwise creates and attaches one. session is the row's claude session name
-// (the base for sessionForKind), dir its working directory.
+// (the base for agent.SessionForKind), dir its working directory.
 func (m *model) launchKind(session, dir, kind string) tea.Cmd {
-	name := sessionForKind(session, kind)
+	name := agent.SessionForKind(session, kind)
 	// Opening a session clears any detached flag so reconcile keeps its pane;
 	// persist the change when there was one.
 	save := m.clearDetached(name)
 	if id, ok := m.mgr.WindowID(name); ok {
 		return tea.Batch(focusCmd(id), save)
 	}
-	return openSessionCmd(m.mgr, name, dir, agentCommand(kind))
+	return openSessionCmd(m.mgr, name, dir, agent.AgentCommand(kind))
 }
 
 // launchKindOn launches a specific agent kind for project leaf row r, returning

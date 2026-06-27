@@ -1,4 +1,4 @@
-package main
+package agent
 
 import (
 	"fmt"
@@ -9,21 +9,21 @@ import (
 	"github.com/olli-io/kmux/internal/project"
 )
 
-// parsedArgs is the routed kmux command line. agent is "" for the default
+// ParsedArgs is the routed kmux command line. agent is "" for the default
 // dashboard mode and "claude"/"opencode" for the agent-launcher mode; path is
 // the optional directory argument ("" means the current directory).
-type parsedArgs struct {
-	path  string
-	agent string
+type ParsedArgs struct {
+	Path  string
+	Agent string
 }
 
-// parseArgs routes the kmux command line. With no --agent flag it selects the
+// ParseArgs routes the kmux command line. With no --agent flag it selects the
 // dashboard (the historical behaviour); with --agent it selects the agent
 // launcher. The path and the flag may appear in either order, so both
 // `kmux PATH --agent claude` and `kmux --agent claude PATH` parse the same.
 // --agent accepts either `--agent claude` or `--agent=claude`.
-func parseArgs(args []string) (parsedArgs, error) {
-	var pa parsedArgs
+func ParseArgs(args []string) (ParsedArgs, error) {
+	var pa ParsedArgs
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -32,30 +32,30 @@ func parseArgs(args []string) (parsedArgs, error) {
 				return pa, fmt.Errorf("--agent requires a value (claude or opencode)")
 			}
 			i++
-			pa.agent = args[i]
+			pa.Agent = args[i]
 		case strings.HasPrefix(a, "--agent="):
-			pa.agent = strings.TrimPrefix(a, "--agent=")
+			pa.Agent = strings.TrimPrefix(a, "--agent=")
 		case strings.HasPrefix(a, "-"):
 			return pa, fmt.Errorf("unknown flag: %s", a)
 		default:
-			if pa.path != "" {
+			if pa.Path != "" {
 				return pa, fmt.Errorf("unexpected argument: %s", a)
 			}
-			pa.path = a
+			pa.Path = a
 		}
 	}
-	if pa.agent != "" && pa.agent != "claude" && pa.agent != "opencode" {
-		return pa, fmt.Errorf("--agent must be 'claude' or 'opencode', got %q", pa.agent)
+	if pa.Agent != "" && pa.Agent != "claude" && pa.Agent != "opencode" {
+		return pa, fmt.Errorf("--agent must be 'claude' or 'opencode', got %q", pa.Agent)
 	}
 	return pa, nil
 }
 
-// runAgent creates (if needed) and attaches the current terminal to the tmux
+// RunAgent creates (if needed) and attaches the current terminal to the tmux
 // session for the given agent kind in the project containing path. The session
-// name follows kmux's convention (expectedSession + sessionForKind), so the
+// name follows kmux's convention (ExpectedSession + SessionForKind), so the
 // session the dashboard would spawn and the one this launches are one and the
 // same — launching here, then opening the dashboard, focuses the same agent.
-func runAgent(path, kind string) error {
+func RunAgent(path, kind string) error {
 	if path == "" {
 		path = "."
 	}
@@ -64,8 +64,8 @@ func runAgent(path, kind string) error {
 		return err
 	}
 	dir, wt := resolveWorktree(path, proj)
-	name := sessionForKind(expectedSession(proj.Name, wt), kind)
-	return attachAgentSession(name, dir, agentCommand(kind))
+	name := SessionForKind(ExpectedSession(proj.Name, wt), kind)
+	return attachAgentSession(name, dir, AgentCommand(kind))
 }
 
 // resolveWorktree locates which of a project's worktrees contains path, returning
