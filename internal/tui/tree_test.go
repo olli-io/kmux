@@ -62,40 +62,41 @@ func TestBuildSessionRows(t *testing.T) {
 	rows := buildSessionRows(sessions, names, map[string]bool{}, attn, attached, detached, rowDeco{})
 
 	// Mirroring the Projects pane: gstack has two sessions, so it is a collapsible
-	// folder (sorted to the top) with both worktree sessions hanging directly off
-	// it at depth 1 (no worktree node). kmux has a single session, so it is a bare
-	// leaf with no folder header; the ungrouped orphan is likewise a single leaf,
-	// emitted last. Leaf labels drop the agent suffix (the kind shows as a trailing
-	// badge), so both gstack worktree sessions read as "gstack/feat".
-	if !rows[0].collapsible || rows[0].key != "sess:gstack" {
-		t.Errorf("gstack header = {collapsible:%v key:%q}, want {true sess:gstack}", rows[0].collapsible, rows[0].key)
+	// folder (sorted to the top, at depth 1) with both worktree sessions hanging
+	// directly off it at depth 2 (no worktree node). kmux has a single session, so
+	// it is a bare leaf with no folder header; the ungrouped orphan is likewise a
+	// single leaf, emitted last. Every Sessions row carries one extra indent level
+	// versus the Projects pane. Leaf labels drop the agent suffix (the kind shows as
+	// a trailing badge), so both gstack worktree sessions read as "gstack/feat".
+	if !rows[0].collapsible || rows[0].key != "sess:gstack" || rows[0].depth != 1 {
+		t.Errorf("gstack header = {collapsible:%v key:%q depth:%d}, want {true sess:gstack 1}", rows[0].collapsible, rows[0].key, rows[0].depth)
 	}
-	if rows[1].label != "gstack/feat" || rows[1].depth != 1 {
-		t.Errorf("gstack child[0] = {label:%q depth:%d}, want {gstack/feat 1}", rows[1].label, rows[1].depth)
+	if rows[1].label != "gstack/feat" || rows[1].depth != 2 {
+		t.Errorf("gstack child[0] = {label:%q depth:%d}, want {gstack/feat 2}", rows[1].label, rows[1].depth)
 	}
-	if rows[2].label != "gstack/feat" || rows[2].depth != 1 {
-		t.Errorf("gstack child[1] = {label:%q depth:%d}, want {gstack/feat 1}", rows[2].label, rows[2].depth)
+	if rows[2].label != "gstack/feat" || rows[2].depth != 2 {
+		t.Errorf("gstack child[1] = {label:%q depth:%d}, want {gstack/feat 2}", rows[2].label, rows[2].depth)
 	}
-	// kmux: single-session bare leaf (not collapsible, no header) at depth 0.
-	if rows[3].collapsible || rows[3].label != "kmux" || rows[3].depth != 0 || rows[3].session != "kmux~cl" {
-		t.Errorf("kmux leaf = %+v, want {collapsible:false label:kmux depth:0 session:kmux~cl}", rows[3])
+	// kmux: single-session bare leaf (not collapsible, no header) at depth 1.
+	if rows[3].collapsible || rows[3].label != "kmux" || rows[3].depth != 1 || rows[3].session != "kmux~cl" {
+		t.Errorf("kmux leaf = %+v, want {collapsible:false label:kmux depth:1 session:kmux~cl}", rows[3])
 	}
 	// ungrouped orphan: single-session bare leaf, last.
-	if rows[4].collapsible || rows[4].label != "orphan" || rows[4].depth != 0 {
-		t.Errorf("orphan leaf = %+v, want {collapsible:false label:orphan depth:0}", rows[4])
+	if rows[4].collapsible || rows[4].label != "orphan" || rows[4].depth != 1 {
+		t.Errorf("orphan leaf = %+v, want {collapsible:false label:orphan depth:1}", rows[4])
 	}
 	if len(rows) != 5 {
 		t.Fatalf("got %d rows, want 5: %+v", len(rows), rows)
 	}
 
 	// Worktree sessions carry their full session name (for actions) but hang
-	// directly off the project at depth 1, with no intermediate "feat" header.
+	// directly off the project at depth 2, with no intermediate "feat" header.
 	for _, r := range rows {
 		if r.label == "feat" {
 			t.Errorf("worktree node %q should not be rendered", r.label)
 		}
-		if r.session == "gstack/feat~cl" && r.depth != 1 {
-			t.Errorf("worktree session depth = %d, want 1", r.depth)
+		if r.session == "gstack/feat~cl" && r.depth != 2 {
+			t.Errorf("worktree session depth = %d, want 2", r.depth)
 		}
 	}
 

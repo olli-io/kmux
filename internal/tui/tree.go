@@ -119,6 +119,7 @@ func buildSessionRows(sessions, names []string, collapsed map[string]bool, atten
 		rows = append(rows, row{
 			section:     sectionSessions,
 			key:         pkey,
+			depth:       1,
 			collapsible: true,
 			label:       deco.sessionFolder(p, !collapsed[pkey]),
 		})
@@ -126,11 +127,11 @@ func buildSessionRows(sessions, names []string, collapsed map[string]bool, atten
 			return
 		}
 		for _, s := range ss {
-			rows = append(rows, deco.session(s, 1, attention[s], attached(s), detached(s)))
+			rows = append(rows, deco.session(s, 2, attention[s], attached(s), detached(s)))
 		}
 	}
 	emitLeaf := func(s string) {
-		rows = append(rows, deco.session(s, 0, attention[s], attached(s), detached(s)))
+		rows = append(rows, deco.session(s, 1, attention[s], attached(s), detached(s)))
 	}
 	emit := func(p string, ss []string) {
 		if len(ss) > 1 {
