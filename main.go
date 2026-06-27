@@ -14,6 +14,7 @@ import (
 	"github.com/olli-io/kmux/internal/layout"
 	"github.com/olli-io/kmux/internal/project"
 	"github.com/olli-io/kmux/internal/status"
+	"github.com/olli-io/kmux/internal/tui"
 )
 
 func main() {
@@ -79,7 +80,7 @@ func runDashboard(pathArg string) {
 
 	mgr := layout.NewManager(sidebarID)
 	// AltScreen gives a clean, full-pane dashboard (clears on launch, restores on exit).
-	p := tea.NewProgram(newModel(mgr, scopeDir), tea.WithAltScreen())
+	p := tea.NewProgram(tui.NewModel(mgr, scopeDir), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		mgr.CloseAll()
 		fmt.Fprintf(os.Stderr, "kmux: %v\n", err)

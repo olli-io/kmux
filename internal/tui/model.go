@@ -1,0 +1,284 @@
+package tui
+
+import (
+	"path/filepath"
+	"slices"
+	"strings"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/olli-io/kmux/internal/agent"
+	"github.com/olli-io/kmux/internal/config"
+	"github.com/olli-io/kmux/internal/layout"
+	"github.com/olli-io/kmux/internal/project"
+	"github.com/olli-io/kmux/internal/status"
+)
+
+type model struct {
+	mgr           *layout.Manager
+	sessions      []string
+	projects      []project.Project
+	collapsed     map[string]bool                  // collapse key -> collapsed
+	detached      map[string]bool                  // session name -> pane detached (tmux still running)
+	attention     map[string]status.AttentionState // session name -> latest detected attention state
+	idle          status.IdleTracker               // per-session pane-stability clock for idle-kill
+	cursor        int                              // index into rows()
+	spinnerFrame  int                              // animation frame for busy-session glyphs
+	prompt        *agentPrompt                     // non-nil while the agent-picker overlay is open
+	lastErr       string
+	width, height int
+
+	// scopeDir is the main-worktree path kmux is scoped to (from the CLI
+	// directory argument); scopeName is its project name. Both empty in the
+	// default, unscoped mode. When set, the Projects panel shows only that
+	// project and the Sessions panel only its sessions.
+	scopeDir  string
+	scopeName string
+}
+
+// agentPrompt is the state of the agent-picker shown when launching a project:
+// it offers a choice of agent (claude / opencode) for the selected project row.
+type agentPrompt struct {
+	title   string // human label for the project/worktree being launched
+	session string // the row's claude session name (base for agent.SessionForKind)
+	dir     string // working directory the agent launches in
+	cursor  int    // index into promptOptions
+	tab     bool   // launch the chosen agent in a standalone kitty tab, not a pane
+}
+
+// promptOptions are the agent kinds offered by the picker, in display order.
+var promptOptions = []struct {
+	kind, label string
+	style       lipgloss.Style
+}{
+	{"claude", "Claude", clStyle},
+	{"opencode", "OpenCode", ocStyle},
+}
+
+// NewModel builds the dashboard model. scopeDir, when non-empty, is the main
+// worktree of the single project kmux is scoped to (see model.scopeDir).
+func NewModel(mgr *layout.Manager, scopeDir string) tea.Model {
+	// Restore detached sessions and idle clocks from a previous run; best-effort
+	// (a read error just starts with empty sets).
+	detached, idle, err := status.LoadState()
+	if err != nil || detached == nil {
+		detached, idle = map[string]bool{}, map[string]status.IdleRecord{}
+	}
+	scopeName := ""
+	if scopeDir != "" {
+		scopeName = filepath.Base(scopeDir)
+	}
+	// Resolve the idle-kill timeout from config; a read error falls back to the
+	// default, matching the optional, best-effort handling of the rest of config.
+	// Seeding the tracker with the persisted clocks lets idle time accumulated
+	// before this launch keep counting instead of resetting to zero.
+	cfg, _ := config.LoadConfig()
+	return model{
+		mgr:       mgr,
+		collapsed: map[string]bool{},
+		detached:  detached,
+		attention: map[string]status.AttentionState{},
+		idle:      status.NewIdleTrackerFrom(cfg.IdleDuration(), idle),
+		scopeDir:  scopeDir,
+		scopeName: scopeName,
+	}
+}
+
+func (m model) Init() tea.Cmd {
+	// Kick off an immediate poll, then tick on the interval.
+	return tea.Batch(pollCmd(), projectsCmd(m.scopeDir), tickCmd(), spinnerCmd())
+}
+
+// rows builds the combined, navigable row list: session rows first, then
+// project rows. The cursor indexes into this slice.
+func (m model) rows() []row {
+	deco := rowDeco{spinner: m.spinnerFrame}
+	names := agent.ProjectNames(m.projects)
+	sess := buildSessionRows(m.sessions, names, m.collapsed, m.attention, m.mgr.Attached, m.isDetached, deco)
+	proj := buildProjectRows(m.projects, m.collapsed, m.hasSessionAny, deco)
+	out := make([]row, 0, len(sess)+len(proj))
+	out = append(out, sess...)
+	out = append(out, proj...)
+	return out
+}
+
+// attachable is m.sessions minus detached sessions: the set reconcile keeps
+// panes for. A detached session stays in the Sessions panel (and its tmux
+// session keeps running) but has no pane, so it renders as unattached until
+// re-opened with enter/l.
+func (m model) attachable() []string {
+	if len(m.detached) == 0 {
+		return m.sessions
+	}
+	out := make([]string, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		if !m.detached[s] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// scopedSessions restricts a session list to the scoped project, dropping
+// sessions that belong to other projects (and the ungrouped bucket). In the
+// default, unscoped mode it returns the list unchanged. Matching mirrors
+// groupSessions so a kept session lands under the same project node.
+func (m model) scopedSessions(names []string) []string {
+	if m.scopeName == "" {
+		return names
+	}
+	scope := []string{m.scopeName}
+	out := make([]string, 0, len(names))
+	for _, s := range names {
+		rem := strings.TrimSuffix(strings.TrimSuffix(s, "~cl"), "~oc")
+		if _, _, ok := agent.MatchProject(rem, scope); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// isDetached reports whether the user has detached session name's pane.
+func (m model) isDetached(name string) bool {
+	return m.detached[name]
+}
+
+// pruneDetached drops detached entries for sessions that no longer exist, so a
+// future session that reuses the same name isn't silently kept detached.
+func (m *model) pruneDetached() (changed bool) {
+	for s := range m.detached {
+		if !slices.Contains(m.sessions, s) {
+			delete(m.detached, s)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// hasSession reports whether an agent session with the given name is running.
+func (m model) hasSession(name string) bool {
+	return slices.Contains(m.sessions, name)
+}
+
+// hasSessionAny reports whether a project/worktree has a running session of
+// either agent kind. claudeName is the ~cl session name (as produced by
+// agent.ExpectedSession); the opencode name is derived by suffix swap. It drives the
+// "active" green coloring of project rows so an opencode-only project still
+// reads as live.
+func (m model) hasSessionAny(claudeName string) bool {
+	return m.hasSession(claudeName) || m.hasSession(agent.SessionForKind(claudeName, "opencode"))
+}
+
+// killTarget returns the agent session a `d` press should kill for row r: a
+// session leaf kills itself; a project or worktree row kills its running
+// session. It returns "" when there's nothing to kill (folder headers, or
+// project rows whose session isn't running).
+func (m model) killTarget(r *row) string {
+	if r == nil {
+		return ""
+	}
+	if isSessionLeaf(r) {
+		return r.session
+	}
+	if r.section == sectionProjects && r.session != "" && m.hasSession(r.session) {
+		return r.session
+	}
+	return ""
+}
+
+// lazygitDir returns the directory to open lazygit in for row r: a project or
+// worktree row carries its dir directly; a session leaf is resolved back to its
+// project's directory via the session name. It returns "" when there's no
+// associated directory (e.g. folder headers or ungrouped sessions).
+func (m model) lazygitDir(r *row) string {
+	if r == nil {
+		return ""
+	}
+	if r.dir != "" {
+		return r.dir // project / worktree leaf carries its dir directly
+	}
+	if r.section != sectionSessions {
+		return ""
+	}
+	if !r.collapsible {
+		return m.sessionDir(r.session) // session leaf: resolve from its name
+	}
+	// Sessions-panel group header: derive the dir from its collapse key, which
+	// encodes "sess:<project>" or "sess:<project>/<worktree>".
+	proj, wt, _ := strings.Cut(strings.TrimPrefix(r.key, "sess:"), "/")
+	return m.projectPath(proj, wt)
+}
+
+// editorDir resolves the directory to open the editor in for row r. It reuses
+// lazygitDir (project/worktree leaves and session rows) and falls back to the
+// project root so a multi-worktree folder header opens its editor too.
+func (m model) editorDir(r *row) string {
+	if dir := m.lazygitDir(r); dir != "" {
+		return dir
+	}
+	return m.projectRoot(r)
+}
+
+// projectRoot returns the main-worktree path of the project that Projects-panel
+// row r belongs to, for any of its rows: the folder header (project name encoded
+// in its collapse key), the main-worktree leaf, or a linked-worktree leaf. It
+// returns "" for non-project rows or when no project matches.
+func (m model) projectRoot(r *row) string {
+	if r == nil || r.section != sectionProjects {
+		return ""
+	}
+	if r.collapsible {
+		name := strings.TrimPrefix(r.key, "proj:")
+		for _, p := range m.projects {
+			if p.Name == name {
+				return p.Path
+			}
+		}
+		return ""
+	}
+	// Leaf: find the project owning this dir (its main path or a worktree path).
+	for _, p := range m.projects {
+		if p.Path == r.dir {
+			return p.Path
+		}
+		for _, w := range p.Worktrees {
+			if w.Path == r.dir {
+				return p.Path
+			}
+		}
+	}
+	return ""
+}
+
+// sessionDir resolves the working directory for an agent session by matching its
+// name (<project>[/<worktree>]~<cl|oc>) against the scanned projects, mirroring
+// how sessions are grouped under projects in the tree. It returns "" when no
+// project matches (e.g. ungrouped sessions).
+func (m model) sessionDir(name string) string {
+	rem := strings.TrimSuffix(strings.TrimSuffix(name, "~cl"), "~oc")
+	proj, wt, ok := agent.MatchProject(rem, agent.ProjectNames(m.projects))
+	if !ok {
+		return ""
+	}
+	return m.projectPath(proj, wt)
+}
+
+// projectPath returns the directory for a scanned project (wt == "") or one of
+// its linked worktrees (wt == the worktree's basename), or "" when no such
+// project/worktree exists (e.g. the "(ungrouped)" bucket).
+func (m model) projectPath(proj, wt string) string {
+	for _, p := range m.projects {
+		if p.Name != proj {
+			continue
+		}
+		if wt == "" {
+			return p.Path
+		}
+		for _, w := range p.Worktrees {
+			if w.Name == wt {
+				return w.Path
+			}
+		}
+	}
+	return ""
+}
