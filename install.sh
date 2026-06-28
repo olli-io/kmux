@@ -43,7 +43,7 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 
 # ---------------------------------------------------------------------------
 # Choose an install directory.
-# Defaults to /usr/local/bin (via sudo if needed).
+# Defaults to ~/.local/bin so no sudo is needed.
 # Override with PREFIX or INSTALL_DIR env vars.
 # ---------------------------------------------------------------------------
 if [ -n "${INSTALL_DIR:-}" ]; then
@@ -51,7 +51,7 @@ if [ -n "${INSTALL_DIR:-}" ]; then
 elif [ -n "${PREFIX:-}" ]; then
   DEST="$PREFIX/bin"
 else
-  DEST="/usr/local/bin"
+  DEST="${XDG_BIN_HOME:-$HOME/.local/bin}"
 fi
 mkdir -p "$DEST" 2>/dev/null || true
 
