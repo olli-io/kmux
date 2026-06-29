@@ -240,15 +240,31 @@ func (c Config) IdleDuration() time.Duration {
 	return DefaultIdleTimeout
 }
 
+// ConfigDir returns kmux's configuration/state directory, ~/.config/kmux,
+// honoring $XDG_CONFIG_HOME when set. It deliberately does NOT use
+// os.UserConfigDir, which on macOS resolves to ~/Library/Application Support —
+// kmux uses the XDG ~/.config location on every platform, matching its docs.
+func ConfigDir() (string, error) {
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		base = filepath.Join(home, ".config")
+	}
+	return filepath.Join(base, "kmux"), nil
+}
+
 // configFile returns the path to the user's config file
 // (~/.config/kmux/config.yaml). Unlike stateFile it does not create the
 // directory: the config is optional and only ever read.
 func configFile() (string, error) {
-	dir, err := os.UserConfigDir()
+	dir, err := ConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "kmux", "config.yaml"), nil
+	return filepath.Join(dir, "config.yaml"), nil
 }
 
 // defaultConfigPath returns the default config shipped next to the kmux binary

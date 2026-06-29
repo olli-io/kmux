@@ -1,11 +1,33 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+// TestConfigDir verifies kmux resolves its config dir to the XDG ~/.config
+// location (not macOS's ~/Library/Application Support), honoring
+// $XDG_CONFIG_HOME when set.
+func TestConfigDir(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/custom/xdg")
+	if got, err := ConfigDir(); err != nil || got != "/custom/xdg/kmux" {
+		t.Fatalf("ConfigDir() with XDG set = (%q, %v), want /custom/xdg/kmux", got, err)
+	}
+
+	t.Setenv("XDG_CONFIG_HOME", "")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home directory")
+	}
+	want := filepath.Join(home, ".config", "kmux")
+	if got, err := ConfigDir(); err != nil || got != want {
+		t.Fatalf("ConfigDir() default = (%q, %v), want %q", got, err, want)
+	}
+}
 
 func TestParseConfigIdleTimeout(t *testing.T) {
 	cases := []struct {

@@ -23,15 +23,22 @@ func TestSessionPlanOrphan(t *testing.T) {
 	if planDir != resolved {
 		t.Errorf("dir = %q, want %q", planDir, resolved)
 	}
-	if want := ExpectedSession(resolved, ""); name != want {
+	if want := OrphanSession(resolved); name != want {
 		t.Errorf("name = %q, want %q", name, want)
 	}
-	// An orphaned session belongs to no project and no worktree.
+	// The session carries the orphan mark and belongs to no project or worktree.
+	if !IsOrphan(name) {
+		t.Errorf("IsOrphan(%q) = false, want true", name)
+	}
 	if _, _, ok := MatchProject(name, []string{"/some/other/proj"}); ok {
 		t.Errorf("MatchProject(%q) ok = true, want false", name)
 	}
 	if wt := WorktreeName(name); wt != "" {
 		t.Errorf("WorktreeName(%q) = %q, want \"\"", name, wt)
+	}
+	// The path round-trips back out of the marked name.
+	if got := ProjectPath(name); got != resolved {
+		t.Errorf("ProjectPath(%q) = %q, want %q", name, got, resolved)
 	}
 }
 
@@ -60,6 +67,8 @@ func TestParseArgs(t *testing.T) {
 		{"session space", []string{"--session", "claude"}, ParsedArgs{Agent: "claude", PrintSession: true}, false},
 		{"session equals", []string{"--session=opencode"}, ParsedArgs{Agent: "opencode", PrintSession: true}, false},
 		{"session with path", []string{"--session", "opencode", "/g/x"}, ParsedArgs{Path: "/g/x", Agent: "opencode", PrintSession: true}, false},
+		{"project", []string{"--project"}, ParsedArgs{PrintProject: true}, false},
+		{"project equals form", []string{"-project"}, ParsedArgs{PrintProject: true}, false},
 		{"agent missing value", []string{"--agent"}, ParsedArgs{}, true},
 		{"session missing value", []string{"--session"}, ParsedArgs{}, true},
 		{"bad kind", []string{"--agent", "vim"}, ParsedArgs{}, true},

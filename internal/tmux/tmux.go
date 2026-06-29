@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -34,6 +35,28 @@ func ListAgentSessions() ([]string, error) {
 	}
 	sort.Strings(names)
 	return names, nil
+}
+
+// CurrentSession returns the name and active-pane working directory of the tmux
+// session the caller is running inside, via `tmux display-message`. It is meant
+// for code invoked from within a session (e.g. a script bound to a tmux
+// keybinding), where #S and #{pane_current_path} resolve against the pane that
+// triggered it. It errors when not run inside tmux ($TMUX unset), the intended
+// guard for context that only makes sense within a session.
+func CurrentSession() (name, paneDir string, err error) {
+	if os.Getenv("TMUX") == "" {
+		return "", "", fmt.Errorf("not inside a tmux session ($TMUX unset)")
+	}
+	out, err := exec.Command("tmux", "display-message", "-p", "#{session_name}\t#{pane_current_path}").Output()
+	if err != nil {
+		return "", "", fmt.Errorf("tmux display-message: %w", err)
+	}
+	fields := strings.SplitN(strings.TrimRight(string(out), "\n"), "\t", 2)
+	name = fields[0]
+	if len(fields) > 1 {
+		paneDir = fields[1]
+	}
+	return name, paneDir, nil
 }
 
 // CapturePane returns the visible pane text of a session's active pane (the live

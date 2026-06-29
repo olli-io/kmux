@@ -5,16 +5,18 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/olli-io/kmux/internal/config"
 )
 
 // stateFile returns the path to kmux's persisted state file
-// (~/.config/kmux/state.json), creating the directory as needed.
+// (~/.config/kmux/state.json), creating the directory as needed. It shares
+// config.ConfigDir so state and config always live in the same ~/.config/kmux.
 func stateFile() (string, error) {
-	dir, err := os.UserConfigDir()
+	dir, err := config.ConfigDir()
 	if err != nil {
 		return "", err
 	}
-	dir = filepath.Join(dir, "kmux")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}

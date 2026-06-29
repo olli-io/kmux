@@ -1,11 +1,32 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/project"
 	"github.com/olli-io/kmux/internal/status"
 )
+
+// TestSessionRowOrphanGlyph checks that an orphaned (∅-marked) session row shows
+// the orphan glyph after its clean basename label — e.g. "kmux ∅" — while a
+// normal repo session shows no glyph.
+func TestSessionRowOrphanGlyph(t *testing.T) {
+	orphan := agent.OrphanSession("/tmp/kmux") // ∅/tmp/kmux‧CC
+	row := rowDeco{}.session(orphan, 1, status.AttnUnknown, false, false)
+	if !strings.Contains(row.label, "kmux") {
+		t.Errorf("orphan label %q missing basename %q", row.label, "kmux")
+	}
+	if !strings.Contains(row.label, orphanGlyph) {
+		t.Errorf("orphan label %q missing %q glyph", row.label, orphanGlyph)
+	}
+
+	repo := rowDeco{}.session("/g/kmux‧CC", 1, status.AttnUnknown, false, false)
+	if strings.Contains(repo.label, orphanGlyph) {
+		t.Errorf("repo label %q should not carry the orphan glyph", repo.label)
+	}
+}
 
 func TestBuildProjectRows(t *testing.T) {
 	projects := []project.Project{

@@ -14,9 +14,16 @@ import (
 // present only for linked worktrees, and the trailing "‧CC"/"‧OC" identifies the
 // agent kind. Embedding the full path (not just the basename) keeps two projects
 // that share a basename distinct.
+//
+// A session whose directory is in no git repository is "orphaned" and carries a
+// leading orphanMark ("∅<projectPath>‧<CC|OC>", never with an "@<worktree>"
+// segment). The mark only ever appears at the very front, so the agent-suffix
+// and worktree parsing below operate unchanged on the remainder; IsOrphan and
+// stripOrphan handle the prefix.
 const (
 	worktreeSep = "@"
 	agentSep    = "‧" // U+2027 HYPHENATION POINT
+	orphanMark  = "∅" // U+2205 EMPTY SET, leading mark for a no-repo session
 )
 
 // agentSuffixes maps an agent kind to its tmux session-name suffix.
@@ -32,6 +39,28 @@ func ExpectedSession(projPath, wt string) string {
 		name += worktreeSep + tmuxSafe(wt)
 	}
 	return name + agentSuffixes["claude"]
+}
+
+// OrphanSession returns the session name for an orphaned agent session — one
+// whose directory dir is not inside any git repository. It is ExpectedSession's
+// no-worktree form with a leading orphanMark, so AgentKind/SessionForKind keep
+// working on the (unchanged) suffix while IsOrphan recognises the prefix. dir is
+// the directory's own path, standing in for a project path; MatchProject never
+// binds it to a real project, so the dashboard files it under "(ungrouped)".
+func OrphanSession(dir string) string {
+	return orphanMark + ExpectedSession(dir, "")
+}
+
+// IsOrphan reports whether name is an orphaned (no-repo) session, identified by
+// the leading orphanMark.
+func IsOrphan(name string) bool {
+	return strings.HasPrefix(name, orphanMark)
+}
+
+// stripOrphan removes a leading orphanMark, leaving the path-and-agent remainder
+// that the rest of the parsers expect.
+func stripOrphan(name string) string {
+	return strings.TrimPrefix(name, orphanMark)
 }
 
 // sessionPrefix is the per-project leading portion of a session name: the main
@@ -83,7 +112,13 @@ func AgentKind(name string) string {
 // byte-identical to the original directory; MatchProject is the authoritative way
 // to resolve a session back to a real project.
 func ProjectPath(session string) string {
-	before, _, _ := strings.Cut(stripAgent(session), worktreeSep)
+	rem := stripAgent(session)
+	// An orphan's whole remainder is the path: it has no worktree segment, and
+	// the path itself may legitimately contain '@', so don't cut on worktreeSep.
+	if IsOrphan(rem) {
+		return expandHome(stripOrphan(rem))
+	}
+	before, _, _ := strings.Cut(rem, worktreeSep)
 	return expandHome(before)
 }
 
@@ -95,7 +130,13 @@ func ProjectName(session string) string {
 // WorktreeName extracts the worktree segment of a session name, or "" for a
 // main-worktree session.
 func WorktreeName(session string) string {
-	_, after, found := strings.Cut(stripAgent(session), worktreeSep)
+	rem := stripAgent(session)
+	// Orphan sessions never have a worktree; a '@' in the remainder is part of
+	// the directory path, not a separator.
+	if IsOrphan(rem) {
+		return ""
+	}
+	_, after, found := strings.Cut(rem, worktreeSep)
 	if found {
 		return after
 	}

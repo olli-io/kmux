@@ -44,13 +44,23 @@ var (
 // advanced on each spinner tick.
 type rowDeco struct{ spinner int }
 
+// orphanGlyph marks an orphaned (no-repo) session in its Sessions-panel row,
+// shown after the label and before the agent badge ("kmux ∅ A‧CC"). It mirrors
+// the leading mark agent.OrphanSession bakes into the session name.
+const orphanGlyph = "∅" // U+2205 EMPTY SET
+
 func (d rowDeco) session(name string, depth int, st status.AttentionState, attached, detached bool) row {
 	// The leading mark is the attention glyph (what the agent is doing); the
-	// attach state (A/D) rides on the agent badge instead.
+	// attach state (A/D) rides on the agent badge instead. An orphaned session
+	// (no git repo) shows a dim ∅ between its label and badge: "kmux ∅ A‧CC".
+	label := sessionLabel(name)
+	if agent.IsOrphan(name) {
+		label += " " + dimStyle.Render(orphanGlyph)
+	}
 	return row{
 		section: sectionSessions,
 		depth:   depth,
-		label:   sessionLabel(name),
+		label:   label,
 		badge:   agentBadge(name, attached, detached),
 		mark:    attentionGlyph(st, d.spinner),
 		session: name,

@@ -110,6 +110,53 @@ func TestExtractors(t *testing.T) {
 	}
 }
 
+func TestOrphanSession(t *testing.T) {
+	home := homeOrSkip(t)
+	dir := filepath.Join(home, "scratch", "notes")
+
+	name := OrphanSession(dir)
+	if want := "∅~/scratch/notes" + cc; name != want {
+		t.Errorf("OrphanSession = %q, want %q", name, want)
+	}
+	if !IsOrphan(name) {
+		t.Errorf("IsOrphan(%q) = false, want true", name)
+	}
+	// A normal (repo) session is not an orphan.
+	if IsOrphan(ExpectedSession(dir, "")) {
+		t.Errorf("IsOrphan(repo session) = true, want false")
+	}
+	// The marker leaves agent-kind detection and suffix swapping intact.
+	if got := AgentKind(name); got != "claude" {
+		t.Errorf("AgentKind = %q, want claude", got)
+	}
+	if got := SessionForKind(name, "opencode"); got != "∅~/scratch/notes‧OC" {
+		t.Errorf("SessionForKind = %q, want %q", got, "∅~/scratch/notes‧OC")
+	}
+	// The path round-trips; no worktree; never binds to a project.
+	if got := ProjectPath(name); got != dir {
+		t.Errorf("ProjectPath = %q, want %q", got, dir)
+	}
+	if got := ProjectName(name); got != "notes" {
+		t.Errorf("ProjectName = %q, want notes", got)
+	}
+	if got := WorktreeName(name); got != "" {
+		t.Errorf("WorktreeName = %q, want \"\"", got)
+	}
+	if _, _, ok := MatchProject(name, []string{dir}); ok {
+		t.Errorf("MatchProject(%q) ok = true, want false", name)
+	}
+
+	// An orphan directory containing '@' must not be parsed as a worktree.
+	at := filepath.Join(home, "tmp", "foo@bar")
+	atName := OrphanSession(at)
+	if got := ProjectPath(atName); got != at {
+		t.Errorf("ProjectPath(@-path) = %q, want %q", got, at)
+	}
+	if got := WorktreeName(atName); got != "" {
+		t.Errorf("WorktreeName(@-path) = %q, want \"\"", got)
+	}
+}
+
 func TestAgentKind(t *testing.T) {
 	cases := map[string]string{
 		"~/git/proj@wt" + cc:    "claude",

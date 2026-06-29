@@ -19,9 +19,11 @@ import (
 
 func main() {
 	// Route the command line: `--session` prints the resolved session name and
-	// exits (for scripting); `--agent` selects the agent launcher (create/attach a
-	// tmux session in the current terminal, no kitty needed); otherwise kmux runs
-	// the dashboard as before.
+	// exits (for scripting); `--project` prints the project directory of the tmux
+	// session the caller is inside and exits (for scripts bound to a tmux
+	// keybinding); `--agent` selects the agent launcher (create/attach a tmux
+	// session in the current terminal, no kitty needed); otherwise kmux runs the
+	// dashboard as before.
 	pa, err := agent.ParseArgs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
@@ -34,6 +36,15 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(name)
+		return
+	}
+	if pa.PrintProject {
+		dir, err := agent.CurrentProjectDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(dir)
 		return
 	}
 	if pa.Agent != "" {
