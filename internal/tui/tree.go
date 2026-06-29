@@ -1,8 +1,8 @@
 package tui
 
 import (
+	"path/filepath"
 	"sort"
-	"strings"
 
 	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/project"
@@ -69,7 +69,8 @@ type sessionGroup struct {
 	wts  map[string][]string
 }
 
-// groupSessions buckets sessions by matched project and worktree segment.
+// groupSessions buckets sessions by matched project and worktree segment. names
+// holds the projects' main-worktree paths (the group key is the matched path).
 func groupSessions(sessions, names []string) (map[string]*sessionGroup, []string) {
 	groups := map[string]*sessionGroup{}
 	var order []string
@@ -83,8 +84,7 @@ func groupSessions(sessions, names []string) (map[string]*sessionGroup, []string
 		return g
 	}
 	for _, s := range sessions {
-		rem := strings.TrimSuffix(strings.TrimSuffix(s, "~cl"), "~oc")
-		proj, wt, ok := agent.MatchProject(rem, names)
+		proj, wt, ok := agent.MatchProject(s, names)
 		if !ok {
 			proj, wt = ungrouped, "" // list flat under the ungrouped node
 		}
@@ -143,7 +143,7 @@ func buildSessionRows(sessions, names []string, collapsed map[string]bool, atten
 			key:         pkey,
 			depth:       1,
 			collapsible: true,
-			label:       deco.sessionFolder(p, !collapsed[pkey]),
+			label:       deco.sessionFolder(filepath.Base(p), !collapsed[pkey]),
 		})
 		if collapsed[pkey] {
 			return
@@ -217,7 +217,7 @@ func buildProjectRows(projects []project.Project, collapsed map[string]bool, liv
 
 	var rows []row
 	for _, p := range ordered {
-		mainSession := agent.ExpectedSession(p.Name, "")
+		mainSession := agent.ExpectedSession(p.Path, "")
 		if len(p.Worktrees) == 0 {
 			rows = append(rows, row{
 				section: sectionProjects,
@@ -232,7 +232,7 @@ func buildProjectRows(projects []project.Project, collapsed map[string]bool, liv
 		// green when any has a live pane, red when any has only a detached one.
 		folderLive := live(mainSession)
 		for _, w := range p.Worktrees {
-			folderLive = maxLive(folderLive, live(agent.ExpectedSession(p.Name, w.Name)))
+			folderLive = maxLive(folderLive, live(agent.ExpectedSession(p.Path, w.Name)))
 		}
 
 		pkey := "proj:" + p.Name
@@ -254,7 +254,7 @@ func buildProjectRows(projects []project.Project, collapsed map[string]bool, liv
 			session: mainSession,
 		})
 		for _, w := range p.Worktrees {
-			wtSession := agent.ExpectedSession(p.Name, w.Name)
+			wtSession := agent.ExpectedSession(p.Path, w.Name)
 			rows = append(rows, row{
 				section: sectionProjects,
 				depth:   1,

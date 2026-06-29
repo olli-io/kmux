@@ -66,10 +66,24 @@ kmux --agent opencode ~/git/myproject   # flag then path, equivalent
 kmux --agent claude                     # omit the path to use the current dir
 ```
 
-The session name follows the same convention the dashboard uses (`<project>~cl`
-for claude, `~oc` for opencode; worktrees become `<project>/<worktree>~…`), so an
-agent launched this way is the very same session the dashboard manages — launch
-it here, then open `kmux`, and it focuses that running agent.
+The session name follows the same convention the dashboard uses
+(`<project-path>‧CC` for claude, `‧OC` for opencode; worktrees become
+`<project-path>@<worktree>‧…`, e.g. `~/git/myproject@feat‧CC`), so an agent
+launched this way is the very same session the dashboard manages — launch it
+here, then open `kmux`, and it focuses that running agent.
+
+## Print a session name
+
+`--session` resolves the very same session name without launching anything and
+prints it to stdout, for scripting against the running agent. Like `--agent` it
+takes a kind and an optional path (default: the current directory), and needs
+neither tmux nor kitty:
+
+```sh
+kmux --session claude                   # e.g. ~/git/myproject‧CC
+kmux --session opencode ~/git/myproject # name for a specific path
+tmux send-keys -t "$(kmux --session claude)" 'hello' Enter
+```
 
 ## Config
 

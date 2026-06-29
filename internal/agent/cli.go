@@ -9,19 +9,23 @@ import (
 	"github.com/olli-io/kmux/internal/project"
 )
 
-// ParsedArgs is the routed kmux command line. agent is "" for the default
-// dashboard mode and "claude"/"opencode" for the agent-launcher mode; path is
-// the optional directory argument ("" means the current directory).
+// ParsedArgs is the routed kmux command line. Agent is "" for the default
+// dashboard mode and "claude"/"opencode" for the agent modes; PrintSession is set
+// by --session to print the resolved session name instead of launching it; Path
+// is the optional directory argument ("" means the current directory).
 type ParsedArgs struct {
-	Path  string
-	Agent string
+	Path         string
+	Agent        string
+	PrintSession bool
 }
 
-// ParseArgs routes the kmux command line. With no --agent flag it selects the
-// dashboard (the historical behaviour); with --agent it selects the agent
-// launcher. The path and the flag may appear in either order, so both
-// `kmux PATH --agent claude` and `kmux --agent claude PATH` parse the same.
-// --agent accepts either `--agent claude` or `--agent=claude`.
+// ParseArgs routes the kmux command line. With no agent flag it selects the
+// dashboard (the historical behaviour); --agent selects the agent launcher, and
+// --session prints the session name that --agent would create (for scripting)
+// and exits. Both agent flags take a kind (claude or opencode) and accept either
+// `--flag claude` or `--flag=claude`. The path and the flag may appear in either
+// order, so `kmux PATH --agent claude` and `kmux --agent claude PATH` parse the
+// same.
 func ParseArgs(args []string) (ParsedArgs, error) {
 	var pa ParsedArgs
 	for i := 0; i < len(args); i++ {
@@ -35,6 +39,14 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 			pa.Agent = args[i]
 		case strings.HasPrefix(a, "--agent="):
 			pa.Agent = strings.TrimPrefix(a, "--agent=")
+		case a == "--session", a == "-session":
+			if i+1 >= len(args) {
+				return pa, fmt.Errorf("--session requires a value (claude or opencode)")
+			}
+			i++
+			pa.Agent, pa.PrintSession = args[i], true
+		case strings.HasPrefix(a, "--session="):
+			pa.Agent, pa.PrintSession = strings.TrimPrefix(a, "--session="), true
 		case strings.HasPrefix(a, "-"):
 			return pa, fmt.Errorf("unknown flag: %s", a)
 		default:
@@ -45,7 +57,7 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 		}
 	}
 	if pa.Agent != "" && pa.Agent != "claude" && pa.Agent != "opencode" {
-		return pa, fmt.Errorf("--agent must be 'claude' or 'opencode', got %q", pa.Agent)
+		return pa, fmt.Errorf("agent must be 'claude' or 'opencode', got %q", pa.Agent)
 	}
 	return pa, nil
 }
@@ -56,16 +68,34 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 // session the dashboard would spawn and the one this launches are one and the
 // same — launching here, then opening the dashboard, focuses the same agent.
 func RunAgent(path, kind string) error {
+	name, dir, err := sessionPlan(path, kind)
+	if err != nil {
+		return err
+	}
+	return attachAgentSession(name, dir, AgentCommand(kind))
+}
+
+// SessionName returns the tmux session name kmux uses for the given agent kind
+// in the project/worktree containing path ("" = the current directory). It is
+// the exact name RunAgent would create, so other tools can target the same
+// session (e.g. `tmux send-keys -t "$(kmux --session claude)"`).
+func SessionName(path, kind string) (string, error) {
+	name, _, err := sessionPlan(path, kind)
+	return name, err
+}
+
+// sessionPlan resolves the session name and working directory for an agent kind
+// in the project/worktree containing path ("" = the current directory).
+func sessionPlan(path, kind string) (name, dir string, err error) {
 	if path == "" {
 		path = "."
 	}
 	proj, err := project.ScanProject(path)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	dir, wt := resolveWorktree(path, proj)
-	name := SessionForKind(ExpectedSession(proj.Name, wt), kind)
-	return attachAgentSession(name, dir, AgentCommand(kind))
+	return SessionForKind(ExpectedSession(proj.Path, wt), kind), dir, nil
 }
 
 // resolveWorktree locates which of a project's worktrees contains path, returning

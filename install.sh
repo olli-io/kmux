@@ -31,8 +31,9 @@ info "Detected platform: $PLATFORM ($(uname -m))"
 have go || die "Go is not installed. Install it from https://go.dev/dl/ (1.21+ required)."
 info "Using $(go version)"
 
-have tmux  || warn "tmux not found — kmux needs it at runtime."
-have kitty || warn "kitty not found — kmux must run inside a kitty window."
+have tmux   || warn "tmux not found — kmux needs it at runtime."
+have kitty  || warn "kitty not found — kmux must run inside a kitty window."
+have kitten || warn "kitten not found — kmux drives kitty via 'kitten @'; ensure kitty's bin dir is on PATH."
 
 # ---------------------------------------------------------------------------
 # Locate the source.

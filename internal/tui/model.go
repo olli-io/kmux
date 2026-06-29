@@ -173,7 +173,7 @@ func (m model) Init() tea.Cmd {
 // project rows. The cursor indexes into this slice.
 func (m model) rows() []row {
 	deco := rowDeco{spinner: m.spinnerFrame}
-	names := agent.ProjectNames(m.projects)
+	names := agent.ProjectPaths(m.projects)
 	sess := buildSessionRows(m.sessions, names, m.collapsed, m.attention, m.mgr.Attached, m.isDetached, deco)
 	proj := buildProjectRows(m.projects, m.collapsed, m.projectLive, deco)
 	out := make([]row, 0, len(sess)+len(proj))
@@ -204,14 +204,13 @@ func (m model) attachable() []string {
 // default, unscoped mode it returns the list unchanged. Matching mirrors
 // groupSessions so a kept session lands under the same project node.
 func (m model) scopedSessions(names []string) []string {
-	if m.scopeName == "" {
+	if m.scopeDir == "" {
 		return names
 	}
-	scope := []string{m.scopeName}
+	scope := []string{m.scopeDir}
 	out := make([]string, 0, len(names))
 	for _, s := range names {
-		rem := strings.TrimSuffix(strings.TrimSuffix(s, "~cl"), "~oc")
-		if _, _, ok := agent.MatchProject(rem, scope); ok {
+		if _, _, ok := agent.MatchProject(s, scope); ok {
 			out = append(out, s)
 		}
 	}
@@ -241,7 +240,7 @@ func (m model) hasSession(name string) bool {
 }
 
 // projectLive reports a project/worktree's aggregate live state for row coloring,
-// considering both agent kinds. claudeName is the ~cl session name (as produced by
+// considering both agent kinds. claudeName is the ‧CC session name (as produced by
 // agent.ExpectedSession); the opencode name is derived by suffix swap. It returns
 // liveAttached if any running session has a live pane, liveDetached if it has a
 // running session but every one is detached, and liveNone if none is running — so
@@ -295,10 +294,9 @@ func (m model) lazygitDir(r *row) string {
 	if !r.collapsible {
 		return m.sessionDir(r.session) // session leaf: resolve from its name
 	}
-	// Sessions-panel group header: derive the dir from its collapse key, which
-	// encodes "sess:<project>" or "sess:<project>/<worktree>".
-	proj, wt, _ := strings.Cut(strings.TrimPrefix(r.key, "sess:"), "/")
-	return m.projectPath(proj, wt)
+	// Sessions-panel group header: its collapse key is "sess:<projectPath>", so
+	// the project's main path is the directory to open in.
+	return m.projectPath(strings.TrimPrefix(r.key, "sess:"), "")
 }
 
 // editorDir resolves the directory to open the editor in for row r. It reuses
@@ -319,7 +317,7 @@ func (m model) editorDir(r *row) string {
 //	{project}      project name (e.g. kmux)
 //	{worktree}     linked-worktree name, empty on the main worktree
 //	{project_root} main-worktree path of the project
-//	{tmux_session} agent session name (<project>[/<worktree>]~cl|~oc)
+//	{tmux_session} agent session name (<projectPath>[@<worktree>]‧CC|‧OC)
 //
 // dir is resolved via editorDir, so it's set for any actionable row; project,
 // worktree, and project_root come from matching that dir to a scanned project.
@@ -390,31 +388,31 @@ func (m model) projectRoot(r *row) string {
 }
 
 // sessionDir resolves the working directory for an agent session by matching its
-// name (<project>[/<worktree>]~<cl|oc>) against the scanned projects, mirroring
-// how sessions are grouped under projects in the tree. It returns "" when no
-// project matches (e.g. ungrouped sessions).
+// name (<projectPath>[@<worktree>]‧CC|‧OC) against the scanned projects,
+// mirroring how sessions are grouped under projects in the tree. It returns ""
+// when no project matches (e.g. ungrouped sessions).
 func (m model) sessionDir(name string) string {
-	rem := strings.TrimSuffix(strings.TrimSuffix(name, "~cl"), "~oc")
-	proj, wt, ok := agent.MatchProject(rem, agent.ProjectNames(m.projects))
+	proj, wt, ok := agent.MatchProject(name, agent.ProjectPaths(m.projects))
 	if !ok {
 		return ""
 	}
 	return m.projectPath(proj, wt)
 }
 
-// projectPath returns the directory for a scanned project (wt == "") or one of
-// its linked worktrees (wt == the worktree's basename), or "" when no such
-// project/worktree exists (e.g. the "(ungrouped)" bucket).
-func (m model) projectPath(proj, wt string) string {
+// projectPath returns the directory for a scanned project by its main-worktree
+// path (wt == "") or one of its linked worktrees (wt == the worktree's
+// session-form segment), or "" when no such project/worktree exists (e.g. the
+// "(ungrouped)" bucket).
+func (m model) projectPath(projPath, wt string) string {
 	for _, p := range m.projects {
-		if p.Name != proj {
+		if p.Path != projPath {
 			continue
 		}
 		if wt == "" {
 			return p.Path
 		}
 		for _, w := range p.Worktrees {
-			if w.Name == wt {
+			if agent.WorktreeMatches(wt, w.Name) {
 				return w.Path
 			}
 		}

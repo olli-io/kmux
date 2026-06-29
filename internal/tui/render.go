@@ -57,24 +57,29 @@ func (d rowDeco) session(name string, depth int, st status.AttentionState, attac
 	}
 }
 
-// sessionLabel strips the agent suffix (~cl / ~oc) from a session name, leaving the
-// project/worktree path the row displays (the agent kind shows as a trailing badge).
+// sessionLabel is the text a session row displays, mirroring the Projects panel:
+// a main-worktree session shows the project name, a linked-worktree session shows
+// the worktree name alone (the agent kind shows as a trailing badge).
 func sessionLabel(name string) string {
-	return strings.TrimSuffix(strings.TrimSuffix(name, "~cl"), "~oc")
+	if wt := agent.WorktreeName(name); wt != "" {
+		return wt
+	}
+	return agent.ProjectName(name)
 }
 
 // agentBadge renders the styled agent-kind badge for a session name ("CC" for
 // Claude, "OC" for OpenCode), prefixed with its attach state: a green "A" when
 // attached (live pane) or a red "D" when detached (tmux alive, pane closed), so
-// the badge reads "A~CC"/"D~CC"/"CC" or "A~OC"/"D~OC"/"OC". The prefix keeps its own
-// color (green/red) distinct from the agent color. Returns "" for a non-agent name.
+// the badge reads "A‧CC"/"D‧CC"/"CC" or "A‧OC"/"D‧OC"/"OC" (‧ is U+2027, matching
+// the session-name separator). The prefix keeps its own color (green/red)
+// distinct from the agent color. Returns "" for a non-agent name.
 func agentBadge(name string, attached, detached bool) string {
 	prefix := ""
 	switch {
 	case attached:
-		prefix = okStyle.Render("A") + dimStyle.Render("~")
+		prefix = okStyle.Render("A") + dimStyle.Render("‧")
 	case detached:
-		prefix = errStyle.Render("D") + dimStyle.Render("~")
+		prefix = errStyle.Render("D") + dimStyle.Render("‧")
 	}
 	switch agent.AgentKind(name) {
 	case "claude":
