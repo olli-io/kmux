@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/olli-io/kmux/internal/project"
@@ -85,17 +86,44 @@ func SessionName(path, kind string) (string, error) {
 }
 
 // sessionPlan resolves the session name and working directory for an agent kind
-// in the project/worktree containing path ("" = the current directory).
+// in the project/worktree containing path ("" = the current directory). A path
+// that lives in no git repository is not an error: it falls back to orphanPlan,
+// which anchors the session at the directory itself.
 func sessionPlan(path, kind string) (name, dir string, err error) {
 	if path == "" {
 		path = "."
 	}
 	proj, err := project.ScanProject(path)
 	if err != nil {
-		return "", "", err
+		return orphanPlan(path, kind)
 	}
 	dir, wt := resolveWorktree(path, proj)
 	return SessionForKind(ExpectedSession(proj.Path, wt), kind), dir, nil
+}
+
+// orphanPlan resolves the session name and working directory for a path that is
+// not inside any git repository. The directory's own absolute path stands in for
+// a project path, with no worktree segment, so the name follows the same
+// convention ExpectedSession produces — it just won't bind to any ~/git project
+// (MatchProject returns ok=false), and the dashboard files it under "(ungrouped)".
+// The path is resolved to an absolute, symlink-free form so the name is stable
+// regardless of how the directory was addressed (e.g. "." vs its full path).
+func orphanPlan(path, kind string) (name, dir string, err error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", "", err
+	}
+	if !info.IsDir() {
+		return "", "", fmt.Errorf("%s is not a directory", abs)
+	}
+	return SessionForKind(ExpectedSession(abs, ""), kind), abs, nil
 }
 
 // resolveWorktree locates which of a project's worktrees contains path, returning
