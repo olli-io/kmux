@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -141,6 +142,30 @@ func OpenCommandWindow(dir, title, runline string) error {
 	return err
 }
 
+// RunInWindow types `command` followed by Enter into the window with the given
+// id via kitty's send-text, so the shell already running there executes it. kmux
+// uses it to turn a blank pane the user spawned into a kmux idle launcher (it
+// sends an `exec` of the idle-slot loop). The trailing carriage return is the byte
+// the Enter key produces, submitting the line. It is the only way to start a
+// process in an *existing* kitty window — `launch` always makes a new one.
+func RunInWindow(id int, command string) error {
+	_, err := kittenAt("send-text",
+		"--match", "id:"+strconv.Itoa(id),
+		command+"\r")
+	return err
+}
+
+// SetWindowTitle sets the title of the window with the given id, and pins it so
+// the running program can't overwrite it (--temporary would let the next title
+// escape from the shell win). kmux uses it to label its own sidebar window
+// "[kmux]dashboard", matching the [kmux]… naming its agent sessions carry.
+func SetWindowTitle(id int, title string) error {
+	_, err := kittenAt("set-window-title",
+		"--match", "id:"+strconv.Itoa(id),
+		title)
+	return err
+}
+
 // FocusWindow gives keyboard focus to the window with the given id, switching
 // the active tab and OS window as needed.
 func FocusWindow(id int) error {
@@ -173,9 +198,17 @@ func ResizeWindowHoriz(id, increment int) error {
 
 // lsWindow is the subset of `kitten @ ls` window fields we care about.
 type lsWindow struct {
-	ID      int    `json:"id"`
-	Title   string `json:"title"`
-	Columns int    `json:"columns"` // text width in cells
+	ID                  int         `json:"id"`
+	Title               string      `json:"title"`
+	Columns             int         `json:"columns"` // text width in cells
+	ForegroundProcesses []lsProcess `json:"foreground_processes"`
+}
+
+// lsProcess is the subset of a window's foreground-process record we read: its
+// argv, used to recognize a pane that is running a tmux client for a given
+// session (see TmuxSessionByWindow).
+type lsProcess struct {
+	Cmdline []string `json:"cmdline"`
 }
 
 // lsWindows returns every window kitty knows about, flattened across all OS
@@ -227,4 +260,106 @@ func WindowColumns() (map[int]int, error) {
 		cols[w.ID] = w.Columns
 	}
 	return cols, nil
+}
+
+// TmuxSessionByWindow returns, for every kitty window whose foreground process is
+// a tmux client bound to a session (`tmux … -s NAME` or `… -t NAME`), that window
+// id mapped to the session name. It is how the layout manager recognizes an idle
+// slot that kmux-idler turned into an agent in place — the window's command became
+// a tmux client — so it can adopt that window as the session's pane rather than
+// spawning a duplicate. A window merely sitting idle (its foreground process is
+// the holder shell) yields no entry.
+func TmuxSessionByWindow() (map[int]string, error) {
+	windows, err := lsWindows()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int]string)
+	for _, w := range windows {
+		for _, p := range w.ForegroundProcesses {
+			if s := tmuxSessionArg(p.Cmdline); s != "" {
+				out[w.ID] = s
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
+// BlankShellWindows returns the ids of windows whose foreground process is a bare
+// interactive shell — a pane sitting at a prompt running nothing, which is what a
+// pane the user spawned outside kmux (via kitty's own new-window keybinding) looks
+// like. It is how the dashboard spots such a blank pane so it can turn it into a
+// kmux idle launcher. kmux's own panes never match: the sidebar runs kmux, agent
+// panes run a tmux client, and idle slots run `sh -c <loop>` (a script, excluded
+// by the -c check) — so only genuinely external blank shells are reported.
+func BlankShellWindows() ([]int, error) {
+	windows, err := lsWindows()
+	if err != nil {
+		return nil, err
+	}
+	var ids []int
+	for _, w := range windows {
+		if windowIsBareShell(w) {
+			ids = append(ids, w.ID)
+		}
+	}
+	return ids, nil
+}
+
+// windowIsBareShell reports whether every one of a window's foreground processes
+// is a bare interactive shell (and there is at least one). A window running a
+// command (its foreground process is that command, not a shell) does not match, so
+// kmux never disturbs a pane the user is actively working in.
+func windowIsBareShell(w lsWindow) bool {
+	if len(w.ForegroundProcesses) == 0 {
+		return false
+	}
+	for _, p := range w.ForegroundProcesses {
+		if !isBareShell(p.Cmdline) {
+			return false
+		}
+	}
+	return true
+}
+
+// shellNames are the program basenames treated as interactive shells (a login
+// shell appears as "-bash", so the leading "-" is stripped before the lookup).
+var shellNames = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "fish": true, "dash": true, "ksh": true,
+}
+
+// isBareShell reports whether cmd is an interactive shell sitting at a prompt: its
+// program is a known shell and it carries no `-c` argument (which would mean it is
+// running a script — e.g. kmux's own `sh -c <idle loop>` placeholders).
+func isBareShell(cmd []string) bool {
+	if len(cmd) == 0 {
+		return false
+	}
+	if !shellNames[strings.TrimPrefix(filepath.Base(cmd[0]), "-")] {
+		return false
+	}
+	for _, a := range cmd[1:] {
+		if a == "-c" {
+			return false
+		}
+	}
+	return true
+}
+
+// tmuxSessionArg extracts the session name a tmux client cmdline targets: the
+// value following a `-s` or `-t` flag when argv[0] is the tmux binary. It returns
+// "" for any non-tmux command or a tmux invocation without a session flag. Flags
+// and their values are separate argv entries in every tmux command kmux runs
+// (`tmux attach -t NAME`, `tmux new-session -A -s NAME …`).
+func tmuxSessionArg(cmd []string) string {
+	if len(cmd) == 0 || filepath.Base(cmd[0]) != "tmux" {
+		return ""
+	}
+	for i := 1; i+1 < len(cmd); i++ {
+		if cmd[i] == "-s" || cmd[i] == "-t" {
+			return cmd[i+1]
+		}
+	}
+	return ""
 }

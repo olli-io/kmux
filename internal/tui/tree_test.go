@@ -13,7 +13,7 @@ import (
 // the orphan glyph after its clean basename label — e.g. "kmux ∅" — while a
 // normal repo session shows no glyph.
 func TestSessionRowOrphanGlyph(t *testing.T) {
-	orphan := agent.OrphanSession("/tmp/kmux") // ∅/tmp/kmux‧CC
+	orphan := agent.OrphanSession("/tmp/kmux") // [kmux][CC][∅]/tmp/kmux
 	row := rowDeco{}.session(orphan, 1, status.AttnUnknown, false, false)
 	if !strings.Contains(row.label, "kmux") {
 		t.Errorf("orphan label %q missing basename %q", row.label, "kmux")
@@ -22,7 +22,7 @@ func TestSessionRowOrphanGlyph(t *testing.T) {
 		t.Errorf("orphan label %q missing %q glyph", row.label, orphanGlyph)
 	}
 
-	repo := rowDeco{}.session("/g/kmux‧CC", 1, status.AttnUnknown, false, false)
+	repo := rowDeco{}.session("[kmux][CC]/g/kmux", 1, status.AttnUnknown, false, false)
 	if strings.Contains(repo.label, orphanGlyph) {
 		t.Errorf("repo label %q should not carry the orphan glyph", repo.label)
 	}
@@ -48,19 +48,19 @@ func TestBuildProjectRows(t *testing.T) {
 	if rows[0].session != "" || rows[0].dir != "" {
 		t.Errorf("folder header should not be actionable: %+v", rows[0])
 	}
-	if rows[1].depth != 1 || rows[1].dir != "/g/multi" || rows[1].session != "/g/multi‧CC" {
-		t.Errorf("main worktree row = %+v, want depth 1, /g/multi, /g/multi‧CC", rows[1])
+	if rows[1].depth != 1 || rows[1].dir != "/g/multi" || rows[1].session != "[kmux][CC]/g/multi" {
+		t.Errorf("main worktree row = %+v, want depth 1, /g/multi, [kmux][CC]/g/multi", rows[1])
 	}
-	if rows[2].depth != 1 || rows[2].dir != "/g/multi-feat" || rows[2].session != "/g/multi@multi-feat‧CC" {
-		t.Errorf("linked worktree row = %+v, want depth 1, /g/multi-feat, /g/multi@multi-feat‧CC", rows[2])
+	if rows[2].depth != 1 || rows[2].dir != "/g/multi-feat" || rows[2].session != "[kmux][CC]/g/multi@multi-feat" {
+		t.Errorf("linked worktree row = %+v, want depth 1, /g/multi-feat, [kmux][CC]/g/multi@multi-feat", rows[2])
 	}
 
 	// solo: single non-collapsible actionable leaf, after the multi folder.
 	if rows[3].collapsible {
 		t.Errorf("solo row should not be collapsible")
 	}
-	if rows[3].dir != "/g/solo" || rows[3].session != "/g/solo‧CC" {
-		t.Errorf("solo row = {dir:%q session:%q}, want {/g/solo /g/solo‧CC}", rows[3].dir, rows[3].session)
+	if rows[3].dir != "/g/solo" || rows[3].session != "[kmux][CC]/g/solo" {
+		t.Errorf("solo row = {dir:%q session:%q}, want {/g/solo [kmux][CC]/g/solo}", rows[3].dir, rows[3].session)
 	}
 	if len(rows) != 4 {
 		t.Fatalf("got %d rows, want 4: %+v", len(rows), rows)
@@ -75,7 +75,7 @@ func TestBuildProjectRows(t *testing.T) {
 
 func TestBuildSessionRows(t *testing.T) {
 	// Sessions are keyed by project path; names holds the projects' main paths.
-	sessions := []string{"/g/kmux‧CC", "/g/gstack@feat‧CC", "/g/gstack@feat‧OC", "/g/orphan‧CC"}
+	sessions := []string{"[kmux][CC]/g/kmux", "[kmux][CC]/g/gstack@feat", "[kmux][OC]/g/gstack@feat", "[kmux][CC]/g/orphan"}
 	names := []string{"/g/kmux", "/g/gstack"}
 	attn := map[string]status.AttentionState{}
 	attached := func(string) bool { return false }
@@ -100,8 +100,8 @@ func TestBuildSessionRows(t *testing.T) {
 		t.Errorf("gstack child[1] = {label:%q depth:%d}, want {feat 2}", rows[2].label, rows[2].depth)
 	}
 	// kmux: single-session bare leaf (not collapsible, no header) at depth 1.
-	if rows[3].collapsible || rows[3].label != "kmux" || rows[3].depth != 1 || rows[3].session != "/g/kmux‧CC" {
-		t.Errorf("kmux leaf = %+v, want {collapsible:false label:kmux depth:1 session:/g/kmux‧CC}", rows[3])
+	if rows[3].collapsible || rows[3].label != "kmux" || rows[3].depth != 1 || rows[3].session != "[kmux][CC]/g/kmux" {
+		t.Errorf("kmux leaf = %+v, want {collapsible:false label:kmux depth:1 session:[kmux][CC]/g/kmux}", rows[3])
 	}
 	// ungrouped orphan: single-session bare leaf, last.
 	if rows[4].collapsible || rows[4].label != "orphan" || rows[4].depth != 1 {
@@ -114,7 +114,7 @@ func TestBuildSessionRows(t *testing.T) {
 	// Worktree sessions carry their full session name (for actions) but hang
 	// directly off the project at depth 2.
 	for _, r := range rows {
-		if r.session == "/g/gstack@feat‧CC" && r.depth != 2 {
+		if r.session == "[kmux][CC]/g/gstack@feat" && r.depth != 2 {
 			t.Errorf("worktree session depth = %d, want 2", r.depth)
 		}
 	}
@@ -122,7 +122,7 @@ func TestBuildSessionRows(t *testing.T) {
 	// Collapsing the gstack project hides its worktree sessions.
 	rows = buildSessionRows(sessions, names, map[string]bool{"sess:/g/gstack": true}, attn, attached, detached, rowDeco{})
 	for _, r := range rows {
-		if r.session == "/g/gstack@feat‧CC" {
+		if r.session == "[kmux][CC]/g/gstack@feat" {
 			t.Errorf("collapsed gstack should hide %q", r.session)
 		}
 	}

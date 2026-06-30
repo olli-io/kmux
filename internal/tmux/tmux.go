@@ -9,13 +9,13 @@ import (
 	"strings"
 )
 
-// agentSession matches tmux session names ending in ‧CC (claude) or ‧OC
-// (opencode), case-insensitively. ‧ is U+2027 HYPHENATION POINT.
-var agentSession = regexp.MustCompile(`(?i)\x{2027}(cc|oc)$`)
+// agentSession matches tmux session names beginning with the kmux agent prefix
+// [kmux][CC] (claude) or [kmux][OC] (opencode), case-insensitively.
+var agentSession = regexp.MustCompile(`(?i)^\[kmux\]\[(cc|oc)\]`)
 
 // ListAgentSessions returns the sorted names of live tmux sessions whose names
-// end in ‧CC or ‧OC. A missing tmux server (no sessions) yields an empty slice,
-// not an error.
+// begin with [kmux][CC] or [kmux][OC]. A missing tmux server (no sessions) yields
+// an empty slice, not an error.
 func ListAgentSessions() ([]string, error) {
 	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
 	if err != nil {

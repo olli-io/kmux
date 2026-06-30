@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/config"
+	"github.com/olli-io/kmux/internal/layout"
 	"github.com/olli-io/kmux/internal/status"
 )
 
@@ -22,6 +23,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		return m, tea.Batch(pollCmd(), projectsCmd(m.scopeDir), tickCmd())
+
+	case blankTickMsg:
+		// The blank-pane scan runs on its own faster ticker (see blankPaneInterval).
+		return m, tea.Batch(blankPanesCmd(), blankTickCmd())
 
 	case spinnerMsg:
 		m.spinnerFrame++
@@ -73,6 +78,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Batch(cmds...)
 
+	case blankPanesMsg:
+		if msg.err != nil {
+			m.lastErr = msg.err.Error()
+			return m, nil
+		}
+		return m, m.handleBlankPanes(msg.ids)
+
+	case idleConvertedMsg:
+		if msg.err != nil {
+			m.lastErr = msg.err.Error()
+		}
+		return m, nil
+
 	case focusedMsg:
 		if msg.err != nil {
 			m.lastErr = msg.err.Error()
@@ -93,6 +111,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// handleBlankPanes converts newly appeared blank panes (shells the user spawned
+// outside kmux) into idle launchers. The first call only seeds idledPanes — panes
+// already open when kmux started are recorded and left untouched — so only panes
+// that appear afterwards are converted. Each pane is converted at most once; a
+// converted pane is no longer a bare shell, so it won't be detected again. It
+// returns the batch of conversion commands, or nil when there's nothing to do or
+// the kmux-idler helper isn't installed.
+func (m *model) handleBlankPanes(ids []int) tea.Cmd {
+	idlerPath := layout.IdlerPath()
+	if idlerPath == "" {
+		return nil // no helper to launch; leave the user's panes alone
+	}
+	var cmds []tea.Cmd
+	for _, id := range ids {
+		if m.idledPanes[id] {
+			continue
+		}
+		m.idledPanes[id] = true
+		if m.blankSeeded {
+			cmds = append(cmds, idleConvertCmd(id, idlerPath))
+		}
+	}
+	m.blankSeeded = true
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
 }
 
 // handleKey processes navigation and fold keys (arrows + vim).

@@ -69,21 +69,35 @@ fi
 # ---------------------------------------------------------------------------
 # Build & install
 # ---------------------------------------------------------------------------
+# kmux-idler is the lightweight launcher kmux runs in its idle panes. It installs
+# beside kmux ($DEST/kmux-idler) where kmux discovers it relative to its own path;
+# if it's absent kmux just falls back to inert idle slots.
+IDLER_NAME="kmux-idler"
+
 if [ -f "$SCRIPT_DIR/go.mod" ]; then
   info "Building $BIN_NAME from source in $SCRIPT_DIR ..."
-  TMP_BIN="$(mktemp -d)/$BIN_NAME"
-  ( cd "$SCRIPT_DIR" && go build -trimpath -ldflags "-s -w" -o "$TMP_BIN" ./cmd/kmux )
-  info "Installing to $DEST/$BIN_NAME ..."
-  $SUDO install -m 0755 "$TMP_BIN" "$DEST/$BIN_NAME"
-  rm -f "$TMP_BIN"
+  TMP_DIR="$(mktemp -d)"
+  ( cd "$SCRIPT_DIR" && go build -trimpath -ldflags "-s -w" -o "$TMP_DIR/$BIN_NAME" ./cmd/kmux )
+  info "Building $IDLER_NAME ..."
+  ( cd "$SCRIPT_DIR" && go build -trimpath -ldflags "-s -w" -o "$TMP_DIR/$IDLER_NAME" ./cmd/kmux-idler )
+  info "Installing to $DEST/$BIN_NAME and $DEST/$IDLER_NAME ..."
+  $SUDO install -m 0755 "$TMP_DIR/$BIN_NAME" "$DEST/$BIN_NAME"
+  $SUDO install -m 0755 "$TMP_DIR/$IDLER_NAME" "$DEST/$IDLER_NAME"
+  rm -rf "$TMP_DIR"
   CONFIG_SRC="$SCRIPT_DIR/scripts/config.yaml"
 else
   info "No local checkout found; fetching via 'go install' from $REPO_URL ..."
   TMP_GOBIN="$(mktemp -d)"
   GOBIN="$TMP_GOBIN" GOFLAGS="-trimpath" go install "${REPO_URL#https://}/cmd/kmux@latest" \
     || die "go install failed. Clone the repo and re-run ./install.sh from inside it."
+  GOBIN="$TMP_GOBIN" GOFLAGS="-trimpath" go install "${REPO_URL#https://}/cmd/kmux-idler@latest" \
+    || warn "could not build $IDLER_NAME; idle panes will fall back to inert slots."
   info "Installing to $DEST/$BIN_NAME ..."
   $SUDO install -m 0755 "$TMP_GOBIN/$BIN_NAME" "$DEST/$BIN_NAME"
+  if [ -f "$TMP_GOBIN/$IDLER_NAME" ]; then
+    info "Installing to $DEST/$IDLER_NAME ..."
+    $SUDO install -m 0755 "$TMP_GOBIN/$IDLER_NAME" "$DEST/$IDLER_NAME"
+  fi
   rm -rf "$TMP_GOBIN"
   CONFIG_SRC=""
 fi

@@ -6,8 +6,12 @@ import (
 	"testing"
 )
 
-// cc is the claude agent suffix (‧CC, ‧ = U+2027) spelled out for test literals.
-const cc = "‧CC"
+// ccPre / ocPre are the claude / opencode agent prefixes spelled out for test
+// literals (the [kmux] tag plus the bracketed kind marker).
+const (
+	ccPre = "[kmux][CC]"
+	ocPre = "[kmux][OC]"
+)
 
 func homeOrSkip(t *testing.T) string {
 	t.Helper()
@@ -21,32 +25,32 @@ func homeOrSkip(t *testing.T) string {
 func TestExpectedSession(t *testing.T) {
 	home := homeOrSkip(t)
 	kmux := filepath.Join(home, "git", "kmux")
-	if got := ExpectedSession(kmux, ""); got != "~/git/kmux"+cc {
-		t.Errorf("main session = %q, want %q", got, "~/git/kmux"+cc)
+	if got := ExpectedSession(kmux, ""); got != ccPre+"~/git/kmux" {
+		t.Errorf("main session = %q, want %q", got, ccPre+"~/git/kmux")
 	}
-	if got := ExpectedSession(kmux, "feat"); got != "~/git/kmux@feat"+cc {
-		t.Errorf("worktree session = %q, want %q", got, "~/git/kmux@feat"+cc)
+	if got := ExpectedSession(kmux, "feat"); got != ccPre+"~/git/kmux@feat" {
+		t.Errorf("worktree session = %q, want %q", got, ccPre+"~/git/kmux@feat")
 	}
 	// A '.' in the path is tmux-sanitized to '_'.
 	dotted := filepath.Join(home, "git", "my.proj")
-	if got := ExpectedSession(dotted, ""); got != "~/git/my_proj"+cc {
-		t.Errorf("dotted session = %q, want %q", got, "~/git/my_proj"+cc)
+	if got := ExpectedSession(dotted, ""); got != ccPre+"~/git/my_proj" {
+		t.Errorf("dotted session = %q, want %q", got, ccPre+"~/git/my_proj")
 	}
 	// Paths outside $HOME keep their absolute form.
-	if got := ExpectedSession("/opt/x", ""); got != "/opt/x"+cc {
-		t.Errorf("non-home session = %q, want %q", got, "/opt/x"+cc)
+	if got := ExpectedSession("/opt/x", ""); got != ccPre+"/opt/x" {
+		t.Errorf("non-home session = %q, want %q", got, ccPre+"/opt/x")
 	}
 }
 
 func TestSessionForKind(t *testing.T) {
-	if got := SessionForKind("~/git/kmux"+cc, "claude"); got != "~/git/kmux"+cc {
-		t.Errorf("claude = %q, want %q", got, "~/git/kmux"+cc)
+	if got := SessionForKind(ccPre+"~/git/kmux", "claude"); got != ccPre+"~/git/kmux" {
+		t.Errorf("claude = %q, want %q", got, ccPre+"~/git/kmux")
 	}
-	if got := SessionForKind("~/git/kmux"+cc, "opencode"); got != "~/git/kmux‧OC" {
-		t.Errorf("opencode = %q, want %q", got, "~/git/kmux‧OC")
+	if got := SessionForKind(ccPre+"~/git/kmux", "opencode"); got != ocPre+"~/git/kmux" {
+		t.Errorf("opencode = %q, want %q", got, ocPre+"~/git/kmux")
 	}
-	if got := SessionForKind("~/git/kmux@feat"+cc, "opencode"); got != "~/git/kmux@feat‧OC" {
-		t.Errorf("worktree opencode = %q, want %q", got, "~/git/kmux@feat‧OC")
+	if got := SessionForKind(ccPre+"~/git/kmux@feat", "opencode"); got != ocPre+"~/git/kmux@feat" {
+		t.Errorf("worktree opencode = %q, want %q", got, ocPre+"~/git/kmux@feat")
 	}
 }
 
@@ -69,7 +73,7 @@ func TestMatchProject(t *testing.T) {
 		{ExpectedSession(gstackExtra, "wt"), gstackExtra, "wt", true},             // longest prefix + worktree
 		{ExpectedSession(dotted, ""), dotted, "", true},                           // '.'-in-path resolves to the real path
 		{SessionForKind(ExpectedSession(kmux, "x"), "opencode"), kmux, "x", true}, // opencode suffix
-		{"~/git/unknown" + cc, "", "", false},                                     // no match
+		{ccPre + "~/git/unknown", "", "", false},                                  // no match
 	}
 	for _, c := range cases {
 		proj, wt, ok := MatchProject(c.session, paths)
@@ -115,7 +119,7 @@ func TestOrphanSession(t *testing.T) {
 	dir := filepath.Join(home, "scratch", "notes")
 
 	name := OrphanSession(dir)
-	if want := "∅~/scratch/notes" + cc; name != want {
+	if want := ccPre + "[∅]~/scratch/notes"; name != want {
 		t.Errorf("OrphanSession = %q, want %q", name, want)
 	}
 	if !IsOrphan(name) {
@@ -129,8 +133,8 @@ func TestOrphanSession(t *testing.T) {
 	if got := AgentKind(name); got != "claude" {
 		t.Errorf("AgentKind = %q, want claude", got)
 	}
-	if got := SessionForKind(name, "opencode"); got != "∅~/scratch/notes‧OC" {
-		t.Errorf("SessionForKind = %q, want %q", got, "∅~/scratch/notes‧OC")
+	if got := SessionForKind(name, "opencode"); got != ocPre+"[∅]~/scratch/notes" {
+		t.Errorf("SessionForKind = %q, want %q", got, ocPre+"[∅]~/scratch/notes")
 	}
 	// The path round-trips; no worktree; never binds to a project.
 	if got := ProjectPath(name); got != dir {
@@ -159,11 +163,11 @@ func TestOrphanSession(t *testing.T) {
 
 func TestAgentKind(t *testing.T) {
 	cases := map[string]string{
-		"~/git/proj@wt" + cc:    "claude",
-		"~/git/proj@wt‧OC":      "opencode",
-		"~/git/proj@wt‧oc":      "opencode", // case-insensitive
-		"scratch":               "",
-		"~/git/proj" + cc + "x": "",
+		ccPre + "~/git/proj@wt":   "claude",
+		ocPre + "~/git/proj@wt":   "opencode",
+		"[kmux][oc]~/git/proj@wt": "opencode", // case-insensitive
+		"scratch":                 "",
+		"~/git/proj[kmux][CC]":    "", // marker must be a prefix, not mid-name
 	}
 	for name, want := range cases {
 		if got := AgentKind(name); got != want {

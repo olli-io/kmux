@@ -104,6 +104,11 @@ func runDashboard(pathArg string) {
 		os.Exit(1)
 	}
 
+	// Label the sidebar window "[kmux]dashboard" so the dashboard process is
+	// identifiable alongside the [kmux]… agent sessions. Best-effort: a title
+	// failure must not stop the dashboard from launching.
+	_ = kitty.SetWindowTitle(sidebarID, agent.DashboardTitle())
+
 	// Reap sessions that were already idle past the timeout when this run
 	// started, before the dashboard attaches panes to them. Best-effort: config
 	// or state read errors just skip the sweep.

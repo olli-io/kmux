@@ -97,7 +97,7 @@ func SessionName(path, kind string) (string, error) {
 // agent session the caller is currently inside. It is meant for scripts bound to
 // tmux keybindings within an agent pane (e.g. "open this session's project in an
 // editor"): it reads the current tmux session, requires it to be a kmux agent
-// session (a ‧CC/‧OC name), and prints the directory to launch tooling in.
+// session (a [kmux][CC]/[kmux][OC] name), and prints the directory to launch tooling in.
 //
 // The directory is taken from the git worktree root of the pane's current path —
 // that is where the session was anchored and stays correct even if the agent has

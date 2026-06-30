@@ -17,7 +17,14 @@ import (
 	"github.com/olli-io/kmux/internal/tmux"
 )
 
-const pollInterval = 2 * time.Second
+const pollInterval = 1 * time.Second
+
+// blankPaneInterval is how often kmux scans kitty for user-spawned blank panes to
+// turn into idle launchers. It runs on its own faster ticker, decoupled from
+// pollInterval, because the scan is cheap (a single `kitten @ ls`) and benefits
+// from low latency, whereas the main poll also drives the heavier project git
+// scan and reconcile, which there's no reason to run this often.
+const blankPaneInterval = 250 * time.Millisecond
 
 // spinnerInterval is how often the busy-session animation advances a frame.
 // Faster than pollInterval so the spinner reads as smooth motion without
@@ -31,6 +38,7 @@ var spinnerFrames = []string{"⠹", "⠼", "⠶", "⠧", "⠏", "⠛"}
 
 // messages
 type tickMsg time.Time
+type blankTickMsg time.Time
 type sessionsMsg struct {
 	names []string
 	err   error
@@ -48,6 +56,17 @@ type attentionMsg struct {
 type focusedMsg struct{ err error }
 type savedMsg struct{ err error }
 
+// blankPanesMsg carries the kitty window ids of bare interactive shells — panes
+// the user spawned outside kmux. The dashboard turns newly appearing ones into
+// idle launchers (see update's handling).
+type blankPanesMsg struct {
+	ids []int
+	err error
+}
+
+// idleConvertedMsg reports the result of turning a blank pane into an idle slot.
+type idleConvertedMsg struct{ err error }
+
 // commandErrMsg reports a user-configured command that failed to launch; it
 // drives the dismissible error float.
 type commandErrMsg struct {
@@ -57,6 +76,11 @@ type commandErrMsg struct {
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(pollInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
+}
+
+// blankTickCmd schedules the next blank-pane scan on the faster blankPaneInterval.
+func blankTickCmd() tea.Cmd {
+	return tea.Tick(blankPaneInterval, func(t time.Time) tea.Msg { return blankTickMsg(t) })
 }
 
 // spinnerCmd schedules the next busy-animation frame.
@@ -99,6 +123,28 @@ func attentionCmd(sessions []string) tea.Cmd {
 	}
 }
 
+// blankPanesCmd lists kitty windows that are bare interactive shells (panes the
+// user spawned outside kmux), off the UI goroutine. The dashboard uses the result
+// to convert newly appearing blank panes into idle launchers.
+func blankPanesCmd() tea.Cmd {
+	return func() tea.Msg {
+		ids, err := kitty.BlankShellWindows()
+		return blankPanesMsg{ids: ids, err: err}
+	}
+}
+
+// idleConvertCmd turns the blank pane with the given window id into a kmux idle
+// launcher off the UI goroutine: it sends an `exec` of `kmux-idler --idle-loop`
+// into the pane's shell, so the pane starts showing the idle hint and launching
+// the picker on a keypress — exactly like a managed placeholder slot. idlerPath is
+// the absolute path to the helper (from layout.IdlerPath).
+func idleConvertCmd(id int, idlerPath string) tea.Cmd {
+	return func() tea.Msg {
+		runline := "exec " + shellQuote(idlerPath) + " --idle-loop"
+		return idleConvertedMsg{err: kitty.RunInWindow(id, runline)}
+	}
+}
+
 // projectsCmd scans projects off the UI goroutine. When scopeDir is set it
 // resolves just that one project (scoped mode); otherwise it scans ~/git plus
 // any folders listed in the config file.
@@ -122,16 +168,13 @@ func projectsCmd(scopeDir string) tea.Cmd {
 // Rebalance to pin the sidebar width and even out the agent columns.
 func reconcileCmd(mgr *layout.Manager, active []string) tea.Cmd {
 	return func() tea.Msg {
-		live, err := kitty.LiveWindowIDs()
-		if err != nil {
-			live = nil // best-effort: skip the manual-close prune this round
-		}
 		// A reconcile that adds a pane pulls the kitty app to the macOS foreground
 		// even with --keep-focus, stealing system focus from whatever the user was
 		// doing. These spawns are automatic (a session appeared on its own, not via
 		// a manual open), so capture the frontmost app first and hand focus back
 		// afterwards to keep the spawn in the background. Only query when an add is
-		// actually pending, so the idle tick stays cheap.
+		// actually pending, so the idle tick stays cheap. The Attached check is a
+		// quick lock-free read; a slightly stale result at worst omits a restore.
 		var prevApp string
 		for _, s := range active {
 			if !mgr.Attached(s) {
@@ -139,16 +182,10 @@ func reconcileCmd(mgr *layout.Manager, active []string) tea.Cmd {
 				break
 			}
 		}
-		changed, errs := mgr.Reconcile(active, live)
-		// Lift stacked panes into any slot a removed column just freed, before
-		// padding, so a collapsed split fills the gap instead of an idle slot.
-		cchanged, cerrs := mgr.Compact()
-		errs = append(errs, cerrs...)
-		pchanged, perrs := mgr.SyncPlaceholders(live)
-		errs = append(errs, perrs...)
-		if changed || cchanged || pchanged {
-			errs = append(errs, mgr.Rebalance()...)
-		}
+		// The whole reconcile->compact->sync->rebalance pass runs atomically inside
+		// the Manager, so overlapping reconciles (one per idle-reaped session, plus
+		// the poll tick) serialize instead of racing the layout into extra slots.
+		changed, errs := mgr.ReconcileAll(active)
 		if changed && prevApp != "" {
 			restoreFrontmostApp(prevApp)
 		}
@@ -169,16 +206,7 @@ func focusCmd(id int) tea.Cmd {
 // new tmux session runs (e.g. "claude" or "opencode").
 func openSessionCmd(mgr *layout.Manager, name, dir, agentCmd string) tea.Cmd {
 	return func() tea.Msg {
-		if err := mgr.Open(name, dir, agentCmd); err != nil {
-			return reconciledMsg{errs: []error{err}}
-		}
-		live, err := kitty.LiveWindowIDs()
-		if err != nil {
-			live = nil // best-effort: skip the manual-close prune this round
-		}
-		_, errs := mgr.SyncPlaceholders(live)
-		errs = append(errs, mgr.Rebalance()...)
-		return reconciledMsg{errs: errs}
+		return reconciledMsg{errs: mgr.OpenAndSync(name, dir, agentCmd)}
 	}
 }
 
@@ -200,16 +228,7 @@ func killSessionCmd(name string) tea.Cmd {
 // the same way openSessionCmd does.
 func reattachSessionCmd(mgr *layout.Manager, name string) tea.Cmd {
 	return func() tea.Msg {
-		if err := mgr.Reattach(name); err != nil {
-			return reconciledMsg{errs: []error{err}}
-		}
-		live, err := kitty.LiveWindowIDs()
-		if err != nil {
-			live = nil // best-effort: skip the manual-close prune this round
-		}
-		_, errs := mgr.SyncPlaceholders(live)
-		errs = append(errs, mgr.Rebalance()...)
-		return reconciledMsg{errs: errs}
+		return reconciledMsg{errs: mgr.ReattachAndSync(name)}
 	}
 }
 

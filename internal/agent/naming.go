@@ -8,59 +8,76 @@ import (
 	"github.com/olli-io/kmux/internal/project"
 )
 
-// Session-name separators. An agent session is named
-// "<projectPath>@<worktree>‧<CC|OC>", where <projectPath> is the project's main
-// worktree path with $HOME abbreviated to "~", the "@<worktree>" segment is
-// present only for linked worktrees, and the trailing "‧CC"/"‧OC" identifies the
-// agent kind. Embedding the full path (not just the basename) keeps two projects
-// that share a basename distinct.
+// Session-name structure. An agent session is named
+// "[kmux]<marker><projectPath>[@<worktree>]", where <marker> is "[CC]" (claude)
+// or "[OC]" (opencode), <projectPath> is the project's main worktree path with
+// $HOME abbreviated to "~", and the "@<worktree>" segment is present only for
+// linked worktrees. The leading "[kmux]" tag plus marker identify a
+// kmux-managed agent session and its kind. Embedding the full path (not just the
+// basename) keeps two projects that share a basename distinct.
 //
-// A session whose directory is in no git repository is "orphaned" and carries a
-// leading orphanMark ("∅<projectPath>‧<CC|OC>", never with an "@<worktree>"
-// segment). The mark only ever appears at the very front, so the agent-suffix
-// and worktree parsing below operate unchanged on the remainder; IsOrphan and
-// stripOrphan handle the prefix.
+// A session whose directory is in no git repository is "orphaned" and carries an
+// orphanMark immediately after the marker ("[kmux][CC][∅]<projectPath>", never
+// with an "@<worktree>" segment). stripAgent removes the "[kmux]<marker>" prefix,
+// so the orphan and worktree parsing below operate on the remainder; IsOrphan and
+// stripOrphan handle the mark.
 const (
+	sessionTag  = "[kmux]" // literal leading tag on every kmux-managed session
 	worktreeSep = "@"
-	agentSep    = "‧" // U+2027 HYPHENATION POINT
-	orphanMark  = "∅" // U+2205 EMPTY SET, leading mark for a no-repo session
+	orphanMark  = "[∅]" // ∅ is U+2205 EMPTY SET; marks a no-repo session (after the marker)
 )
 
-// agentSuffixes maps an agent kind to its tmux session-name suffix.
-var agentSuffixes = map[string]string{"claude": agentSep + "CC", "opencode": agentSep + "OC"}
+// agentMarkers maps an agent kind to its bracketed tmux session-name marker,
+// which follows sessionTag at the front of the name.
+var agentMarkers = map[string]string{"claude": "[CC]", "opencode": "[OC]"}
+
+// agentPrefix returns the full leading prefix for an agent kind, e.g.
+// "[kmux][CC]". It is the invariant head of every session of that kind.
+func agentPrefix(kind string) string {
+	return sessionTag + agentMarkers[kind]
+}
+
+// DashboardTitle is the window title for the kmux dashboard process itself. It
+// carries the same sessionTag as the agent sessions, with a bracketed marker
+// mirroring their "[CC]"/"[OC]" form ("[kmux][dashboard]"), so the whole
+// kmux-managed family is identifiable by the leading "[kmux]".
+func DashboardTitle() string {
+	return sessionTag + "[dashboard]"
+}
 
 // ExpectedSession returns the claude session name for a project/worktree pair.
 // projPath is the project's main-worktree path; wt is "" for the main worktree.
 // It mirrors the naming convention parsed by MatchProject and
-// tmux.ListAgentSessions (a trailing ‧CC).
+// tmux.ListAgentSessions (a leading [kmux][CC]).
 func ExpectedSession(projPath, wt string) string {
-	name := sessionPrefix(projPath)
+	name := agentPrefix("claude") + sessionPrefix(projPath)
 	if wt != "" {
 		name += worktreeSep + tmuxSafe(wt)
 	}
-	return name + agentSuffixes["claude"]
+	return name
 }
 
 // OrphanSession returns the session name for an orphaned agent session — one
 // whose directory dir is not inside any git repository. It is ExpectedSession's
-// no-worktree form with a leading orphanMark, so AgentKind/SessionForKind keep
-// working on the (unchanged) suffix while IsOrphan recognises the prefix. dir is
-// the directory's own path, standing in for a project path; MatchProject never
-// binds it to a real project, so the dashboard files it under "(ungrouped)".
+// no-worktree form with an orphanMark inserted after the marker, so
+// AgentKind/SessionForKind keep working on the (unchanged) prefix while IsOrphan
+// recognises the mark. dir is the directory's own path, standing in for a project
+// path; MatchProject never binds it to a real project, so the dashboard files it
+// under "(ungrouped)".
 func OrphanSession(dir string) string {
-	return orphanMark + ExpectedSession(dir, "")
+	return agentPrefix("claude") + orphanMark + sessionPrefix(dir)
 }
 
 // IsOrphan reports whether name is an orphaned (no-repo) session, identified by
-// the leading orphanMark.
+// an orphanMark immediately after the [kmux]<marker> prefix.
 func IsOrphan(name string) bool {
-	return strings.HasPrefix(name, orphanMark)
+	return strings.HasPrefix(stripAgent(name), orphanMark)
 }
 
-// stripOrphan removes a leading orphanMark, leaving the path-and-agent remainder
-// that the rest of the parsers expect.
-func stripOrphan(name string) string {
-	return strings.TrimPrefix(name, orphanMark)
+// stripOrphan removes a leading orphanMark from an agent-stripped remainder,
+// leaving the path that the rest of the parsers expect.
+func stripOrphan(rem string) string {
+	return strings.TrimPrefix(rem, orphanMark)
 }
 
 // sessionPrefix is the per-project leading portion of a session name: the main
@@ -82,24 +99,23 @@ func AgentCommand(kind string) string {
 	return "claude --continue"
 }
 
-// SessionForKind rewrites a claude session name (ending in ‧CC, as produced by
-// ExpectedSession) into the session name for the given agent kind, swapping the
-// trailing suffix. The ‧CC suffix is invariant under tmuxSafe, so a plain suffix
-// swap is safe.
+// SessionForKind rewrites a claude session name (starting with [kmux][CC], as
+// produced by ExpectedSession) into the session name for the given agent kind,
+// swapping the leading marker. The [kmux][CC] prefix is invariant under tmuxSafe,
+// so a plain prefix swap is safe.
 func SessionForKind(claudeSession, kind string) string {
-	suffix, ok := agentSuffixes[kind]
-	if !ok || kind == "claude" {
+	if _, ok := agentMarkers[kind]; !ok || kind == "claude" {
 		return claudeSession
 	}
-	return strings.TrimSuffix(claudeSession, agentSuffixes["claude"]) + suffix
+	return agentPrefix(kind) + strings.TrimPrefix(claudeSession, agentPrefix("claude"))
 }
 
 // AgentKind returns "claude", "opencode", or "" for a session name. The agent
-// suffix (‧CC / ‧OC) is matched case-insensitively.
+// prefix ([kmux][CC] / [kmux][OC]) is matched case-insensitively.
 func AgentKind(name string) string {
 	lower := strings.ToLower(name)
-	for kind, suffix := range agentSuffixes {
-		if strings.HasSuffix(lower, strings.ToLower(suffix)) {
+	for kind := range agentMarkers {
+		if strings.HasPrefix(lower, strings.ToLower(agentPrefix(kind))) {
 			return kind
 		}
 	}
@@ -113,9 +129,10 @@ func AgentKind(name string) string {
 // to resolve a session back to a real project.
 func ProjectPath(session string) string {
 	rem := stripAgent(session)
-	// An orphan's whole remainder is the path: it has no worktree segment, and
-	// the path itself may legitimately contain '@', so don't cut on worktreeSep.
-	if IsOrphan(rem) {
+	// An orphan's whole remainder (after the mark) is the path: it has no worktree
+	// segment, and the path itself may legitimately contain '@', so don't cut on
+	// worktreeSep.
+	if strings.HasPrefix(rem, orphanMark) {
 		return expandHome(stripOrphan(rem))
 	}
 	before, _, _ := strings.Cut(rem, worktreeSep)
@@ -133,7 +150,7 @@ func WorktreeName(session string) string {
 	rem := stripAgent(session)
 	// Orphan sessions never have a worktree; a '@' in the remainder is part of
 	// the directory path, not a separator.
-	if IsOrphan(rem) {
+	if strings.HasPrefix(rem, orphanMark) {
 		return ""
 	}
 	_, after, found := strings.Cut(rem, worktreeSep)
@@ -143,13 +160,13 @@ func WorktreeName(session string) string {
 	return ""
 }
 
-// stripAgent removes the trailing agent suffix (‧CC / ‧OC, case-insensitive)
-// from a session name, leaving "<projectPath>[@<worktree>]".
+// stripAgent removes the leading agent prefix ([kmux][CC] / [kmux][OC],
+// case-insensitive) from a session name, leaving "[∅]<projectPath>[@<worktree>]".
 func stripAgent(session string) string {
 	lower := strings.ToLower(session)
-	for _, suffix := range agentSuffixes {
-		if strings.HasSuffix(lower, strings.ToLower(suffix)) {
-			return session[:len(session)-len(suffix)]
+	for kind := range agentMarkers {
+		if p := agentPrefix(kind); strings.HasPrefix(lower, strings.ToLower(p)) {
+			return session[len(p):]
 		}
 	}
 	return session

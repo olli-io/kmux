@@ -80,8 +80,8 @@ func sessionLabel(name string) string {
 // agentBadge renders the styled agent-kind badge for a session name ("CC" for
 // Claude, "OC" for OpenCode), prefixed with its attach state: a green "A" when
 // attached (live pane) or a red "D" when detached (tmux alive, pane closed), so
-// the badge reads "A‧CC"/"D‧CC"/"CC" or "A‧OC"/"D‧OC"/"OC" (‧ is U+2027, matching
-// the session-name separator). The prefix keeps its own color (green/red)
+// the badge reads "A‧CC"/"D‧CC"/"CC" or "A‧OC"/"D‧OC"/"OC" (‧ is U+2027, a purely
+// cosmetic separator in the badge). The prefix keeps its own color (green/red)
 // distinct from the agent color. Returns "" for a non-agent name.
 func agentBadge(name string, attached, detached bool) string {
 	prefix := ""

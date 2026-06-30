@@ -30,6 +30,14 @@ type model struct {
 	lastErr       string
 	width, height int
 
+	// idledPanes tracks kitty window ids of user-spawned blank panes kmux has
+	// already handled, so each is converted into an idle launcher at most once.
+	// blankSeeded gates that conversion on having taken a first snapshot: panes
+	// present before kmux started are recorded but left alone, so only panes that
+	// appear afterwards ("new" panes) become launchers.
+	idledPanes  map[int]bool
+	blankSeeded bool
+
 	// keys is the resolved action→key map (config.KeyActions → key) used to label
 	// the Keys footer. keyAction is its reverse (key→action), built in KeyActions
 	// order so the first action listed wins a shared key; the dispatch in handleKey
@@ -94,17 +102,18 @@ func NewModel(mgr *layout.Manager, scopeDir string) tea.Model {
 	keys := cfg.Keybindings
 	reserved := reservedKeys(keys)
 	return model{
-		mgr:       mgr,
-		collapsed: map[string]bool{},
-		detached:  detached,
-		attention: map[string]status.AttentionState{},
-		idle:      status.NewIdleTrackerFrom(cfg.IdleDuration(), idle),
-		commands:  effectiveCommands(cfg.CustomCommands, reserved),
-		keys:      keys,
-		keyAction: keyActionMap(keys),
-		conflicts: cfg.KeybindingConflicts(),
-		scopeDir:  scopeDir,
-		scopeName: scopeName,
+		mgr:        mgr,
+		collapsed:  map[string]bool{},
+		idledPanes: map[int]bool{},
+		detached:   detached,
+		attention:  map[string]status.AttentionState{},
+		idle:       status.NewIdleTrackerFrom(cfg.IdleDuration(), idle),
+		commands:   effectiveCommands(cfg.CustomCommands, reserved),
+		keys:       keys,
+		keyAction:  keyActionMap(keys),
+		conflicts:  cfg.KeybindingConflicts(),
+		scopeDir:   scopeDir,
+		scopeName:  scopeName,
 	}
 }
 
@@ -165,8 +174,10 @@ func panelName(s section) string {
 }
 
 func (m model) Init() tea.Cmd {
-	// Kick off an immediate poll, then tick on the interval.
-	return tea.Batch(pollCmd(), projectsCmd(m.scopeDir), tickCmd(), spinnerCmd())
+	// Kick off an immediate poll, then tick on the interval. The first blank-pane
+	// scan seeds the set of pre-existing shells so only later ones become launchers;
+	// blankTickCmd then re-scans on its own faster ticker.
+	return tea.Batch(pollCmd(), projectsCmd(m.scopeDir), blankPanesCmd(), tickCmd(), blankTickCmd(), spinnerCmd())
 }
 
 // rows builds the combined, navigable row list: session rows first, then
@@ -240,8 +251,8 @@ func (m model) hasSession(name string) bool {
 }
 
 // projectLive reports a project/worktree's aggregate live state for row coloring,
-// considering both agent kinds. claudeName is the ‧CC session name (as produced by
-// agent.ExpectedSession); the opencode name is derived by suffix swap. It returns
+// considering both agent kinds. claudeName is the [kmux][CC] session name (as produced by
+// agent.ExpectedSession); the opencode name is derived by marker swap. It returns
 // liveAttached if any running session has a live pane, liveDetached if it has a
 // running session but every one is detached, and liveNone if none is running — so
 // an opencode-only project still reads as live and a detached one reads red.
@@ -317,7 +328,7 @@ func (m model) editorDir(r *row) string {
 //	{project}      project name (e.g. kmux)
 //	{worktree}     linked-worktree name, empty on the main worktree
 //	{project_root} main-worktree path of the project
-//	{tmux_session} agent session name (<projectPath>[@<worktree>]‧CC|‧OC)
+//	{tmux_session} agent session name ([kmux][CC|OC]<projectPath>[@<worktree>])
 //
 // dir is resolved via editorDir, so it's set for any actionable row; project,
 // worktree, and project_root come from matching that dir to a scanned project.
@@ -388,7 +399,7 @@ func (m model) projectRoot(r *row) string {
 }
 
 // sessionDir resolves the working directory for an agent session by matching its
-// name (<projectPath>[@<worktree>]‧CC|‧OC) against the scanned projects,
+// name ([kmux][CC|OC]<projectPath>[@<worktree>]) against the scanned projects,
 // mirroring how sessions are grouped under projects in the tree. It returns ""
 // when no project matches (e.g. ungrouped sessions).
 func (m model) sessionDir(name string) string {

@@ -54,6 +54,24 @@ worktree, a linked worktree, or any subdirectory of one:
 kmux ~/git/myproject   # or: cd into the repo and run `kmux .`
 ```
 
+## Idle slots
+
+The empty columns kmux pads the layout with aren't just filler — they're
+launchers. Focus an idle slot and:
+
+- **`c`** / **`o`** — pick a project, then launch Claude / OpenCode in it.
+- **`↵`** — pick a project, then pick the agent kind.
+
+The picker lists the same projects (and worktrees) as the `[1]─Projects` panel.
+On select, the agent starts **in that same pane** — instantly — and the dashboard
+adopts it as a managed agent pane.
+
+An idle slot itself is held by a tiny shell loop (it only draws the hint and
+waits for a keypress), so it costs a shell, not a whole process. The picker —
+**`kmux-idler`**, a small separate binary installed beside `kmux` — is spawned
+only for the moment you're choosing, then replaces itself with the agent. If
+`kmux-idler` is missing, idle slots fall back to inert placeholders.
+
 ## Launch an agent directly
 
 With `--agent`, kmux skips the dashboard and creates (or attaches to) the tmux
@@ -67,10 +85,11 @@ kmux --agent claude                     # omit the path to use the current dir
 ```
 
 The session name follows the same convention the dashboard uses
-(`<project-path>‧CC` for claude, `‧OC` for opencode; worktrees become
-`<project-path>@<worktree>‧…`, e.g. `~/git/myproject@feat‧CC`), so an agent
-launched this way is the very same session the dashboard manages — launch it
-here, then open `kmux`, and it focuses that running agent.
+(`[kmux][CC]<project-path>` for claude, `[kmux][OC]…` for opencode; worktrees
+become `[kmux][CC]<project-path>@<worktree>`, e.g.
+`[kmux][CC]~/git/myproject@feat`), so an agent launched this way is the very same
+session the dashboard manages — launch it here, then open `kmux`, and it focuses
+that running agent.
 
 ## Print a session name
 
@@ -80,7 +99,7 @@ takes a kind and an optional path (default: the current directory), and needs
 neither tmux nor kitty:
 
 ```sh
-kmux --session claude                   # e.g. ~/git/myproject‧CC
+kmux --session claude                   # e.g. [kmux][CC]~/git/myproject
 kmux --session opencode ~/git/myproject # name for a specific path
 tmux send-keys -t "$(kmux --session claude)" 'hello' Enter
 ```
