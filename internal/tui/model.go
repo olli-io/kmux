@@ -177,7 +177,7 @@ func (m model) Init() tea.Cmd {
 	// Kick off an immediate poll, then tick on the interval. The first blank-pane
 	// scan seeds the set of pre-existing shells so only later ones become launchers;
 	// blankTickCmd then re-scans on its own faster ticker.
-	return tea.Batch(pollCmd(), projectsCmd(m.scopeDir), blankPanesCmd(), tickCmd(), blankTickCmd(), spinnerCmd())
+	return tea.Batch(pollCmd(), projectsCmd(m.scopeDir), blankPanesCmd(m.mgr.SidebarID()), tickCmd(), blankTickCmd(), spinnerCmd())
 }
 
 // rows builds the combined, navigable row list: session rows first, then

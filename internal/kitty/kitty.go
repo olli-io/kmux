@@ -202,18 +202,33 @@ type lsWindow struct {
 	Title               string      `json:"title"`
 	Columns             int         `json:"columns"` // text width in cells
 	ForegroundProcesses []lsProcess `json:"foreground_processes"`
+	Neighbors           Neighbors   `json:"neighbors"`
+}
+
+// Neighbors are the window ids directly adjacent to a window on each edge, as
+// reported by `kitten @ ls` (computed by kitty from the live splits tree). kmux
+// reads the vertical edges (Top/Bottom) to learn which panes share a column, so it
+// can recognize a pane the user stacked into an existing column with a manual
+// horizontal split rather than mistaking it for a separate new column. Any edge
+// may be absent (kitty omits empty edges), leaving that slice nil.
+type Neighbors struct {
+	Left   []int `json:"left"`
+	Top    []int `json:"top"`
+	Right  []int `json:"right"`
+	Bottom []int `json:"bottom"`
 }
 
 // lsProcess is the subset of a window's foreground-process record we read: its
-// argv, used to recognize a pane that is running a tmux client for a given
-// session (see TmuxSessionByWindow).
+// argv, used to recognize a pane sitting at a bare shell prompt (see isBareShell).
 type lsProcess struct {
 	Cmdline []string `json:"cmdline"`
 }
 
-// lsWindows returns every window kitty knows about, flattened across all OS
-// windows and tabs.
-func lsWindows() ([]lsWindow, error) {
+// lsTabs runs `kitten @ ls` and returns every tab's window list, grouped by tab
+// (the structure kitty reports), across all OS windows. Callers that don't care
+// about tab boundaries flatten it (see lsWindows); callers that need to stay
+// inside one tab scan for the tab holding a known window id (see tabWindows).
+func lsTabs() ([][]lsWindow, error) {
 	out, err := kittenAt("ls")
 	if err != nil {
 		return nil, err
@@ -226,13 +241,45 @@ func lsWindows() ([]lsWindow, error) {
 	if err := json.Unmarshal([]byte(out), &osWindows); err != nil {
 		return nil, fmt.Errorf("decode kitten @ ls: %w", err)
 	}
-	var windows []lsWindow
+	var tabs [][]lsWindow
 	for _, ow := range osWindows {
 		for _, t := range ow.Tabs {
-			windows = append(windows, t.Windows...)
+			tabs = append(tabs, t.Windows)
 		}
 	}
+	return tabs, nil
+}
+
+// lsWindows returns every window kitty knows about, flattened across all OS
+// windows and tabs.
+func lsWindows() ([]lsWindow, error) {
+	tabs, err := lsTabs()
+	if err != nil {
+		return nil, err
+	}
+	var windows []lsWindow
+	for _, t := range tabs {
+		windows = append(windows, t...)
+	}
 	return windows, nil
+}
+
+// tabWindows returns the windows in the kitty tab that contains the window with
+// the given id (the id itself included), or nil if no tab holds it. kmux uses it
+// to confine tab-scoped scans to the dashboard's own tab.
+func tabWindows(id int) ([]lsWindow, error) {
+	tabs, err := lsTabs()
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range tabs {
+		for _, w := range t {
+			if w.ID == id {
+				return t, nil
+			}
+		}
+	}
+	return nil, nil
 }
 
 // LiveWindowIDs returns the set of window ids currently known to kitty, so the
@@ -249,6 +296,18 @@ func LiveWindowIDs() (map[int]bool, error) {
 	return ids, nil
 }
 
+// WindowsInTab returns how many windows live in the kitty tab that contains the
+// window with the given id (the id itself included), or 0 if that window isn't
+// found. kmux uses it to gate the idle slot's quit key on there being a spare pane
+// beyond the dashboard and its fixed columns.
+func WindowsInTab(id int) (int, error) {
+	t, err := tabWindows(id)
+	if err != nil {
+		return 0, err
+	}
+	return len(t), nil
+}
+
 // WindowColumns returns each window's current text width in cells, keyed by id.
 func WindowColumns() (map[int]int, error) {
 	windows, err := lsWindows()
@@ -262,49 +321,46 @@ func WindowColumns() (map[int]int, error) {
 	return cols, nil
 }
 
-// TmuxSessionByWindow returns, for every kitty window whose foreground process is
-// a tmux client bound to a session (`tmux … -s NAME` or `… -t NAME`), that window
-// id mapped to the session name. It is how the layout manager recognizes an idle
-// slot that kmux-idler turned into an agent in place — the window's command became
-// a tmux client — so it can adopt that window as the session's pane rather than
-// spawning a duplicate. A window merely sitting idle (its foreground process is
-// the holder shell) yields no entry.
-func TmuxSessionByWindow() (map[int]string, error) {
-	windows, err := lsWindows()
-	if err != nil {
-		return nil, err
-	}
-	out := make(map[int]string)
-	for _, w := range windows {
-		for _, p := range w.ForegroundProcesses {
-			if s := tmuxSessionArg(p.Cmdline); s != "" {
-				out[w.ID] = s
-				break
-			}
-		}
-	}
-	return out, nil
+// BlankPane is a user-spawned bare-shell window the dashboard may adopt: its
+// window id, plus whether it stands alone as a full-height column (a manual
+// *vertical* split, with no vertical neighbors). The dashboard restacks a
+// standalone column under an existing one and turns any other blank pane into an
+// idle launcher in place — the StandaloneColumn flag is what decides which,
+// computed from the same `ls` snapshot the scan already read.
+type BlankPane struct {
+	ID               int
+	StandaloneColumn bool // no Top/Bottom neighbor: it's its own full-height column
 }
 
-// BlankShellWindows returns the ids of windows whose foreground process is a bare
+// BlankShellWindows returns the windows whose foreground process is a bare
 // interactive shell — a pane sitting at a prompt running nothing, which is what a
 // pane the user spawned outside kmux (via kitty's own new-window keybinding) looks
 // like. It is how the dashboard spots such a blank pane so it can turn it into a
 // kmux idle launcher. kmux's own panes never match: the sidebar runs kmux, agent
 // panes run a tmux client, and idle slots run `sh -c <loop>` (a script, excluded
-// by the -c check) — so only genuinely external blank shells are reported.
-func BlankShellWindows() ([]int, error) {
-	windows, err := lsWindows()
+// by the -c check) — so only genuinely external blank shells are reported. Each
+// pane carries its StandaloneColumn classification (derived from kitty's reported
+// neighbors) so the caller needs no second `ls` to decide how to adopt it.
+//
+// The scan is confined to the kitty tab that holds tabWindowID (the dashboard's
+// sidebar window): kmux also opens unrelated tabs (lazygit, agent attach, project
+// sessions), and a blank shell sitting in one of those is not the dashboard's to
+// adopt. If no tab holds tabWindowID, nothing is reported.
+func BlankShellWindows(tabWindowID int) ([]BlankPane, error) {
+	windows, err := tabWindows(tabWindowID)
 	if err != nil {
 		return nil, err
 	}
-	var ids []int
+	var panes []BlankPane
 	for _, w := range windows {
 		if windowIsBareShell(w) {
-			ids = append(ids, w.ID)
+			panes = append(panes, BlankPane{
+				ID:               w.ID,
+				StandaloneColumn: len(w.Neighbors.Top) == 0 && len(w.Neighbors.Bottom) == 0,
+			})
 		}
 	}
-	return ids, nil
+	return panes, nil
 }
 
 // windowIsBareShell reports whether every one of a window's foreground processes
@@ -347,19 +403,3 @@ func isBareShell(cmd []string) bool {
 	return true
 }
 
-// tmuxSessionArg extracts the session name a tmux client cmdline targets: the
-// value following a `-s` or `-t` flag when argv[0] is the tmux binary. It returns
-// "" for any non-tmux command or a tmux invocation without a session flag. Flags
-// and their values are separate argv entries in every tmux command kmux runs
-// (`tmux attach -t NAME`, `tmux new-session -A -s NAME …`).
-func tmuxSessionArg(cmd []string) string {
-	if len(cmd) == 0 || filepath.Base(cmd[0]) != "tmux" {
-		return ""
-	}
-	for i := 1; i+1 < len(cmd); i++ {
-		if cmd[i] == "-s" || cmd[i] == "-t" {
-			return cmd[i+1]
-		}
-	}
-	return ""
-}

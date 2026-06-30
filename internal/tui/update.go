@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/config"
+	"github.com/olli-io/kmux/internal/kitty"
 	"github.com/olli-io/kmux/internal/layout"
 	"github.com/olli-io/kmux/internal/status"
 )
@@ -26,7 +27,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case blankTickMsg:
 		// The blank-pane scan runs on its own faster ticker (see blankPaneInterval).
-		return m, tea.Batch(blankPanesCmd(), blankTickCmd())
+		return m, tea.Batch(blankPanesCmd(m.mgr.SidebarID()), blankTickCmd())
 
 	case spinnerMsg:
 		m.spinnerFrame++
@@ -83,7 +84,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastErr = msg.err.Error()
 			return m, nil
 		}
-		return m, m.handleBlankPanes(msg.ids)
+		return m, m.handleBlankPanes(msg.panes)
 
 	case idleConvertedMsg:
 		if msg.err != nil {
@@ -120,19 +121,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 // converted pane is no longer a bare shell, so it won't be detected again. It
 // returns the batch of conversion commands, or nil when there's nothing to do or
 // the kmux-idler helper isn't installed.
-func (m *model) handleBlankPanes(ids []int) tea.Cmd {
+func (m *model) handleBlankPanes(panes []kitty.BlankPane) tea.Cmd {
 	idlerPath := layout.IdlerPath()
 	if idlerPath == "" {
 		return nil // no helper to launch; leave the user's panes alone
 	}
 	var cmds []tea.Cmd
-	for _, id := range ids {
-		if m.idledPanes[id] {
+	for _, p := range panes {
+		if m.idledPanes[p.ID] {
 			continue
 		}
-		m.idledPanes[id] = true
+		m.idledPanes[p.ID] = true
 		if m.blankSeeded {
-			cmds = append(cmds, idleConvertCmd(id, idlerPath))
+			cmds = append(cmds, convertBlankPaneCmd(m.mgr, p, idlerPath))
 		}
 	}
 	m.blankSeeded = true

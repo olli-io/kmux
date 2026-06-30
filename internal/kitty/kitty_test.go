@@ -42,26 +42,3 @@ func TestWindowIsBareShell(t *testing.T) {
 		t.Error("a window also running a non-shell process should not match")
 	}
 }
-
-func TestTmuxSessionArg(t *testing.T) {
-	tests := []struct {
-		name string
-		cmd  []string
-		want string
-	}{
-		{"attach -t", []string{"tmux", "attach", "-t", "~/git/proj‧CC"}, "~/git/proj‧CC"},
-		{"new-session -A -s", []string{"tmux", "new-session", "-A", "-s", "~/git/proj‧CC", "-c", "/g/proj", "claude --continue"}, "~/git/proj‧CC"},
-		{"absolute tmux path", []string{"/usr/bin/tmux", "attach", "-t", "x‧OC"}, "x‧OC"},
-		{"not tmux", []string{"sh", "-c", "while :; do sleep 1; done"}, ""},
-		{"tmux without session flag", []string{"tmux", "ls"}, ""},
-		{"dangling flag at end", []string{"tmux", "attach", "-t"}, ""},
-		{"empty", nil, ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tmuxSessionArg(tc.cmd); got != tc.want {
-				t.Errorf("tmuxSessionArg(%v) = %q, want %q", tc.cmd, got, tc.want)
-			}
-		})
-	}
-}

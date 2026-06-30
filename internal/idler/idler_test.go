@@ -179,7 +179,7 @@ func TestBuildTargets(t *testing.T) {
 		},
 	}
 
-	ts := buildTargets(projects)
+	ts := buildTargets(projects, "claude", nil)
 	if len(ts) != 3 {
 		t.Fatalf("buildTargets: got %d targets, want 3 (2 mains + 1 worktree)", len(ts))
 	}
@@ -209,9 +209,65 @@ func TestBuildTargets(t *testing.T) {
 }
 
 func TestBuildTargetsEmpty(t *testing.T) {
-	if ts := buildTargets(nil); len(ts) != 0 {
+	if ts := buildTargets(nil, "claude", nil); len(ts) != 0 {
 		t.Errorf("buildTargets(nil) = %d targets, want 0", len(ts))
 	}
+}
+
+func TestBuildTargetsDropsRunning(t *testing.T) {
+	projects := []project.Project{
+		{Name: "alpha", Path: "/home/u/git/alpha", Branch: "main"},
+		{Name: "beta", Path: "/home/u/git/beta", Branch: "main"},
+	}
+	alphaClaude := agent.ExpectedSession("/home/u/git/alpha", "")
+	alphaOpencode := agent.SessionForKind(alphaClaude, "opencode")
+
+	// A preselected kind drops a target only when that kind's session runs: alpha's
+	// claude session is live, so a claude picker hides alpha but keeps beta.
+	ts := buildTargets(projects, "claude", []string{alphaClaude})
+	if labels := labelsOf(ts); !equalStrings(labels, []string{"beta"}) {
+		t.Errorf("claude picker with alpha-claude running = %v, want [beta]", labels)
+	}
+
+	// The other kind is still launchable: an opencode picker keeps alpha even
+	// though its claude session is running.
+	ts = buildTargets(projects, "opencode", []string{alphaClaude})
+	if labels := labelsOf(ts); !equalStrings(labels, []string{"alpha", "beta"}) {
+		t.Errorf("opencode picker with only alpha-claude running = %v, want [alpha beta]", labels)
+	}
+
+	// On the ↵ path (kind == "") a target is dropped only once every kind runs.
+	// One kind running keeps alpha (the other kind is free).
+	ts = buildTargets(projects, "", []string{alphaClaude})
+	if labels := labelsOf(ts); !equalStrings(labels, []string{"alpha", "beta"}) {
+		t.Errorf("↵ picker with one alpha kind running = %v, want [alpha beta]", labels)
+	}
+
+	// Both kinds running drops alpha on the ↵ path.
+	ts = buildTargets(projects, "", []string{alphaClaude, alphaOpencode})
+	if labels := labelsOf(ts); !equalStrings(labels, []string{"beta"}) {
+		t.Errorf("↵ picker with both alpha kinds running = %v, want [beta]", labels)
+	}
+}
+
+func labelsOf(ts []target) []string {
+	out := make([]string, len(ts))
+	for i, t := range ts {
+		out[i] = t.label
+	}
+	return out
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestScrollWindow(t *testing.T) {

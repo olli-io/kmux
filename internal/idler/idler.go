@@ -11,11 +11,11 @@
 //	kmux-idler claude     pick a project, launch Claude in it
 //	kmux-idler opencode   pick a project, launch OpenCode in it
 //
-// On selection it execs the agent's tmux client in place (see Exec), so the idle
-// pane the picker ran in becomes the agent pane instantly — no new window, no
-// waiting for the dashboard's poll. The running dashboard then adopts that window
-// as the session's pane (it sees a placeholder slot now running a tmux client for
-// an active session). The picker itself never touches kitty or the layout.
+// On selection it creates the agent's tmux session detached (see Start) and exits,
+// returning the slot to its idle hint; the running dashboard then gives the new
+// session a kmux-managed pane on its next poll. Creating the session detached
+// rather than becoming it in place keeps kmux in sole control of the splits, so the
+// column layout always matches kitty's geometry.
 package idler
 
 import (
@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -31,12 +32,14 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/olli-io/kmux/internal/agent"
+	"github.com/olli-io/kmux/internal/kitty"
 	"github.com/olli-io/kmux/internal/project"
+	"github.com/olli-io/kmux/internal/tmux"
 )
 
 // Launch is the agent the picker chose: the resolved tmux session name, the
-// directory to start it in, and the agent command to run. main turns it into an
-// in-place tmux exec (see Exec).
+// directory to start it in, and the agent command to run. main turns it into a
+// detached tmux session (see Start).
 type Launch struct {
 	Session  string
 	Dir      string
@@ -61,19 +64,61 @@ func Run(kind string) (*Launch, error) {
 	return fm.(model).launch, nil
 }
 
-// Exec replaces the current process with the agent's tmux client, so the idle
-// pane the picker ran in becomes the agent pane itself — an instant, in-place
-// launch with no new window. `tmux new-session -A` attaches to the session,
-// creating it (running the agent command in dir) if it doesn't yet exist; the
-// kmux dashboard then adopts this window as the session's pane. Exec only returns
-// if the replacement fails.
-func Exec(l *Launch) error {
-	tmuxPath, err := exec.LookPath("tmux")
+// Start creates the agent's tmux session detached (running the agent command in
+// dir) and returns, leaving the picker to exit so the idle slot's shell loop
+// redraws its hint. The running kmux dashboard then picks up the new session on
+// its next poll and gives it a kmux-managed pane — kmux owns every split, so the
+// layout always matches kitty's geometry. (kmux-idler used to exec the tmux client
+// in place and let the dashboard adopt that window; that in-place adoption was
+// dropped because kitty's remote control can't reveal a user-split pane's geometry,
+// which let manual splits desync the column model.)
+func Start(l *Launch) error {
+	return tmux.NewDetachedSession(l.Session, l.Dir, l.AgentCmd)
+}
+
+// minLayoutPanes is the floor the idle slot's quit key protects: the dashboard
+// sidebar plus its fixed agent columns (layout.maxColumns). At or below it, `q` is
+// inert — those panes are the core layout, and closing a core placeholder would
+// just make the dashboard respawn it. Hardcoded rather than imported to keep idler
+// free of an import cycle with layout (layout already imports idler).
+const minLayoutPanes = 4 // sidebar + 3 agent columns
+
+// spareWindow returns this idle pane's kitty window id and whether its tab holds
+// more panes than the core layout (minLayoutPanes) — i.e. there is a spare pane
+// `q` could close. spare is false (with no error) outside kitty. Shared by
+// QuitIfSpare and CanQuit so the quit action and its hint use one rule.
+func spareWindow() (id int, spare bool, err error) {
+	id, err = strconv.Atoi(os.Getenv("KITTY_WINDOW_ID"))
 	if err != nil {
+		return 0, false, nil // not in a kitty window
+	}
+	n, err := kitty.WindowsInTab(id)
+	if err != nil {
+		return 0, false, err
+	}
+	return id, n > minLayoutPanes, nil
+}
+
+// QuitIfSpare closes the idle pane this process runs in, but only when its kitty
+// tab holds more panes than the core layout (minLayoutPanes) — i.e. there is a
+// spare pane the user added. It backs the idle loop's `q` key, letting the user
+// dismiss an extra idle slot while never being able to quit away the dashboard and
+// its three columns. It is a no-op outside kitty or when no spare pane exists.
+func QuitIfSpare() error {
+	id, spare, err := spareWindow()
+	if err != nil || !spare {
 		return err
 	}
-	argv := []string{"tmux", "new-session", "-A", "-s", l.Session, "-c", l.Dir, l.AgentCmd}
-	return syscall.Exec(tmuxPath, argv, os.Environ())
+	return kitty.CloseWindow(id)
+}
+
+// CanQuit reports whether QuitIfSpare would actually close this pane — i.e. there
+// is a spare pane beyond the core layout. The idle loop calls it (via the
+// `--can-quit` flag) to show the `q` hint only when quitting would do something.
+// Returns false with no error outside kitty or when no spare pane exists.
+func CanQuit() (bool, error) {
+	_, spare, err := spareWindow()
+	return spare, err
 }
 
 // RunIdleLoop replaces the current process with the interactive idle-slot loop,
@@ -101,16 +146,20 @@ func RunIdleLoop() error {
 // IdleLoopScript is the shell program that holds an interactive idle slot. It
 // loops: draw the hint, read one raw keypress, and spawn the kmux-idler picker for
 // the matching launch flow (c/o preselect a kind; any other key — Enter included —
-// runs the kind-after-project flow; q just refreshes). The raw single-byte read
-// (stty + dd) matches the pattern kmux already uses for hold-on-error prompts. The
-// picker exits as soon as it launches or is cancelled, returning the slot to this
-// cheap loop. idlerPath is interpolated as a shell-quoted absolute path. It backs
-// both layout's placeholder panes and `kmux-idler --idle-loop` (see RunIdleLoop).
+// runs the kind-after-project flow; q quits the slot if it is spare). The `q` hint
+// is shown only when `kmux-idler --can-quit` reports a spare pane (see CanQuit), so
+// it never advertises an inert key. The raw single-byte read (stty + dd) matches
+// the pattern kmux already uses for hold-on-error prompts. The picker exits as soon
+// as it launches or is cancelled, returning the slot to this cheap loop. idlerPath
+// is interpolated as a shell-quoted absolute path. It backs both layout's
+// placeholder panes and `kmux-idler --idle-loop` (see RunIdleLoop).
 func IdleLoopScript(idlerPath string) string {
 	q := "'" + strings.ReplaceAll(idlerPath, "'", `'\''`) + "'"
 	return `idler=` + q + `
 while :; do
-  printf '\033[2J\033[H\n  \033[1;34mkmux\033[0m \033[2midle\033[0m\n\n  \033[33m↵\033[0m \033[2mlaunch agent\033[0m\n  \033[33mc\033[0m \033[2mclaude\033[0m\n  \033[33mo\033[0m \033[2mopencode\033[0m\n'
+  quit=''
+  "$idler" --can-quit 2>/dev/null && quit='  \033[33mq\033[0m \033[2mquit\033[0m\n'
+  printf '\033[2J\033[H\n  \033[1;34mkmux\033[0m \033[2midle\033[0m\n\n  \033[33m↵\033[0m \033[2mlaunch agent\033[0m\n  \033[33mc\033[0m \033[2mclaude\033[0m\n  \033[33mo\033[0m \033[2mopencode\033[0m\n%b' "$quit"
   old=$(stty -g 2>/dev/null)
   stty -icanon -echo min 1 time 0 2>/dev/null
   key=$(dd bs=1 count=1 2>/dev/null)
@@ -118,7 +167,7 @@ while :; do
   case "$key" in
     c|C) "$idler" claude ;;
     o|O) "$idler" opencode ;;
-    q|Q) : ;;
+    q|Q) "$idler" --quit ;;
     *) "$idler" ;;
   esac
 done`
@@ -201,46 +250,72 @@ type model struct {
 type projectsMsg struct{ targets []target }
 
 func (m model) Init() tea.Cmd {
-	return scanCmd()
+	return scanCmd(m.pendingKind)
 }
 
 // scanCmd scans projects off the UI goroutine. It reuses project.ScanProjects so
 // the idler's list matches the dashboard's Projects panel exactly, configured
-// extra folders included. A scan error yields an empty list rather than failing.
-func scanCmd() tea.Cmd {
+// extra folders included, then drops any project/worktree whose agent session is
+// already running (see buildTargets). Both the scan and the running-session
+// listing fall back to empty on error rather than failing the picker.
+func scanCmd(kind string) tea.Cmd {
 	return func() tea.Msg {
 		ps, _ := project.ScanProjects()
-		return projectsMsg{targets: buildTargets(ps)}
+		running, _ := tmux.ListAgentSessions()
+		return projectsMsg{targets: buildTargets(ps, kind, running)}
 	}
 }
 
 // buildTargets flattens scanned projects into the picker's launch list: each
 // project's main worktree, then each of its linked worktrees, in scan order.
-func buildTargets(ps []project.Project) []target {
+// Targets whose agent session is already running are dropped — an idle slot is
+// for launching new work, and the dashboard already surfaces active sessions.
+// running comes from tmux.ListAgentSessions, which lists every live tmux session,
+// so detached sessions count as occupied too. For a preselected kind only that
+// kind's session marks a target occupied; on the ↵ path (kind == "") a target is
+// dropped only once every kind is running, leaving any free kind launchable.
+func buildTargets(ps []project.Project, kind string, running []string) []target {
+	live := make(map[string]bool, len(running))
+	for _, s := range running {
+		live[s] = true
+	}
 	var ts []target
+	add := func(label, branch, dir, session string) {
+		if occupied(session, kind, live) {
+			return
+		}
+		ts = append(ts, target{label: label, branch: branch, dir: dir, session: session})
+	}
 	for _, p := range ps {
-		ts = append(ts, target{
-			label:   p.Name,
-			branch:  p.Branch,
-			dir:     p.Path,
-			session: agent.ExpectedSession(p.Path, ""),
-		})
+		add(p.Name, p.Branch, p.Path, agent.ExpectedSession(p.Path, ""))
 		for _, w := range p.Worktrees {
-			ts = append(ts, target{
-				label:   p.Name + "/" + w.Name,
-				branch:  w.Branch,
-				dir:     w.Path,
-				session: agent.ExpectedSession(p.Path, w.Name),
-			})
+			add(p.Name+"/"+w.Name, w.Branch, w.Path, agent.ExpectedSession(p.Path, w.Name))
 		}
 	}
 	return ts
 }
 
+// occupied reports whether a target's session is already running for the kind the
+// picker would launch. session is the base claude session name; live is the set
+// of running agent session names. With a preselected kind it checks just that
+// kind's session; on the ↵ path (kind == "") it reports occupied only when every
+// offered kind is already running, so a target with a free kind stays listed.
+func occupied(session, kind string, live map[string]bool) bool {
+	if kind != "" {
+		return live[agent.SessionForKind(session, kind)]
+	}
+	for _, o := range kindOptions {
+		if !live[agent.SessionForKind(session, o.kind)] {
+			return false
+		}
+	}
+	return true
+}
+
 // chooseLaunch records the chosen agent (resolved session/dir/command) and quits
-// the picker; main then execs it in place. The session name follows kmux's naming
-// convention (agent.SessionForKind on the target's claude session), so the pane
-// this becomes is the very session the dashboard manages.
+// the picker; main then creates it as a detached tmux session. The session name
+// follows kmux's naming convention (agent.SessionForKind on the target's claude
+// session), so the session the dashboard later attaches is exactly this one.
 func (m model) chooseLaunch(t target, kind string) (tea.Model, tea.Cmd) {
 	m.launch = &Launch{
 		Session:  agent.SessionForKind(t.session, kind),

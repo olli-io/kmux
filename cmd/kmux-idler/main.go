@@ -6,10 +6,12 @@
 //	kmux-idler            pick a project, then pick the kind (the ↵ path)
 //	kmux-idler claude     pick a project, launch Claude in it
 //	kmux-idler opencode   pick a project, launch OpenCode in it
+//	kmux-idler --quit     close this idle pane if the layout has a spare one
+//	kmux-idler --idle-loop turn the current pane into a kmux idle slot
 //
-// On selection it execs the agent's tmux client in place, so the idle pane it ran
-// in becomes the agent pane instantly; the running kmux dashboard then adopts that
-// window. On cancel it just exits and the shell loop redraws the idle hint.
+// On selection it creates the agent's tmux session detached and exits; the running
+// kmux dashboard then gives the new session a managed pane on its next poll. On
+// cancel it just exits and the shell loop redraws the idle hint.
 package main
 
 import (
@@ -32,6 +34,33 @@ func main() {
 		return
 	}
 
+	// `--quit` closes this idle pane — but only when the layout has more than the
+	// dashboard plus its maxColumns panes, so the core sidebar + 3 panes can never be
+	// quit away (a closed core placeholder would just respawn anyway). The idle
+	// loop's `q` key calls this.
+	if len(os.Args) > 1 && os.Args[1] == "--quit" {
+		if err := idler.QuitIfSpare(); err != nil {
+			fmt.Fprintf(os.Stderr, "kmux-idler: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// `--can-quit` probes whether `--quit` would close this pane (there is a spare
+	// pane beyond the core layout). It is a predicate for the idle loop, which shows
+	// the `q` hint only on a zero exit: 0 = can quit, 1 = cannot, 2 = error.
+	if len(os.Args) > 1 && os.Args[1] == "--can-quit" {
+		ok, err := idler.CanQuit()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "kmux-idler: %v\n", err)
+			os.Exit(2)
+		}
+		if !ok {
+			os.Exit(1)
+		}
+		return
+	}
+
 	// The optional first argument is the agent kind (claude/opencode); absent, the
 	// picker asks for the kind after the project is chosen.
 	kind := ""
@@ -46,9 +75,9 @@ func main() {
 	if launch == nil {
 		return // cancelled — back to the idle hint
 	}
-	// Replace this process with the agent's tmux client: the idle pane becomes the
-	// agent in place. Exec only returns on failure.
-	if err := idler.Exec(launch); err != nil {
+	// Create the agent's tmux session detached; the dashboard's poll then gives it a
+	// managed pane. Start returns once the session exists (or on failure).
+	if err := idler.Start(launch); err != nil {
 		fmt.Fprintf(os.Stderr, "kmux-idler: %v\n", err)
 		os.Exit(1)
 	}

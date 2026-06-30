@@ -63,14 +63,16 @@ launchers. Focus an idle slot and:
 - **`↵`** — pick a project, then pick the agent kind.
 
 The picker lists the same projects (and worktrees) as the `[1]─Projects` panel.
-On select, the agent starts **in that same pane** — instantly — and the dashboard
-adopts it as a managed agent pane.
+On select, kmux-idler creates the agent's tmux session in the background and the
+dashboard gives it a managed pane on its next poll — kmux owns every split, so the
+layout always stays put. You can also press **`q`** on a spare idle slot to close
+it (the dashboard plus its three columns can't be quit away).
 
 An idle slot itself is held by a tiny shell loop (it only draws the hint and
 waits for a keypress), so it costs a shell, not a whole process. The picker —
 **`kmux-idler`**, a small separate binary installed beside `kmux` — is spawned
-only for the moment you're choosing, then replaces itself with the agent. If
-`kmux-idler` is missing, idle slots fall back to inert placeholders.
+only for the moment you're choosing, then exits. If `kmux-idler` is missing, idle
+slots fall back to inert placeholders.
 
 ## Launch an agent directly
 

@@ -17,13 +17,13 @@ import (
 	"github.com/olli-io/kmux/internal/tmux"
 )
 
-const pollInterval = 1 * time.Second
+const pollInterval = 250 * time.Millisecond
 
 // blankPaneInterval is how often kmux scans kitty for user-spawned blank panes to
-// turn into idle launchers. It runs on its own faster ticker, decoupled from
-// pollInterval, because the scan is cheap (a single `kitten @ ls`) and benefits
-// from low latency, whereas the main poll also drives the heavier project git
-// scan and reconcile, which there's no reason to run this often.
+// turn into idle launchers (or to restack a manual vertical split). It keeps its
+// own ticker, separate from the session poll, because it is a cheap standalone
+// `kitten @ ls` with no dependency on the session/git work the main poll drives —
+// even though both now run at the same low-latency cadence.
 const blankPaneInterval = 250 * time.Millisecond
 
 // spinnerInterval is how often the busy-session animation advances a frame.
@@ -56,15 +56,17 @@ type attentionMsg struct {
 type focusedMsg struct{ err error }
 type savedMsg struct{ err error }
 
-// blankPanesMsg carries the kitty window ids of bare interactive shells — panes
-// the user spawned outside kmux. The dashboard turns newly appearing ones into
+// blankPanesMsg carries the bare interactive shells — panes the user spawned
+// outside kmux — found in the dashboard's tab, each tagged with how it should be
+// adopted (see kitty.BlankPane). The dashboard turns newly appearing ones into
 // idle launchers (see update's handling).
 type blankPanesMsg struct {
-	ids []int
-	err error
+	panes []kitty.BlankPane
+	err   error
 }
 
-// idleConvertedMsg reports the result of turning a blank pane into an idle slot.
+// idleConvertedMsg reports the result of handling a blank pane: turning it into an
+// idle slot in place, or restacking a manual vertical split (see convertBlankPaneCmd).
 type idleConvertedMsg struct{ err error }
 
 // commandErrMsg reports a user-configured command that failed to launch; it
@@ -124,24 +126,34 @@ func attentionCmd(sessions []string) tea.Cmd {
 }
 
 // blankPanesCmd lists kitty windows that are bare interactive shells (panes the
-// user spawned outside kmux), off the UI goroutine. The dashboard uses the result
+// user spawned outside kmux), off the UI goroutine. The scan is confined to the
+// dashboard's own tab (sidebarID), so blank shells in kmux's other tabs (lazygit,
+// agent attach, project sessions) are left alone. The dashboard uses the result
 // to convert newly appearing blank panes into idle launchers.
-func blankPanesCmd() tea.Cmd {
+func blankPanesCmd(sidebarID int) tea.Cmd {
 	return func() tea.Msg {
-		ids, err := kitty.BlankShellWindows()
-		return blankPanesMsg{ids: ids, err: err}
+		panes, err := kitty.BlankShellWindows(sidebarID)
+		return blankPanesMsg{panes: panes, err: err}
 	}
 }
 
-// idleConvertCmd turns the blank pane with the given window id into a kmux idle
-// launcher off the UI goroutine: it sends an `exec` of `kmux-idler --idle-loop`
-// into the pane's shell, so the pane starts showing the idle hint and launching
-// the picker on a keypress — exactly like a managed placeholder slot. idlerPath is
-// the absolute path to the helper (from layout.IdlerPath).
-func idleConvertCmd(id int, idlerPath string) tea.Cmd {
+// convertBlankPaneCmd handles a newly appeared user-spawned blank pane off the UI
+// goroutine. A pane that is its own full-height column is a manual *vertical* split
+// — a fourth column the fixed sidebar+maxColumns layout has no room for — so it is
+// restacked under an existing column (layout.ReorgVerticalPane). Any other blank
+// pane (already stacked, i.e. a horizontal split) is turned into a kmux idle
+// launcher in place: an `exec` of `kmux-idler --idle-loop` makes it show the idle
+// hint and launch the picker on a keypress, exactly like a managed placeholder
+// slot. The standalone-column classification rides along on the pane from the scan
+// (see kitty.BlankPane), so no second `ls` is needed here. idlerPath is the
+// absolute path to the helper (from layout.IdlerPath).
+func convertBlankPaneCmd(mgr *layout.Manager, pane kitty.BlankPane, idlerPath string) tea.Cmd {
 	return func() tea.Msg {
+		if pane.StandaloneColumn {
+			return idleConvertedMsg{err: mgr.ReorgVerticalPane(pane.ID)}
+		}
 		runline := "exec " + shellQuote(idlerPath) + " --idle-loop"
-		return idleConvertedMsg{err: kitty.RunInWindow(id, runline)}
+		return idleConvertedMsg{err: kitty.RunInWindow(pane.ID, runline)}
 	}
 }
 

@@ -20,7 +20,6 @@ var (
 	liveWindowIDs       = kitty.LiveWindowIDs
 	windowColumns       = kitty.WindowColumns
 	resizeHoriz         = kitty.ResizeWindowHoriz
-	tmuxSessionByWindow = kitty.TmuxSessionByWindow
 )
 
 const (
@@ -42,12 +41,12 @@ const placeholderTitle = "·idle"
 // helper is installed beside the kmux binary the slot becomes an interactive
 // launcher: a tiny shell loop draws a hint and blocks on a single keypress, then
 // spawns kmux-idler only for the moment the user is choosing what to launch. On
-// select kmux-idler execs the agent's tmux client in place, so this very window
-// becomes the agent pane instantly; the next reconcile adopts it (see
-// adoptPlaceholders). Holding the idle slot with a shell — not a resting Go
-// process — keeps an idle pane's footprint to a shell instead of a whole runtime.
-// Without the helper it falls back to an inert pane that shows a dim hint and
-// sleeps forever, never touching any agent's tmux session.
+// select kmux-idler creates the agent's tmux session detached and exits; the next
+// poll then gives that session its own kmux-managed pane via reconcile. Holding the
+// idle slot with a shell — not a resting Go process — keeps an idle pane's
+// footprint to a shell instead of a whole runtime. Without the helper it falls back
+// to an inert pane that shows a dim hint and sleeps forever, never touching any
+// agent's tmux session.
 func placeholderCmd() []string {
 	if p := idlerPath(); p != "" {
 		return []string{"sh", "-c", idler.IdleLoopScript(p)}
@@ -134,6 +133,13 @@ func (m *Manager) attached(session string) bool {
 	return ok
 }
 
+// SidebarID returns the kitty window id of the kmux sidebar (the dashboard's own
+// window). It is fixed at construction, so no lock is needed. The blank-pane
+// watcher uses it to confine its scan to the dashboard's tab.
+func (m *Manager) SidebarID() int {
+	return m.sidebarID
+}
+
 // WindowID returns the kitty window id attached to session, if any.
 func (m *Manager) WindowID(session string) (int, bool) {
 	m.mu.RLock()
@@ -158,15 +164,7 @@ func (m *Manager) ReconcileAll(active []string) (changed bool, errs []error) {
 	if err != nil {
 		live = nil // best-effort: skip the manual-close prune this round
 	}
-	// Which kitty windows are now running a tmux client for which session. Lets
-	// reconcile adopt an idle slot that kmux-idler turned into an agent in place.
-	// Best-effort: a query error just skips adoption this round (the session then
-	// gets a fresh pane next round, the pre-in-place behaviour).
-	winSessions, err := tmuxSessionByWindow()
-	if err != nil {
-		winSessions = nil
-	}
-	changed, errs = m.reconcile(active, live, winSessions)
+	changed, errs = m.reconcile(active, live)
 	cchanged, cerrs := m.compact()
 	errs = append(errs, cerrs...)
 	pchanged, perrs := m.syncPlaceholders(live)
@@ -177,15 +175,19 @@ func (m *Manager) ReconcileAll(active []string) (changed bool, errs []error) {
 	return changed, errs
 }
 
-// reconcile makes the live panes match the set of active sessions: it attaches
-// panes for new sessions and closes panes for vanished ones. It also prunes
-// panes the user closed manually (detected via the live id set) and adopts idle
-// slots that kmux-idler turned into agents in place (winSessions maps a window id
-// to the session its foreground tmux client targets). It reports whether the pane
-// layout changed (so the caller can trigger a rebalance). Errors from individual
-// kitty calls are collected and returned together; reconcile is best-effort and
-// continues past failures. The caller must hold mu.
-func (m *Manager) reconcile(active []string, live map[int]bool, winSessions map[int]string) (changed bool, errs []error) {
+// reconcile makes the live panes match the set of active sessions: it attaches a
+// managed pane for every new session and closes panes for vanished ones. It also
+// prunes panes the user closed manually (detected via the live id set). It reports
+// whether the pane layout changed (so the caller can trigger a rebalance). Errors
+// from individual kitty calls are collected and returned together; reconcile is
+// best-effort and continues past failures. The caller must hold mu.
+//
+// kmux owns every agent pane: an idle slot's picker (kmux-idler) only creates the
+// detached tmux session and exits, so the new session is picked up here and given a
+// kmux-controlled pane via add — there is no in-place window to adopt. That keeps
+// the column model in step with kitty's real splits, and the fast poll makes the
+// resulting launch latency unnoticeable.
+func (m *Manager) reconcile(active []string, live map[int]bool) (changed bool, errs []error) {
 	// Prune panes the user closed by hand so our state stays truthful.
 	if live != nil {
 		for session, id := range m.bySession {
@@ -201,20 +203,6 @@ func (m *Manager) reconcile(active []string, live map[int]bool, winSessions map[
 		activeSet[s] = true
 	}
 
-	// Adopt any placeholder a launch turned into an agent pane in place, so it
-	// keeps its window (instant launch) instead of getting a duplicate pane below.
-	if m.adoptPlaceholders(activeSet, winSessions) {
-		changed = true
-	}
-
-	// Adopt any external window (one kmux did not create) that is already running
-	// an active session's tmux client — e.g. a blank pane the user spawned, turned
-	// into an idle launcher, then into an agent in place. Without this the add loop
-	// below would launch a second pane for the same session.
-	if m.adoptExternalWindows(activeSet, live, winSessions) {
-		changed = true
-	}
-
 	// Remove panes for sessions that disappeared.
 	for session, id := range m.bySession {
 		if !activeSet[session] {
@@ -226,16 +214,10 @@ func (m *Manager) reconcile(active []string, live map[int]bool, winSessions map[
 		}
 	}
 
-	// Sessions currently shown in a placeholder window but not yet adopted (e.g.
-	// the tmux client has started but the session isn't in `active` yet): skip
-	// creating a pane for them so the imminent adoption isn't pre-empted by a
-	// duplicate.
-	inPlaceholder := m.placeholderSessions(winSessions)
-
 	// Add panes for new sessions (sorted for deterministic column assignment).
 	sort.Strings(active)
 	for _, session := range active {
-		if m.attached(session) || inPlaceholder[session] {
+		if m.attached(session) {
 			continue
 		}
 		if err := m.add(session); err != nil {
@@ -247,64 +229,10 @@ func (m *Manager) reconcile(active []string, live map[int]bool, winSessions map[
 	return changed, errs
 }
 
-// adoptPlaceholders binds any placeholder window that is now running a tmux client
-// for an active, not-yet-attached session into the layout as that session's pane:
-// the window kmux-idler launched into stays put (an instant, in-place launch)
-// rather than being closed and replaced by a fresh pane on the next poll. The
-// adopted placeholder becomes its own agent column; syncPlaceholders then refills
-// the idle slot count. winSessions maps a window id to the session its foreground
-// tmux client targets. It reports whether it adopted anything. The caller must
-// hold mu.
-func (m *Manager) adoptPlaceholders(activeSet map[string]bool, winSessions map[int]string) (changed bool) {
-	for i := 0; i < len(m.placeholders); {
-		wid := m.placeholders[i]
-		session := winSessions[wid]
-		if session == "" || !activeSet[session] || m.attached(session) {
-			i++
-			continue
-		}
-		m.placeholders = append(m.placeholders[:i], m.placeholders[i+1:]...)
-		m.columns = append(m.columns, []int{wid})
-		m.bySession[session] = wid
-		changed = true
-	}
-	return changed
-}
-
-// adoptExternalWindows binds any live window kmux does not already own that is
-// running the tmux client of an active, not-yet-attached session into the layout
-// as that session's pane — making it a new agent column. It is the counterpart of
-// adoptPlaceholders for windows kmux never created (a pane the user spawned and
-// then launched an agent in via the idle loop). Adopting in place keeps the
-// session's single pane where the agent already started instead of racing a
-// duplicate against it below. winSessions maps a window id to the session its
-// foreground tmux client targets; live is the set of windows kitty currently
-// knows about. It reports whether it adopted anything. The caller must hold mu.
-func (m *Manager) adoptExternalWindows(activeSet map[string]bool, live map[int]bool, winSessions map[int]string) (changed bool) {
-	// Sorted so column assignment is deterministic when several are adopted at once.
-	wids := make([]int, 0, len(winSessions))
-	for wid := range winSessions {
-		wids = append(wids, wid)
-	}
-	sort.Ints(wids)
-	for _, wid := range wids {
-		session := winSessions[wid]
-		if session == "" || !activeSet[session] || m.attached(session) {
-			continue
-		}
-		if m.ownsWindow(wid) || (live != nil && !live[wid]) {
-			continue
-		}
-		m.columns = append(m.columns, []int{wid})
-		m.bySession[session] = wid
-		changed = true
-	}
-	return changed
-}
-
 // ownsWindow reports whether id is a window the manager already tracks — the
-// sidebar, an attached agent pane, or a placeholder — so adoptExternalWindows
-// only ever claims genuinely external windows. The caller must hold mu.
+// sidebar, an attached agent pane, or a placeholder. The pane watcher uses it to
+// recognize a genuinely external window (one the user spawned) so it never
+// reorganizes a window kmux itself created. The caller must hold mu.
 func (m *Manager) ownsWindow(id int) bool {
 	if id == m.sidebarID {
 		return true
@@ -322,22 +250,6 @@ func (m *Manager) ownsWindow(id int) bool {
 		}
 	}
 	return false
-}
-
-// placeholderSessions is the set of sessions whose foreground tmux client runs in
-// one of the manager's current placeholder windows (per winSessions). reconcile
-// uses it to avoid racing a duplicate pane against an imminent adoption.
-func (m *Manager) placeholderSessions(winSessions map[int]string) map[string]bool {
-	if len(winSessions) == 0 {
-		return nil
-	}
-	out := make(map[string]bool, len(m.placeholders))
-	for _, wid := range m.placeholders {
-		if s := winSessions[wid]; s != "" {
-			out[s] = true
-		}
-	}
-	return out
 }
 
 // OpenAndSync opens a pane for a manually launched session, then pads and
@@ -716,12 +628,17 @@ func (m *Manager) rebalance() []error {
 		}
 
 		converged := true
-		for _, s := range steps {
-			// Re-read because each resize shifts the widths of the windows to its right.
-			cur, err := windowColumns()
-			if err != nil {
-				errs = append(errs, err)
-				continue
+		// The first step reuses the pass-opening snapshot (no resize has happened
+		// yet); each later step re-reads, because the resize before it shifts the
+		// widths of every window to its right.
+		cur := widths
+		for i, s := range steps {
+			if i > 0 {
+				cur, err = windowColumns()
+				if err != nil {
+					errs = append(errs, err)
+					continue
+				}
 			}
 			delta := s.target - cur[s.id]
 			if delta > rebalanceTolerance || delta < -rebalanceTolerance {
@@ -736,6 +653,49 @@ func (m *Manager) rebalance() []error {
 		}
 	}
 	return errs
+}
+
+// ReorgVerticalPane absorbs a user-spawned pane that became an extra full-height
+// column (a manual *vertical* split) back into the fixed layout: it closes that
+// pane and re-creates an idle slot stacked *under* the shortest agent column, so
+// the agent area stays at maxColumns columns instead of growing a fourth that would
+// throw off the fixed widths. The restacked slot runs the idle launcher
+// (placeholderCmd), so it is immediately usable, but is intentionally left
+// untracked — it is the user's spare pane, sharing its column's width, and can be
+// dismissed with the idle loop's `q`. id must be a window the manager does not own
+// (the watcher guards this); owning it is treated as a no-op. It takes the lock.
+func (m *Manager) ReorgVerticalPane(id int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.ownsWindow(id) {
+		return nil // never reorganize a pane kmux itself created
+	}
+	if err := closeWindow(id); err != nil {
+		return err
+	}
+	_, err := launchWindow(kitty.HSplit, m.stackAnchor(), 0, placeholderTitle, placeholderCmd()...)
+	return err
+}
+
+// stackAnchor is the window to hsplit a new stacked pane beneath: the bottom pane
+// of the shortest agent column, else the first placeholder, else the sidebar. It
+// keeps a restacked spare pane within the existing column grid rather than opening
+// a new column.
+func (m *Manager) stackAnchor() int {
+	if len(m.columns) > 0 {
+		t := 0
+		for c := 1; c < len(m.columns); c++ {
+			if len(m.columns[c]) < len(m.columns[t]) {
+				t = c
+			}
+		}
+		col := m.columns[t]
+		return col[len(col)-1]
+	}
+	if len(m.placeholders) > 0 {
+		return m.placeholders[0]
+	}
+	return m.sidebarID
 }
 
 // CloseAll closes every pane kmux spawned (detaching tmux, not killing it). It

@@ -71,19 +71,14 @@ func installFakeKitty(t *testing.T, f *fakeKitty) {
 	t.Helper()
 	origLaunch, origClose := launchWindow, closeWindow
 	origLive, origCols, origResize := liveWindowIDs, windowColumns, resizeHoriz
-	origSessions := tmuxSessionByWindow
 	launchWindow = f.launch
 	closeWindow = f.close
 	liveWindowIDs = f.liveIDs
 	windowColumns = func() (map[int]int, error) { return map[int]int{}, nil }
 	resizeHoriz = func(_, _ int) error { return nil }
-	// No in-place adoptions in these tests: every launch goes through the fake's
-	// own pane creation, so no window reports a tmux foreground client.
-	tmuxSessionByWindow = func() (map[int]string, error) { return nil, nil }
 	t.Cleanup(func() {
 		launchWindow, closeWindow = origLaunch, origClose
 		liveWindowIDs, windowColumns, resizeHoriz = origLive, origCols, origResize
-		tmuxSessionByWindow = origSessions
 	})
 }
 
