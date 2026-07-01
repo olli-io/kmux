@@ -15,11 +15,14 @@ import (
 // Indirection seams over the kitty package so tests can inject a fake backend.
 // Defaults are the real kitty calls, so production behavior is unchanged.
 var (
-	launchWindow        = kitty.Launch
-	closeWindow         = kitty.CloseWindow
-	liveWindowIDs       = kitty.LiveWindowIDs
-	windowColumns       = kitty.WindowColumns
-	resizeHoriz         = kitty.ResizeWindowHoriz
+	launchWindow       = kitty.Launch
+	closeWindow        = kitty.CloseWindow
+	liveWindowIDs      = kitty.LiveWindowIDs
+	windowColumns      = kitty.WindowColumns
+	resizeHoriz     = kitty.ResizeWindowHoriz
+	adoptHints      = idler.ReadAdoptHints
+	removeAdoptHint = idler.RemoveAdoptHint
+	setWindowTitle  = kitty.SetWindowTitle
 )
 
 const (
@@ -164,7 +167,24 @@ func (m *Manager) ReconcileAll(active []string) (changed bool, errs []error) {
 	if err != nil {
 		live = nil // best-effort: skip the manual-close prune this round
 	}
+	hints, err := adoptHints()
+	if err != nil {
+		hints = nil // best-effort: skip in-place adoption; reconcile.add still opens a pane
+	}
+	// Prune hints whose window is gone (e.g. the launch's pane was closed before we
+	// adopted it) so a stale hint can never mis-adopt a later session, and so
+	// adoptInPlace can trust every remaining hint points at a live window.
+	if live != nil {
+		for id := range hints {
+			if !live[id] {
+				delete(hints, id)
+				_ = removeAdoptHint(id)
+			}
+		}
+	}
+	achanged := m.adoptInPlace(active, hints, live)
 	changed, errs = m.reconcile(active, live)
+	changed = changed || achanged
 	cchanged, cerrs := m.compact()
 	errs = append(errs, cerrs...)
 	pchanged, perrs := m.syncPlaceholders(live)
@@ -175,6 +195,84 @@ func (m *Manager) ReconcileAll(active []string) (changed bool, errs []error) {
 	return changed, errs
 }
 
+// adoptInPlace binds sessions that launched their agent in place to the kitty
+// window they took over, before reconcile.add runs. When an idle slot's kmux-idler
+// launches an agent, it execs a tmux client in the SAME kitty window and leaves an
+// adopt hint (window id -> session) behind; hints is that map (already pruned to
+// live windows). For each active, not-yet-attached session with a hint we bind the
+// session to that existing window so reconcile finds it attached and never opens a
+// second pane, and delete the consumed hint. There are two kinds of idle slot:
+//
+//   - A tracked placeholder (one of the dashboard's own idle slots): it already
+//     occupies a known full-width column slot, so we promote it placeholders ->
+//     columns. That is pure bookkeeping — real columns sit left of all placeholders
+//     and every slot targets the same width, so appending is width-neutral (see
+//     columnAnchors/rebalance) — and it drops placeholderTarget by one so
+//     syncPlaceholders won't spawn a duplicate.
+//   - An untracked spare pane (a pane the user split that kmux adopted as a
+//     launcher, deliberately left out of the column model because kitty can't
+//     report a user-split pane's geometry): we bind the session but leave the
+//     window untracked, so it keeps its own geometry as the user's spare pane. The
+//     binding exists only to stop reconcile opening a duplicate; when the session
+//     ends, reconcile closes this window like any other.
+//
+// It reports whether it adopted anything (so the caller rebalances). The caller must
+// hold mu.
+func (m *Manager) adoptInPlace(active []string, hints map[int]string, live map[int]bool) (changed bool) {
+	if len(hints) == 0 {
+		return false
+	}
+	placeholder := make(map[int]bool, len(m.placeholders))
+	for _, id := range m.placeholders {
+		placeholder[id] = true
+	}
+	for _, session := range active {
+		if m.attached(session) {
+			continue
+		}
+		id := hintedWindow(hints, session)
+		switch {
+		case id == 0:
+			continue // no in-place launch for this session
+		case placeholder[id]:
+			m.removePlaceholder(id)
+			m.columns = append(m.columns, []int{id})
+			m.bySession[session] = id
+			_ = setWindowTitle(id, session) // match managed-pane titling; best effort
+		case !m.ownsWindow(id) && live[id]:
+			// Untracked spare pane: bind it but keep it out of the column model.
+			m.bySession[session] = id
+			_ = setWindowTitle(id, session)
+		default:
+			continue // owned non-placeholder (shouldn't happen) — leave to reconcile
+		}
+		_ = removeAdoptHint(id) // consumed; don't re-adopt next poll
+		changed = true
+	}
+	return changed
+}
+
+// hintedWindow returns the window id hinted for session, or 0 if none. kitty window
+// ids are always positive, so 0 is a safe "none".
+func hintedWindow(hints map[int]string, session string) int {
+	for id, s := range hints {
+		if s == session {
+			return id
+		}
+	}
+	return 0
+}
+
+// removePlaceholder drops a window id from the placeholder list (a no-op if absent).
+func (m *Manager) removePlaceholder(id int) {
+	for i, pid := range m.placeholders {
+		if pid == id {
+			m.placeholders = append(m.placeholders[:i], m.placeholders[i+1:]...)
+			return
+		}
+	}
+}
+
 // reconcile makes the live panes match the set of active sessions: it attaches a
 // managed pane for every new session and closes panes for vanished ones. It also
 // prunes panes the user closed manually (detected via the live id set). It reports
@@ -182,11 +280,14 @@ func (m *Manager) ReconcileAll(active []string) (changed bool, errs []error) {
 // from individual kitty calls are collected and returned together; reconcile is
 // best-effort and continues past failures. The caller must hold mu.
 //
-// kmux owns every agent pane: an idle slot's picker (kmux-idler) only creates the
-// detached tmux session and exits, so the new session is picked up here and given a
-// kmux-controlled pane via add — there is no in-place window to adopt. That keeps
-// the column model in step with kitty's real splits, and the fast poll makes the
-// resulting launch latency unnoticeable.
+// kmux owns every agent pane. An idle slot's picker (kmux-idler) launches its agent
+// in place, replacing the placeholder's shell with the session's tmux client in the
+// same window; adoptInPlace (run just before reconcile) promotes that placeholder to
+// a managed column, so this add loop finds the session already attached. Any session
+// that still isn't attached here — one created some other way, or an in-place launch
+// whose adoption was skipped this round — is given a fresh kmux-controlled pane via
+// add. Either way kmux owns the split, keeping the column model in step with kitty's
+// real geometry.
 func (m *Manager) reconcile(active []string, live map[int]bool) (changed bool, errs []error) {
 	// Prune panes the user closed by hand so our state stays truthful.
 	if live != nil {

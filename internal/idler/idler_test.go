@@ -299,6 +299,47 @@ func TestScrollWindow(t *testing.T) {
 	}
 }
 
+// TestAdoptHintRoundTrip covers writing, reading, and removing the adopt hints the
+// idler leaves for the dashboard to adopt an in-place launch. It points the hint
+// dir at a temp XDG_RUNTIME_DIR so it touches the real filesystem logic.
+func TestAdoptHintRoundTrip(t *testing.T) {
+	// Isolate the hint dir: adoptDir resolves under config.ConfigDir, which honors
+	// XDG_CONFIG_HOME, so this keeps the test off the real ~/.config/kmux.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	// Missing dir reads as empty, not an error.
+	if got, err := ReadAdoptHints(); err != nil || len(got) != 0 {
+		t.Fatalf("ReadAdoptHints() on empty = (%v, %v), want (empty, nil)", got, err)
+	}
+
+	if err := writeAdoptHint(42, "[kmux][CC]proj"); err != nil {
+		t.Fatalf("writeAdoptHint: %v", err)
+	}
+	if err := writeAdoptHint(7, "[kmux][OC]other"); err != nil {
+		t.Fatalf("writeAdoptHint: %v", err)
+	}
+
+	hints, err := ReadAdoptHints()
+	if err != nil {
+		t.Fatalf("ReadAdoptHints: %v", err)
+	}
+	if hints[42] != "[kmux][CC]proj" || hints[7] != "[kmux][OC]other" || len(hints) != 2 {
+		t.Fatalf("ReadAdoptHints() = %v, want {42:[kmux][CC]proj, 7:[kmux][OC]other}", hints)
+	}
+
+	// Removing one leaves the other; removing a missing id is not an error.
+	if err := RemoveAdoptHint(42); err != nil {
+		t.Fatalf("RemoveAdoptHint: %v", err)
+	}
+	if err := RemoveAdoptHint(999); err != nil {
+		t.Fatalf("RemoveAdoptHint(missing) = %v, want nil", err)
+	}
+	hints, _ = ReadAdoptHints()
+	if _, ok := hints[42]; ok || hints[7] != "[kmux][OC]other" || len(hints) != 1 {
+		t.Fatalf("after remove ReadAdoptHints() = %v, want {7:[kmux][OC]other}", hints)
+	}
+}
+
 func TestClampInner(t *testing.T) {
 	// Fits within the pane: returned unchanged.
 	if got := clampInner(20, 40); got != 20 {

@@ -16,10 +16,14 @@ type fakeKitty struct {
 	mu     sync.Mutex
 	nextID int
 	live   map[int]bool
+	// targets maps a window id -> the session it launched an agent for in place,
+	// standing in for the idler's adopt hints so tests can model an in-place launch.
+	// Empty by default (no in-place launches).
+	targets map[int]string
 }
 
 func newFakeKitty() *fakeKitty {
-	return &fakeKitty{nextID: 1000, live: map[int]bool{}}
+	return &fakeKitty{nextID: 1000, live: map[int]bool{}, targets: map[int]string{}}
 }
 
 func (f *fakeKitty) launch(_ kitty.SplitLocation, _, _ int, _ string, _ ...string) (int, error) {
@@ -64,6 +68,26 @@ func (f *fakeKitty) liveSet() map[int]bool {
 	return out
 }
 
+// adoptHints snapshots the window->session map, standing in for
+// idler.ReadAdoptHints in the layout seam.
+func (f *fakeKitty) adoptHints() (map[int]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make(map[int]string, len(f.targets))
+	for id, s := range f.targets {
+		out[id] = s
+	}
+	return out, nil
+}
+
+// removeAdoptHint drops a consumed hint, standing in for idler.RemoveAdoptHint.
+func (f *fakeKitty) removeAdoptHint(id int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.targets, id)
+	return nil
+}
+
 // installFakeKitty points the layout seams at f for the duration of the test and
 // returns a restore func. windowColumns returns an empty map so rebalance sees a
 // zero total and returns immediately (a no-op), and resizeHoriz is inert.
@@ -71,14 +95,19 @@ func installFakeKitty(t *testing.T, f *fakeKitty) {
 	t.Helper()
 	origLaunch, origClose := launchWindow, closeWindow
 	origLive, origCols, origResize := liveWindowIDs, windowColumns, resizeHoriz
+	origHints, origRemove, origTitle := adoptHints, removeAdoptHint, setWindowTitle
 	launchWindow = f.launch
 	closeWindow = f.close
 	liveWindowIDs = f.liveIDs
 	windowColumns = func() (map[int]int, error) { return map[int]int{}, nil }
 	resizeHoriz = func(_, _ int) error { return nil }
+	adoptHints = f.adoptHints
+	removeAdoptHint = f.removeAdoptHint
+	setWindowTitle = func(_ int, _ string) error { return nil }
 	t.Cleanup(func() {
 		launchWindow, closeWindow = origLaunch, origClose
 		liveWindowIDs, windowColumns, resizeHoriz = origLive, origCols, origResize
+		adoptHints, removeAdoptHint, setWindowTitle = origHints, origRemove, origTitle
 	})
 }
 

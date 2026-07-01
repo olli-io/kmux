@@ -11,11 +11,12 @@
 //	kmux-idler claude     pick a project, launch Claude in it
 //	kmux-idler opencode   pick a project, launch OpenCode in it
 //
-// On selection it creates the agent's tmux session detached (see Start) and exits,
-// returning the slot to its idle hint; the running dashboard then gives the new
-// session a kmux-managed pane on its next poll. Creating the session detached
-// rather than becoming it in place keeps kmux in sole control of the splits, so the
-// column layout always matches kitty's geometry.
+// On selection it launches the agent in place (see Start): it execs the session's
+// tmux client, replacing the idle slot's shell in the same kitty window, so the
+// agent appears in the very pane the user launched from. The running dashboard then
+// adopts that placeholder window as the session's managed pane on its next poll, so
+// kmux stays in sole control of the splits and the column layout matches kitty's
+// geometry.
 package idler
 
 import (
@@ -32,14 +33,15 @@ import (
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/olli-io/kmux/internal/agent"
+	"github.com/olli-io/kmux/internal/config"
 	"github.com/olli-io/kmux/internal/kitty"
 	"github.com/olli-io/kmux/internal/project"
 	"github.com/olli-io/kmux/internal/tmux"
 )
 
 // Launch is the agent the picker chose: the resolved tmux session name, the
-// directory to start it in, and the agent command to run. main turns it into a
-// detached tmux session (see Start).
+// directory to start it in, and the agent command to run. main launches it in the
+// current idle pane (see Start).
 type Launch struct {
 	Session  string
 	Dir      string
@@ -64,16 +66,122 @@ func Run(kind string) (*Launch, error) {
 	return fm.(model).launch, nil
 }
 
-// Start creates the agent's tmux session detached (running the agent command in
-// dir) and returns, leaving the picker to exit so the idle slot's shell loop
-// redraws its hint. The running kmux dashboard then picks up the new session on
-// its next poll and gives it a kmux-managed pane — kmux owns every split, so the
-// layout always matches kitty's geometry. (kmux-idler used to exec the tmux client
-// in place and let the dashboard adopt that window; that in-place adoption was
-// dropped because kitty's remote control can't reveal a user-split pane's geometry,
-// which let manual splits desync the column model.)
+// Start launches the chosen agent in place: it execs the session's tmux client in
+// the current process, replacing the idle slot's shell in the SAME kitty window so
+// the agent takes over the pane the user launched from. `tmux new-session -A`
+// creates-or-attaches atomically, so the session becomes visible to the dashboard
+// at the same instant its tmux client occupies the pane — there is no detached gap
+// in which a poll could open a second pane.
+//
+// Before exec it writes an adopt hint (this pane's KITTY_WINDOW_ID -> session), so
+// the dashboard adopts this exact placeholder window as the session's managed pane
+// instead of opening a second one. The hint is written up front, before the session
+// even exists, which makes adoption race-free: by the time the session appears in
+// `tmux ls` the hint is already on disk. (Discovering the launch from kitty's
+// foreground-process view instead is racy — kitty refreshes that view on a timer, so
+// it can still report the placeholder's old shell after the exec, and the dashboard
+// would open a duplicate pane.)
+//
+// On success syscall.Exec replaces this process and Start never returns. It only
+// returns on failure; if tmux is missing (or exec fails) it falls back to creating
+// the session detached, so the launch is not lost — the dashboard's poll then opens
+// a pane for it the old way.
 func Start(l *Launch) error {
-	return tmux.NewDetachedSession(l.Session, l.Dir, l.AgentCmd)
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		return tmux.NewDetachedSession(l.Session, l.Dir, l.AgentCmd)
+	}
+	wid, hasWID := kittyWindowID()
+	if hasWID {
+		_ = writeAdoptHint(wid, l.Session)
+	}
+	// new-session -A: attach if the session exists, otherwise create it running
+	// agentCmd in dir. Running it in the foreground (no -d) makes this pane the
+	// session's client.
+	argv := []string{"tmux", "new-session", "-A", "-s", l.Session, "-c", l.Dir, l.AgentCmd}
+	if err := syscall.Exec(tmuxPath, argv, os.Environ()); err != nil {
+		if hasWID {
+			_ = RemoveAdoptHint(wid) // exec failed: drop the hint so the fallback isn't mis-adopted
+		}
+		return tmux.NewDetachedSession(l.Session, l.Dir, l.AgentCmd)
+	}
+	return nil // unreachable: exec replaced the process
+}
+
+// kittyWindowID returns this pane's kitty window id from KITTY_WINDOW_ID, and
+// whether it was present and valid (false outside kitty).
+func kittyWindowID() (int, bool) {
+	id, err := strconv.Atoi(os.Getenv("KITTY_WINDOW_ID"))
+	if err != nil {
+		return 0, false
+	}
+	return id, true
+}
+
+// adoptDir is the directory holding adopt hints: one file per kitty window that
+// launched an agent in place, named by window id, containing the session name.
+// It lives under kmux's config/state dir (config.ConfigDir), deliberately the same
+// path the dashboard computes: both processes resolve it from $XDG_CONFIG_HOME/$HOME
+// alone, so a hint the idler writes is always found by the dashboard — unlike
+// $XDG_RUNTIME_DIR, which `kitten @ launch` need not propagate to a new window. It
+// falls back to a uid-scoped temp dir only if the config dir can't be resolved.
+func adoptDir() string {
+	if dir, err := config.ConfigDir(); err == nil {
+		return filepath.Join(dir, "adopt")
+	}
+	return filepath.Join(os.TempDir(), fmt.Sprintf("kmux-%d", os.Getuid()), "adopt")
+}
+
+// writeAdoptHint records that kitty window windowID is launching agent session in
+// place, so the dashboard can adopt that window instead of opening a second pane.
+func writeAdoptHint(windowID int, session string) error {
+	dir := adoptDir()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, strconv.Itoa(windowID)), []byte(session), 0o600)
+}
+
+// ReadAdoptHints returns the current adopt hints as window id -> session name. A
+// missing directory yields an empty map, not an error. Unparseable entries are
+// skipped. The dashboard reads these each reconcile to adopt in-place launches.
+func ReadAdoptHints() (map[int]string, error) {
+	entries, err := os.ReadDir(adoptDir())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[int]string{}, nil
+		}
+		return nil, err
+	}
+	out := make(map[int]string, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		id, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(adoptDir(), e.Name()))
+		if err != nil {
+			continue
+		}
+		if s := strings.TrimSpace(string(data)); s != "" {
+			out[id] = s
+		}
+	}
+	return out, nil
+}
+
+// RemoveAdoptHint deletes the adopt hint for a kitty window id (a no-op if absent).
+// The dashboard consumes a hint once it has adopted its window, and prunes hints
+// whose window has gone.
+func RemoveAdoptHint(windowID int) error {
+	err := os.Remove(filepath.Join(adoptDir(), strconv.Itoa(windowID)))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // minLayoutPanes is the floor the idle slot's quit key protects: the dashboard
@@ -313,9 +421,9 @@ func occupied(session, kind string, live map[string]bool) bool {
 }
 
 // chooseLaunch records the chosen agent (resolved session/dir/command) and quits
-// the picker; main then creates it as a detached tmux session. The session name
-// follows kmux's naming convention (agent.SessionForKind on the target's claude
-// session), so the session the dashboard later attaches is exactly this one.
+// the picker; main then launches it in place (see Start). The session name follows
+// kmux's naming convention (agent.SessionForKind on the target's claude session), so
+// the session the dashboard later adopts is exactly this one.
 func (m model) chooseLaunch(t target, kind string) (tea.Model, tea.Cmd) {
 	m.launch = &Launch{
 		Session:  agent.SessionForKind(t.session, kind),
