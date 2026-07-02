@@ -50,3 +50,45 @@ func TestWorktreeSegment(t *testing.T) {
 		}
 	}
 }
+
+func TestParseStatus(t *testing.T) {
+	cases := []struct {
+		name                  string
+		out                   string
+		wantDirty             bool
+		wantAhead, wantBehind int
+		wantUpstream          bool
+	}{
+		{
+			name: "clean with upstream",
+			out: "# branch.oid abc123\n# branch.head main\n" +
+				"# branch.upstream origin/main\n# branch.ab +0 -0\n",
+			wantUpstream: true,
+		},
+		{
+			name: "dirty with ahead/behind",
+			out: "# branch.oid abc123\n# branch.head main\n" +
+				"# branch.upstream origin/main\n# branch.ab +2 -3\n" +
+				"1 .M N... 100644 100644 100644 aaa bbb internal/foo.go\n? untracked.txt\n",
+			wantDirty: true, wantAhead: 2, wantBehind: 3, wantUpstream: true,
+		},
+		{
+			name:      "dirty no upstream (linked worktree)",
+			out:       "# branch.oid ff34c\n# branch.head feature\n1 .M N... 100644 100644 100644 aaa bbb pkg/x.ts\n",
+			wantDirty: true,
+		},
+		{
+			name: "detached head, clean, no upstream",
+			out:  "# branch.oid abc123\n# branch.head (detached)\n",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dirty, ahead, behind, upstream := parseStatus(c.out)
+			if dirty != c.wantDirty || ahead != c.wantAhead || behind != c.wantBehind || upstream != c.wantUpstream {
+				t.Errorf("parseStatus(%q) = (dirty=%v ahead=%d behind=%d upstream=%v), want (dirty=%v ahead=%d behind=%d upstream=%v)",
+					c.name, dirty, ahead, behind, upstream, c.wantDirty, c.wantAhead, c.wantBehind, c.wantUpstream)
+			}
+		})
+	}
+}

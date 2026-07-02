@@ -1,7 +1,6 @@
 package project
 
 import (
-	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -154,52 +153,58 @@ func ScanProject(dir string) (*Project, error) {
 	return p, nil
 }
 
-// isDirty reports whether the git worktree at dir has any uncommitted changes —
-// staged, unstaged, or untracked. It runs the cheapest status query that still
-// covers every change kind (`git status --porcelain`) and treats any output as
-// dirty. Best-effort: a git error (not a repo, etc.) reads as clean so a status
-// hiccup never fails a scan.
-func isDirty(dir string) bool {
-	out, err := exec.Command("git", "-C", dir, "status", "--porcelain").Output()
+// worktreeStatus reports the working-tree and upstream-sync state of the checkout
+// at dir in a single git invocation: `git status --porcelain=v2 --branch` returns
+// both the changed-file entries (any of which means dirty) and, in its `# branch.*`
+// header, the upstream and ahead/behind counts — folding what used to be a separate
+// `status --porcelain` plus `rev-list --count` into one call. upstream is false
+// when no upstream is configured (a fresh branch, a detached HEAD), in which case
+// git emits no `# branch.ab` line and ahead/behind stay zero. Best-effort: any git
+// error reads as clean with no upstream so a status hiccup never fails a scan.
+func worktreeStatus(dir string) (dirty bool, ahead, behind int, upstream bool) {
+	out, err := exec.Command("git", "-C", dir, "status", "--porcelain=v2", "--branch").Output()
 	if err != nil {
-		return false
+		return false, 0, 0, false
 	}
-	return len(bytes.TrimSpace(out)) > 0
+	return parseStatus(string(out))
 }
 
-// gitSync reports how far the branch checked out at dir is ahead of and behind
-// its upstream (origin): ahead counts local commits the upstream lacks, behind
-// counts upstream commits the local branch lacks. upstream is false when no
-// upstream is configured (a fresh branch, a detached HEAD), in which case ahead
-// and behind are zero. Best-effort: any git error reads as no upstream so a
-// status hiccup never fails a scan.
-func gitSync(dir string) (ahead, behind int, upstream bool) {
-	out, err := exec.Command("git", "-C", dir, "rev-list", "--count", "--left-right", "@{upstream}...HEAD").Output()
-	if err != nil {
-		return 0, 0, false
+// parseStatus reads `git status --porcelain=v2 --branch` output. The `# branch.*`
+// header lines carry the upstream and ahead/behind counts; any other (non-`#`)
+// line is a changed/untracked/unmerged entry, so its mere presence means dirty.
+func parseStatus(out string) (dirty bool, ahead, behind int, upstream bool) {
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case line == "":
+			continue
+		case strings.HasPrefix(line, "# branch.upstream "):
+			upstream = true
+		case strings.HasPrefix(line, "# branch.ab "):
+			// Format: "# branch.ab +<ahead> -<behind>". Present only with an upstream.
+			fields := strings.Fields(strings.TrimPrefix(line, "# branch.ab "))
+			if len(fields) == 2 {
+				ahead, _ = strconv.Atoi(strings.TrimPrefix(fields[0], "+"))
+				behind, _ = strconv.Atoi(strings.TrimPrefix(fields[1], "-"))
+			}
+		case strings.HasPrefix(line, "# "):
+			// Other header lines (branch.oid/head): not status-relevant here.
+		default:
+			// Any non-header line is a changed/untracked/unmerged entry (1/2/u/?),
+			// so the worktree has uncommitted changes.
+			dirty = true
+		}
 	}
-	// --left-right with @{upstream}...HEAD prints "<behind>\t<ahead>": the left
-	// side counts commits unique to the upstream, the right side those unique to
-	// HEAD.
-	fields := strings.Fields(string(out))
-	if len(fields) != 2 {
-		return 0, 0, false
-	}
-	behind, _ = strconv.Atoi(fields[0])
-	ahead, _ = strconv.Atoi(fields[1])
-	return ahead, behind, true
+	return dirty, ahead, behind, upstream
 }
 
 // markStatus fills the working-tree (Dirty) and upstream-sync (Ahead/Behind/
 // Upstream) status of a project and each of its worktrees from the checkout at
 // each path. It is the only place a scan spends git status calls per worktree,
-// kept to two cheap invocations each.
+// kept to one invocation each (see worktreeStatus).
 func markStatus(p *Project) {
-	p.Dirty = isDirty(p.Path)
-	p.Ahead, p.Behind, p.Upstream = gitSync(p.Path)
+	p.Dirty, p.Ahead, p.Behind, p.Upstream = worktreeStatus(p.Path)
 	for i := range p.Worktrees {
-		p.Worktrees[i].Dirty = isDirty(p.Worktrees[i].Path)
-		p.Worktrees[i].Ahead, p.Worktrees[i].Behind, p.Worktrees[i].Upstream = gitSync(p.Worktrees[i].Path)
+		p.Worktrees[i].Dirty, p.Worktrees[i].Ahead, p.Worktrees[i].Behind, p.Worktrees[i].Upstream = worktreeStatus(p.Worktrees[i].Path)
 	}
 }
 

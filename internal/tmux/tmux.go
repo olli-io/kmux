@@ -74,6 +74,62 @@ func CapturePane(session string) (string, error) {
 	return string(out), nil
 }
 
+// captureSentinel delimits the per-session sections of a batched CapturePanes
+// call. Its ASCII record-separator bytes (0x1e) never appear in visible pane
+// text, so a section boundary can't collide with captured screen content.
+const captureSentinel = "\x1e\x1eKMUXCAP\x1e\x1e"
+
+// CapturePanes captures the visible pane text of many sessions in a single tmux
+// invocation, returning a map from session name to text. It chains one
+// capture-pane per session, each preceded by a sentinel line, so the N per-poll
+// capture spawns collapse to one process.
+//
+// Chained tmux commands abort at the first error, so a session that died since it
+// was listed aborts the rest of the chain; CapturePanes then returns an error (a
+// non-zero tmux exit, or a section count that no longer matches the input) rather
+// than a partial map, and the caller falls back to capturing each session on its
+// own. An empty session list yields an empty map and no tmux call.
+func CapturePanes(sessions []string) (map[string]string, error) {
+	if len(sessions) == 0 {
+		return map[string]string{}, nil
+	}
+	// Build: display-message -p -t s <sentinel> ; capture-pane -t s -p ; ... — the
+	// sentinel precedes each capture so stdout splits into ordered sections. The
+	// bare ";" args are tmux command separators (no shell is involved). Targeting
+	// display-message at the session avoids needing an attached client, since kmux
+	// runs outside tmux ($TMUX unset).
+	args := make([]string, 0, len(sessions)*8)
+	for i, s := range sessions {
+		if i > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, "display-message", "-p", "-t", s, captureSentinel,
+			";", "capture-pane", "-t", s, "-p")
+	}
+	out, err := exec.Command("tmux", args...).Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseCapturePanes(string(out), sessions)
+}
+
+// parseCapturePanes splits batched capture output into per-session text. stdout is
+// <sentinel>\n<pane>\n<sentinel>\n<pane>… ; splitting on the sentinel line yields
+// an empty leading section then one section per session, in order. A count that no
+// longer matches the input (a truncated/aborted chain, or the sentinel appearing
+// in captured text) is an error so the caller falls back to per-session capture.
+func parseCapturePanes(out string, sessions []string) (map[string]string, error) {
+	parts := strings.Split(out, captureSentinel+"\n")
+	if len(parts) != len(sessions)+1 {
+		return nil, fmt.Errorf("tmux batch capture: %d sections for %d sessions", len(parts)-1, len(sessions))
+	}
+	texts := make(map[string]string, len(sessions))
+	for i, s := range sessions {
+		texts[s] = parts[i+1]
+	}
+	return texts, nil
+}
+
 // KillSession kills the tmux session named `name` outright, ending the agent
 // process running in it. A missing session is treated as success (it is already
 // gone). The next poll drops it from the list and reconcile closes its pane.

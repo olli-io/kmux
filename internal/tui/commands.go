@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -17,14 +18,35 @@ import (
 	"github.com/olli-io/kmux/internal/tmux"
 )
 
-const pollInterval = 250 * time.Millisecond
+// macCadence throttles a polling interval on macOS while leaving Linux untouched.
+// The kitty (`kitten @ ls`) and tmux control-mode round-trips are noticeably more
+// expensive on macOS, so the session poll and blank-pane scan run at 500ms there;
+// Linux keeps the snappier 250ms cadence.
+func macCadence(linux, mac time.Duration) time.Duration {
+	if runtime.GOOS == "darwin" {
+		return mac
+	}
+	return linux
+}
+
+// pollInterval is how often kmux lists tmux sessions (the main session poll).
+var pollInterval = macCadence(250*time.Millisecond, 500*time.Millisecond)
+
+// projectInterval is how often kmux rescans ~/git for projects and their git
+// status. Far slower than pollInterval: a scan shells out to git many times over
+// (worktree list + status + ahead/behind per worktree — see project.ScanProjects),
+// and dirty/ahead/behind state barely changes second to second, so running it at
+// the session-poll cadence burned CPU spawning dozens of git processes a second.
+// A rescan in flight past this interval is skipped rather than stacked (see the
+// model's scanning guard), so a slow scan can never pile up concurrent copies.
+const projectInterval = 3 * time.Second
 
 // blankPaneInterval is how often kmux scans kitty for user-spawned blank panes to
 // turn into idle launchers (or to restack a manual vertical split). It keeps its
 // own ticker, separate from the session poll, because it is a cheap standalone
 // `kitten @ ls` with no dependency on the session/git work the main poll drives —
-// even though both now run at the same low-latency cadence.
-const blankPaneInterval = 250 * time.Millisecond
+// even though both now run at the same cadence (250ms on Linux, 500ms on macOS).
+var blankPaneInterval = macCadence(250*time.Millisecond, 500*time.Millisecond)
 
 // spinnerInterval is how often the busy-session animation advances a frame.
 // Faster than pollInterval so the spinner reads as smooth motion without
@@ -39,6 +61,7 @@ var spinnerFrames = []string{"⠹", "⠼", "⠶", "⠧", "⠏", "⠛"}
 // messages
 type tickMsg time.Time
 type blankTickMsg time.Time
+type projectTickMsg time.Time
 type sessionsMsg struct {
 	names []string
 	err   error
@@ -85,6 +108,11 @@ func blankTickCmd() tea.Cmd {
 	return tea.Tick(blankPaneInterval, func(t time.Time) tea.Msg { return blankTickMsg(t) })
 }
 
+// projectTickCmd schedules the next project rescan on the slow projectInterval.
+func projectTickCmd() tea.Cmd {
+	return tea.Tick(projectInterval, func(t time.Time) tea.Msg { return projectTickMsg(t) })
+}
+
 // spinnerCmd schedules the next busy-animation frame.
 func spinnerCmd() tea.Cmd {
 	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return spinnerMsg{} })
@@ -98,10 +126,12 @@ func pollCmd() tea.Cmd {
 	}
 }
 
-// attentionCmd captures each session's tmux pane off the UI goroutine and
-// classifies its attention state. It runs sequentially (capture-pane is a cheap
-// local call and there are few sessions) and is best-effort: a capture failure
-// for one session yields status.AttnUnknown for it rather than failing the whole batch.
+// attentionCmd captures every session's tmux pane off the UI goroutine and
+// classifies its attention state. All panes are captured in one batched tmux call
+// (tmux.CapturePanes); if that batch fails — e.g. a session died mid-cycle and
+// aborted the chain — it falls back to capturing each session on its own so one
+// gone session can't blank the rest. Either way it is best-effort: a session with
+// no capture yields status.AttnUnknown rather than failing the whole batch.
 // It is fed the full session list (including detached ones — tmux keeps their
 // buffers), so a detached-but-waiting agent still shows its status glyph.
 func attentionCmd(sessions []string) tea.Cmd {
@@ -109,12 +139,22 @@ func attentionCmd(sessions []string) tea.Cmd {
 	return func() tea.Msg {
 		states := make(map[string]status.AttentionState, len(snap))
 		hashes := make(map[string]uint64, len(snap))
+		texts, err := tmux.CapturePanes(snap)
+		if err != nil {
+			texts = make(map[string]string, len(snap))
+			for _, s := range snap {
+				if t, err := tmux.CapturePane(s); err == nil {
+					texts[s] = t
+				}
+			}
+		}
 		for _, s := range snap {
-			text, err := tmux.CapturePane(s)
-			if err != nil {
-				// No hash recorded: the idle tracker treats this session as gone
-				// for this poll and resets its clock when capture recovers, so a
-				// flaky capture never causes a kill.
+			text, ok := texts[s]
+			if !ok {
+				// No capture recorded: the idle tracker treats this session as gone
+				// for this poll (no hash) and resets its clock when capture recovers,
+				// so a flaky capture never causes a kill, and AttnUnknown hides its
+				// glyph until it comes back.
 				states[s] = status.AttnUnknown
 				continue
 			}

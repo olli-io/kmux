@@ -38,6 +38,13 @@ type model struct {
 	idledPanes  map[int]bool
 	blankSeeded bool
 
+	// scanning is set while a project rescan (projectsCmd) is in flight and cleared
+	// when its projectsMsg lands. The project ticker skips a tick while it's set, so
+	// a scan that outruns projectInterval can't stack concurrent copies — the pileup
+	// that made the old poll-cadence scan spawn git processes faster than they
+	// finished.
+	scanning bool
+
 	// keys is the resolved action→key map (config.KeyActions → key) used to label
 	// the Keys footer. keyAction is its reverse (key→action), built in KeyActions
 	// order so the first action listed wins a shared key; the dispatch in handleKey
@@ -174,10 +181,12 @@ func panelName(s section) string {
 }
 
 func (m model) Init() tea.Cmd {
-	// Kick off an immediate poll, then tick on the interval. The first blank-pane
-	// scan seeds the set of pre-existing shells so only later ones become launchers;
-	// blankTickCmd then re-scans on its own faster ticker.
-	return tea.Batch(pollCmd(), projectsCmd(m.scopeDir), blankPanesCmd(m.mgr.SidebarID()), tickCmd(), blankTickCmd(), spinnerCmd())
+	// Kick off an immediate poll and project scan, then tick each on its own
+	// interval — sessions on the fast pollInterval, projects on the slow
+	// projectInterval (see projectTickCmd). The first blank-pane scan seeds the set
+	// of pre-existing shells so only later ones become launchers; blankTickCmd then
+	// re-scans on its own faster ticker.
+	return tea.Batch(pollCmd(), projectsCmd(m.scopeDir), blankPanesCmd(m.mgr.SidebarID()), tickCmd(), blankTickCmd(), projectTickCmd(), spinnerCmd())
 }
 
 // rows builds the combined, navigable row list: session rows first, then

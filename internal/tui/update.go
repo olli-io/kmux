@@ -23,11 +23,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tickMsg:
-		return m, tea.Batch(pollCmd(), projectsCmd(m.scopeDir), tickCmd())
+		return m, tea.Batch(pollCmd(), tickCmd())
 
 	case blankTickMsg:
 		// The blank-pane scan runs on its own faster ticker (see blankPaneInterval).
 		return m, tea.Batch(blankPanesCmd(m.mgr.SidebarID()), blankTickCmd())
+
+	case projectTickMsg:
+		// Project scanning runs on its own slow ticker (see projectInterval), decoupled
+		// from the fast session poll. Skip firing a scan while one is still in flight so
+		// a scan slower than projectInterval can't stack concurrent copies; always
+		// re-arm the ticker so scanning resumes once the outstanding scan lands.
+		cmd := projectTickCmd()
+		if !m.scanning {
+			m.scanning = true
+			cmd = tea.Batch(cmd, projectsCmd(m.scopeDir))
+		}
+		return m, cmd
 
 	case spinnerMsg:
 		m.spinnerFrame++
@@ -49,6 +61,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case projectsMsg:
+		m.scanning = false // scan finished; the next project tick may fire another
 		if msg.err != nil {
 			m.lastErr = msg.err.Error()
 			return m, nil
