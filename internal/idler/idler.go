@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -292,6 +293,7 @@ func newModel(kind string) model {
 var (
 	clStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))  // claude (blue)
 	ocStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("213")) // opencode (pink)
+	ocTagStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))   // running [OC] tag (red)
 	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	keyStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // keybind hint (yellow)
 	selStyle    = lipgloss.NewStyle().Background(lipgloss.Color("238"))
@@ -317,15 +319,36 @@ const (
 	modeKind                // the claude/opencode picker (only on the ↵ path)
 )
 
-// target is one launchable project or linked worktree in the picker, mirroring a
-// row of the dashboard's [1]-Projects panel. session is its claude session name
-// (the base agent.SessionForKind rewrites for the chosen kind), so a session the
-// idler plants is byte-identical to one the dashboard would create.
+// target is one project or linked worktree in the picker, mirroring a row of the
+// dashboard's [1]-Projects panel. session is its claude session name (the base
+// agent.SessionForKind rewrites for the chosen kind), so a session the idler
+// plants is byte-identical to one the dashboard would create. running records
+// which agent kinds already have a live session for this target, so the picker can
+// grey out and skip a kind (or the whole row) that would duplicate a running
+// session rather than launch a second one.
 type target struct {
-	label   string // display label: project name, or "project/worktree"
-	branch  string // current branch, shown dim
-	dir     string // working directory the agent launches in
-	session string // claude session name (base for agent.SessionForKind)
+	label   string          // display label: project name, or "project/worktree"
+	branch  string          // current branch, shown dim
+	dir     string          // working directory the agent launches in
+	session string          // claude session name (base for agent.SessionForKind)
+	running map[string]bool // agent kind -> its session is already live
+}
+
+// disabledFor reports whether this target is unlaunchable for the picker's kind —
+// i.e. selecting it would duplicate a running session. With a preselected kind
+// that is just that kind's session being live; on the ↵ path (kind == "") the row
+// is disabled only once every offered kind is running, since the kind picker still
+// lets the user launch any kind that is free.
+func (t target) disabledFor(kind string) bool {
+	if kind != "" {
+		return t.running[kind]
+	}
+	for _, o := range kindOptions {
+		if !t.running[o.kind] {
+			return false
+		}
+	}
+	return true
 }
 
 // kindOption is one agent kind offered by the ↵-path kind picker.
@@ -359,41 +382,44 @@ type model struct {
 type projectsMsg struct{ targets []target }
 
 func (m model) Init() tea.Cmd {
-	return scanCmd(m.pendingKind)
+	return scanCmd()
 }
 
 // scanCmd scans projects off the UI goroutine. It reuses project.ScanProjects so
 // the idler's list matches the dashboard's Projects panel exactly, configured
-// extra folders included, then drops any project/worktree whose agent session is
-// already running (see buildTargets). Both the scan and the running-session
-// listing fall back to empty on error rather than failing the picker.
-func scanCmd(kind string) tea.Cmd {
+// extra folders included, and tags each target with the agent kinds already
+// running for it (see buildTargets) so the picker can grey them out. Both the scan
+// and the running-session listing fall back to empty on error rather than failing
+// the picker.
+func scanCmd() tea.Cmd {
 	return func() tea.Msg {
 		ps, _ := project.ScanProjects()
 		running, _ := tmux.ListAgentSessions()
-		return projectsMsg{targets: buildTargets(ps, kind, running)}
+		return projectsMsg{targets: buildTargets(ps, running)}
 	}
 }
 
 // buildTargets flattens scanned projects into the picker's launch list: each
-// project's main worktree, then each of its linked worktrees, in scan order.
-// Targets whose agent session is already running are dropped — an idle slot is
-// for launching new work, and the dashboard already surfaces active sessions.
-// running comes from tmux.ListAgentSessions, which lists every live tmux session,
-// so detached sessions count as occupied too. For a preselected kind only that
-// kind's session marks a target occupied; on the ↵ path (kind == "") a target is
-// dropped only once every kind is running, leaving any free kind launchable.
-func buildTargets(ps []project.Project, kind string, running []string) []target {
+// project's main worktree, then each of its linked worktrees, in scan order. Every
+// target records which agent kinds already have a live session (from
+// tmux.ListAgentSessions, which lists every live tmux session, so detached ones
+// count too). The picker greys out and skips a running target/kind rather than
+// dropping it, so the user still sees what is already active but cannot launch a
+// duplicate onto it. Targets with a running session are then hoisted to the top
+// (stably, preserving scan order within each group) so the active work is grouped
+// up front, above the launchable rows.
+func buildTargets(ps []project.Project, running []string) []target {
 	live := make(map[string]bool, len(running))
 	for _, s := range running {
 		live[s] = true
 	}
 	var ts []target
 	add := func(label, branch, dir, session string) {
-		if occupied(session, kind, live) {
-			return
+		r := make(map[string]bool, len(kindOptions))
+		for _, o := range kindOptions {
+			r[o.kind] = live[agent.SessionForKind(session, o.kind)]
 		}
-		ts = append(ts, target{label: label, branch: branch, dir: dir, session: session})
+		ts = append(ts, target{label: label, branch: branch, dir: dir, session: session, running: r})
 	}
 	for _, p := range ps {
 		add(p.Name, p.Branch, p.Path, agent.ExpectedSession(p.Path, ""))
@@ -401,24 +427,22 @@ func buildTargets(ps []project.Project, kind string, running []string) []target 
 			add(p.Name+"/"+w.Name, w.Branch, w.Path, agent.ExpectedSession(p.Path, w.Name))
 		}
 	}
+	sort.SliceStable(ts, func(i, j int) bool {
+		return ts[i].hasRunning() && !ts[j].hasRunning()
+	})
 	return ts
 }
 
-// occupied reports whether a target's session is already running for the kind the
-// picker would launch. session is the base claude session name; live is the set
-// of running agent session names. With a preselected kind it checks just that
-// kind's session; on the ↵ path (kind == "") it reports occupied only when every
-// offered kind is already running, so a target with a free kind stays listed.
-func occupied(session, kind string, live map[string]bool) bool {
-	if kind != "" {
-		return live[agent.SessionForKind(session, kind)]
-	}
+// hasRunning reports whether any agent kind already has a live session for this
+// target — i.e. it represents active work. Used to sort running targets to the top
+// of the picker.
+func (t target) hasRunning() bool {
 	for _, o := range kindOptions {
-		if !live[agent.SessionForKind(session, o.kind)] {
-			return false
+		if t.running[o.kind] {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // chooseLaunch records the chosen agent (resolved session/dir/command) and quits
@@ -442,8 +466,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case projectsMsg:
 		m.targets = msg.targets
-		if m.pcursor >= len(m.targets) {
-			m.pcursor = 0
+		if !m.selectable(m.pcursor) {
+			m.pcursor = m.firstSelectable()
 		}
 		return m, nil
 
@@ -461,35 +485,60 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // handleProject drives the project picker. esc/q (and ctrl+c) cancel the picker
-// entirely — the idle slot's shell loop redraws its hint. Selecting a project
-// either launches directly (a kind was preselected) or advances to the kind
-// picker (the ↵ path).
+// entirely — the idle slot's shell loop redraws its hint. Cursor moves skip
+// disabled (already-running) rows. Selecting a project either launches directly (a
+// kind was preselected) or advances to the kind picker (the ↵ path).
 func (m model) handleProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc", "q", "h", "left":
 		return m, tea.Quit
 	case "j", "down":
-		if m.pcursor < len(m.targets)-1 {
-			m.pcursor++
-		}
+		m.pcursor = m.nextSelectable(m.pcursor, 1)
 	case "k", "up":
-		if m.pcursor > 0 {
-			m.pcursor--
-		}
+		m.pcursor = m.nextSelectable(m.pcursor, -1)
 	case "enter", " ", "l", "right":
-		if len(m.targets) == 0 {
-			return m, nil
+		if !m.selectable(m.pcursor) {
+			return m, nil // empty list or a greyed-out running row
 		}
 		t := m.targets[m.pcursor]
 		if m.pendingKind != "" {
 			return m.chooseLaunch(t, m.pendingKind)
 		}
-		// ↵ path: pick the kind next.
+		// ↵ path: pick the kind next, starting on the first free kind.
 		m.chosen = &t
-		m.kcursor = 0
 		m.mode = modeKind
+		m.kcursor = m.firstKind()
 	}
 	return m, nil
+}
+
+// selectable reports whether the project at index i can be launched for the
+// picker's pending kind — in range and not already running.
+func (m model) selectable(i int) bool {
+	return i >= 0 && i < len(m.targets) && !m.targets[i].disabledFor(m.pendingKind)
+}
+
+// nextSelectable returns the next launchable index scanning from just past `from`
+// in direction step (+1/-1), or `from` unchanged when none is found. Disabled
+// (running) rows are skipped so the cursor never rests on one.
+func (m model) nextSelectable(from, step int) int {
+	for i := from + step; i >= 0 && i < len(m.targets); i += step {
+		if m.selectable(i) {
+			return i
+		}
+	}
+	return from
+}
+
+// firstSelectable returns the first launchable project index, or 0 when every
+// target is disabled — the cursor then rests on a greyed row and enter is inert.
+func (m model) firstSelectable() int {
+	for i := range m.targets {
+		if m.selectable(i) {
+			return i
+		}
+	}
+	return 0
 }
 
 func (m model) handleKind(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -499,21 +548,61 @@ func (m model) handleKind(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc", "q", "h", "left":
 		m.mode = modeProject // back to the project list
 	case "j", "down":
-		if m.kcursor < len(kindOptions)-1 {
-			m.kcursor++
-		}
+		m.kcursor = m.nextKind(m.kcursor, 1)
 	case "k", "up":
-		if m.kcursor > 0 {
-			m.kcursor--
-		}
+		m.kcursor = m.nextKind(m.kcursor, -1)
 	case "tab":
-		m.kcursor = (m.kcursor + 1) % len(kindOptions)
+		m.kcursor = m.nextKindWrap(m.kcursor)
 	case "enter", " ", "l", "right":
-		if m.chosen != nil {
+		if m.chosen != nil && m.kindSelectable(m.kcursor) {
 			return m.chooseLaunch(*m.chosen, kindOptions[m.kcursor].kind)
 		}
 	}
 	return m, nil
+}
+
+// kindSelectable reports whether the kind option at index i can be launched for
+// the chosen project — in range, a project is chosen, and that kind is not already
+// running for it.
+func (m model) kindSelectable(i int) bool {
+	if i < 0 || i >= len(kindOptions) || m.chosen == nil {
+		return false
+	}
+	return !m.chosen.running[kindOptions[i].kind]
+}
+
+// firstKind returns the first launchable kind index for the chosen project, or 0
+// when none is free. A project only reaches the kind picker with at least one free
+// kind (see disabledFor), so 0 is a fallback that should not arise there.
+func (m model) firstKind() int {
+	for i := range kindOptions {
+		if m.kindSelectable(i) {
+			return i
+		}
+	}
+	return 0
+}
+
+// nextKind returns the next launchable kind scanning from just past `from` in
+// direction step, or `from` unchanged when none is found (running kinds skipped).
+func (m model) nextKind(from, step int) int {
+	for i := from + step; i >= 0 && i < len(kindOptions); i += step {
+		if m.kindSelectable(i) {
+			return i
+		}
+	}
+	return from
+}
+
+// nextKindWrap advances to the next launchable kind, wrapping past the end, for
+// the tab key.
+func (m model) nextKindWrap(from int) int {
+	for off := 1; off <= len(kindOptions); off++ {
+		if i := (from + off) % len(kindOptions); m.kindSelectable(i) {
+			return i
+		}
+	}
+	return from
 }
 
 func (m model) View() string {
@@ -543,7 +632,7 @@ func (m model) projectBox() string {
 
 	inner := max(lipgloss.Width(title), lipgloss.Width(hint))
 	for _, t := range m.targets {
-		if w := lipgloss.Width("  " + targetLabel(t)); w > inner {
+		if w := lipgloss.Width("  " + targetLabel(t, t.disabledFor(m.pendingKind))); w > inner {
 			inner = w
 		}
 	}
@@ -569,12 +658,16 @@ func (m model) projectRows(inner int) []string {
 	start, end := scrollWindow(len(m.targets), m.pcursor, height)
 	rows := make([]string, 0, end-start)
 	for i := start; i < end; i++ {
+		disabled := m.targets[i].disabledFor(m.pendingKind)
+		// The cursor never rests on a disabled row, so only enabled rows get the
+		// marker and selection bar.
+		selected := i == m.pcursor && !disabled
 		marker := "  "
-		if i == m.pcursor {
+		if selected {
 			marker = keyStyle.Render("› ")
 		}
-		line := marker + targetLabel(m.targets[i])
-		if i == m.pcursor {
+		line := marker + targetLabel(m.targets[i], disabled)
+		if selected {
 			line = selectLine(line, inner)
 		}
 		rows = append(rows, line)
@@ -582,12 +675,55 @@ func (m model) projectRows(inner int) []string {
 	return rows
 }
 
-// targetLabel renders a target's label with its dim branch tail.
-func targetLabel(t target) string {
-	if t.branch == "" {
-		return t.label
+// targetLabel renders a target's label with its dim branch tail, plus a colored
+// "[CC]"/"[OC]" marker for each agent kind already running on it (see runningTags).
+// A disabled target (all its picker-relevant kinds live) is dimmed whole, so the
+// row reads as present-but-unlaunchable while its markers show what holds it.
+func targetLabel(t target, disabled bool) string {
+	tail := ""
+	if t.branch != "" {
+		tail = "  " + t.branch
 	}
-	return t.label + dimStyle.Render("  "+t.branch)
+	head := t.label + dimStyle.Render(tail)
+	if disabled {
+		head = dimStyle.Render(t.label + tail)
+	}
+	if tags := runningTags(t); tags != "" {
+		head += "  " + tags
+	}
+	return head
+}
+
+// runningTags renders the "[CC]"/"[OC]" markers for every agent kind already live
+// for t, in kindOptions order and space-separated; empty when nothing runs.
+func runningTags(t target) string {
+	var tags []string
+	for _, o := range kindOptions {
+		if t.running[o.kind] {
+			tags = append(tags, kindTag(o.kind))
+		}
+	}
+	return strings.Join(tags, " ")
+}
+
+// kindTag renders a running-agent marker: grey brackets around the kind's short
+// code, colored per kind (claude "CC" blue, opencode "OC" red).
+func kindTag(kind string) string {
+	mark, style := "CC", clStyle
+	if kind == "opencode" {
+		mark, style = "OC", ocTagStyle
+	}
+	return dimStyle.Render("[") + style.Render(mark) + dimStyle.Render("]")
+}
+
+// kindOptionLabel renders one row of the kind picker: the kind's colored name, or —
+// when that kind is already running for the chosen project — its name dimmed with a
+// trailing running marker, matching the project list's greyed rows.
+func (m model) kindOptionLabel(i int, o kindOption) string {
+	if m.kindSelectable(i) {
+		return o.style.Render(o.label)
+	}
+	return dimStyle.Render(o.label) + "  " + kindTag(o.kind)
 }
 
 // kindBox renders the claude/opencode picker shown after a project is chosen on
@@ -601,8 +737,8 @@ func (m model) kindBox() string {
 		keyStyle.Render("esc") + dimStyle.Render(" back")
 
 	inner := max(lipgloss.Width(title), lipgloss.Width(hint))
-	for _, o := range kindOptions {
-		if w := lipgloss.Width("  " + o.label); w > inner {
+	for i, o := range kindOptions {
+		if w := lipgloss.Width("  " + m.kindOptionLabel(i, o)); w > inner {
 			inner = w
 		}
 	}
@@ -610,12 +746,13 @@ func (m model) kindBox() string {
 
 	body := make([]string, 0, len(kindOptions)+2)
 	for i, o := range kindOptions {
+		selected := i == m.kcursor && m.kindSelectable(i)
 		marker := "  "
-		if i == m.kcursor {
+		if selected {
 			marker = keyStyle.Render("› ")
 		}
-		line := marker + o.style.Render(o.label)
-		if i == m.kcursor {
+		line := marker + m.kindOptionLabel(i, o)
+		if selected {
 			line = selectLine(line, inner)
 		}
 		body = append(body, line)

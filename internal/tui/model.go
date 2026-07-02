@@ -60,6 +60,18 @@ type model struct {
 	// project and the Sessions panel only its sessions.
 	scopeDir  string
 	scopeName string
+
+	// launcherID is the kitty window id of the [kmux][launcher] splash tab the
+	// dashboard was spawned behind (0 when none — e.g. the splash failed to open).
+	// launched guards the one-shot dismissal: once the layout is ready and the
+	// minimum hold has elapsed (or the cap-timer fallback fires) the finished
+	// dashboard is focused and this tab closed, and launched is set so later
+	// reconciles don't try again. layoutReady/minHeld are the two gates the normal
+	// dismissal waits on (see dismissLauncherWhenReady).
+	launcherID  int
+	launched    bool
+	layoutReady bool // first reconcile settled: panes built and sized
+	minHeld     bool // launcherMin elapsed since launch
 }
 
 // commandError backs the error float for a failed command: title names it, msg
@@ -90,7 +102,10 @@ var promptOptions = []struct {
 
 // NewModel builds the dashboard model. scopeDir, when non-empty, is the main
 // worktree of the single project kmux is scoped to (see model.scopeDir).
-func NewModel(mgr *layout.Manager, scopeDir string) tea.Model {
+// launcherID is the kitty window id of the launch-overlay splash tab the
+// dashboard is building behind (0 when there is none); the model closes it once
+// its first reconcile settles (see model.launcherID).
+func NewModel(mgr *layout.Manager, scopeDir string, launcherID int) tea.Model {
 	// Restore detached sessions and idle clocks from a previous run; best-effort
 	// (a read error just starts with empty sets).
 	detached, idle, err := status.LoadState()
@@ -121,6 +136,7 @@ func NewModel(mgr *layout.Manager, scopeDir string) tea.Model {
 		conflicts:  cfg.KeybindingConflicts(),
 		scopeDir:   scopeDir,
 		scopeName:  scopeName,
+		launcherID: launcherID,
 	}
 }
 
@@ -186,7 +202,15 @@ func (m model) Init() tea.Cmd {
 	// projectInterval (see projectTickCmd). The first blank-pane scan seeds the set
 	// of pre-existing shells so only later ones become launchers; blankTickCmd then
 	// re-scans on its own faster ticker.
-	return tea.Batch(pollCmd(), projectsCmd(m.scopeDir), blankPanesCmd(m.mgr.SidebarID()), tickCmd(), blankTickCmd(), projectTickCmd(), spinnerCmd())
+	cmds := []tea.Cmd{pollCmd(), projectsCmd(m.scopeDir), blankPanesCmd(m.mgr.SidebarID()), tickCmd(), blankTickCmd(), projectTickCmd(), spinnerCmd()}
+	// When the dashboard is building behind a launch-overlay splash tab, arm a
+	// fallback cap: if the first reconcile never completes (e.g. the tmux poll
+	// errored and short-circuited before reconcile), the cap timer still dismisses
+	// the splash so it can't linger over a stalled launch.
+	if m.launcherID != 0 {
+		cmds = append(cmds, launcherCapCmd(), launcherMinCmd())
+	}
+	return tea.Batch(cmds...)
 }
 
 // rows builds the combined, navigable row list: session rows first, then

@@ -138,6 +138,78 @@ func TestEnterPathPicksKindThenLaunches(t *testing.T) {
 	}
 }
 
+// TestDisabledRowsSkipped covers the grey-out UX: a running (disabled) project row
+// is never landed on by the cursor and never launches. Here the middle row is
+// running for claude, so a claude picker must skip it.
+func TestDisabledRowsSkipped(t *testing.T) {
+	running := map[string]bool{"claude": true}
+	m := model{
+		width: 44, height: 20, pendingKind: "claude",
+		targets: []target{
+			{label: "alpha", dir: "/g/alpha", session: agent.ExpectedSession("/g/alpha", "")},
+			{label: "busy", dir: "/g/busy", session: agent.ExpectedSession("/g/busy", ""), running: running},
+			{label: "gamma", dir: "/g/gamma", session: agent.ExpectedSession("/g/gamma", "")},
+		},
+	}
+
+	// The greyed row still renders (visible), tagged with its running kind "[CC]".
+	if out := m.View(); !strings.Contains(out, "busy") || !strings.Contains(out, "CC") {
+		t.Errorf("disabled row should render with a [CC] running tag\n%s", out)
+	}
+
+	// Down from alpha (0) skips the running row and lands on gamma (2).
+	next, _ := m.Update(key("down"))
+	if got := next.(model).pcursor; got != 2 {
+		t.Errorf("down from alpha: pcursor = %d, want 2 (skipped running row)", got)
+	}
+
+	// Parking the cursor on the disabled row and pressing enter is inert.
+	m.pcursor = 1
+	next, cmd := m.Update(key("enter"))
+	if cmd != nil || next.(model).launch != nil {
+		t.Error("enter on a running row should not launch")
+	}
+}
+
+// TestKindPickerSkipsRunningKind covers the ↵ path: when one kind is already
+// running for the chosen project, the kind picker greys it out, starts on the free
+// kind, and won't launch the running one.
+func TestKindPickerSkipsRunningKind(t *testing.T) {
+	base := agent.ExpectedSession("/g/alpha", "")
+	m := model{
+		width: 44, height: 20, pendingKind: "",
+		targets: []target{{label: "alpha", dir: "/g/alpha", session: base,
+			running: map[string]bool{"claude": true}}},
+	}
+	// Enter the kind picker for alpha.
+	next, _ := m.Update(key("enter"))
+	m = next.(model)
+	if m.mode != modeKind {
+		t.Fatalf("mode = %d, want modeKind", m.mode)
+	}
+	// kindOptions[0] is claude (running) → cursor starts on opencode (1).
+	if m.kcursor != 1 {
+		t.Errorf("kcursor = %d, want 1 (claude is running, start on free kind)", m.kcursor)
+	}
+	// The greyed claude kind still shows, tagged with its "[CC]" marker.
+	if out := m.View(); !strings.Contains(out, "CC") {
+		t.Errorf("kind picker should tag the running kind with [CC]\n%s", out)
+	}
+	// Up would move to claude, but it's disabled → cursor stays on opencode.
+	up, _ := m.Update(key("up"))
+	if got := up.(model).kcursor; got != 1 {
+		t.Errorf("up onto running kind: kcursor = %d, want 1 (skipped)", got)
+	}
+	// Enter launches opencode (the free kind), not claude.
+	fin, cmd := m.Update(key("enter"))
+	if !isQuit(cmd) {
+		t.Fatal("enter should launch the free kind")
+	}
+	if want := agent.SessionForKind(base, "opencode"); fin.(model).launch.Session != want {
+		t.Errorf("launched %q, want opencode session %q", fin.(model).launch.Session, want)
+	}
+}
+
 func TestEscCancelsAndBacks(t *testing.T) {
 	// From the project picker (the entry screen), esc cancels the whole picker.
 	m := sized()
@@ -179,7 +251,7 @@ func TestBuildTargets(t *testing.T) {
 		},
 	}
 
-	ts := buildTargets(projects, "claude", nil)
+	ts := buildTargets(projects, nil)
 	if len(ts) != 3 {
 		t.Fatalf("buildTargets: got %d targets, want 3 (2 mains + 1 worktree)", len(ts))
 	}
@@ -209,12 +281,15 @@ func TestBuildTargets(t *testing.T) {
 }
 
 func TestBuildTargetsEmpty(t *testing.T) {
-	if ts := buildTargets(nil, "claude", nil); len(ts) != 0 {
+	if ts := buildTargets(nil, nil); len(ts) != 0 {
 		t.Errorf("buildTargets(nil) = %d targets, want 0", len(ts))
 	}
 }
 
-func TestBuildTargetsDropsRunning(t *testing.T) {
+// TestBuildTargetsMarksRunning covers the grey-out semantics: running sessions are
+// kept in the list but tagged so disabledFor can skip them per kind. Nothing is
+// dropped anymore — the picker shows every project.
+func TestBuildTargetsMarksRunning(t *testing.T) {
 	projects := []project.Project{
 		{Name: "alpha", Path: "/home/u/git/alpha", Branch: "main"},
 		{Name: "beta", Path: "/home/u/git/beta", Branch: "main"},
@@ -222,31 +297,56 @@ func TestBuildTargetsDropsRunning(t *testing.T) {
 	alphaClaude := agent.ExpectedSession("/home/u/git/alpha", "")
 	alphaOpencode := agent.SessionForKind(alphaClaude, "opencode")
 
-	// A preselected kind drops a target only when that kind's session runs: alpha's
-	// claude session is live, so a claude picker hides alpha but keeps beta.
-	ts := buildTargets(projects, "claude", []string{alphaClaude})
-	if labels := labelsOf(ts); !equalStrings(labels, []string{"beta"}) {
-		t.Errorf("claude picker with alpha-claude running = %v, want [beta]", labels)
-	}
-
-	// The other kind is still launchable: an opencode picker keeps alpha even
-	// though its claude session is running.
-	ts = buildTargets(projects, "opencode", []string{alphaClaude})
+	// Only alpha's claude session runs: every project stays listed.
+	ts := buildTargets(projects, []string{alphaClaude})
 	if labels := labelsOf(ts); !equalStrings(labels, []string{"alpha", "beta"}) {
-		t.Errorf("opencode picker with only alpha-claude running = %v, want [alpha beta]", labels)
+		t.Fatalf("buildTargets kept = %v, want [alpha beta] (nothing dropped)", labels)
+	}
+	alpha, beta := ts[0], ts[1]
+
+	// A claude picker disables alpha (its claude session is live) but not beta.
+	if !alpha.disabledFor("claude") {
+		t.Error("alpha should be disabled for claude (its claude session runs)")
+	}
+	if beta.disabledFor("claude") {
+		t.Error("beta should be launchable for claude (no session runs)")
 	}
 
-	// On the ↵ path (kind == "") a target is dropped only once every kind runs.
-	// One kind running keeps alpha (the other kind is free).
-	ts = buildTargets(projects, "", []string{alphaClaude})
-	if labels := labelsOf(ts); !equalStrings(labels, []string{"alpha", "beta"}) {
-		t.Errorf("↵ picker with one alpha kind running = %v, want [alpha beta]", labels)
+	// The other kind is still free: an opencode picker keeps alpha launchable.
+	if alpha.disabledFor("opencode") {
+		t.Error("alpha should be launchable for opencode (only its claude runs)")
 	}
 
-	// Both kinds running drops alpha on the ↵ path.
-	ts = buildTargets(projects, "", []string{alphaClaude, alphaOpencode})
-	if labels := labelsOf(ts); !equalStrings(labels, []string{"beta"}) {
-		t.Errorf("↵ picker with both alpha kinds running = %v, want [beta]", labels)
+	// On the ↵ path (kind == "") a target is disabled only once every kind runs.
+	if alpha.disabledFor("") {
+		t.Error("alpha should stay launchable on the ↵ path (opencode is free)")
+	}
+
+	// With both alpha kinds running, alpha is disabled on the ↵ path too.
+	ts = buildTargets(projects, []string{alphaClaude, alphaOpencode})
+	if !ts[0].disabledFor("") {
+		t.Error("alpha should be disabled on the ↵ path once both kinds run")
+	}
+	if !ts[0].disabledFor("opencode") {
+		t.Error("alpha should be disabled for opencode once its opencode session runs")
+	}
+}
+
+// TestBuildTargetsSortsRunningFirst covers the hoist: targets with a live session
+// sort to the top, stably (scan order preserved within the running and the free
+// groups). Here only gamma runs, so it jumps ahead of the earlier-scanned alpha and
+// beta while those two keep their relative order.
+func TestBuildTargetsSortsRunningFirst(t *testing.T) {
+	projects := []project.Project{
+		{Name: "alpha", Path: "/home/u/git/alpha", Branch: "main"},
+		{Name: "beta", Path: "/home/u/git/beta", Branch: "main"},
+		{Name: "gamma", Path: "/home/u/git/gamma", Branch: "main"},
+	}
+	gammaClaude := agent.ExpectedSession("/home/u/git/gamma", "")
+
+	ts := buildTargets(projects, []string{gammaClaude})
+	if labels := labelsOf(ts); !equalStrings(labels, []string{"gamma", "alpha", "beta"}) {
+		t.Errorf("sorted order = %v, want [gamma alpha beta] (running first, rest stable)", labels)
 	}
 }
 

@@ -69,6 +69,8 @@ func TestParseArgs(t *testing.T) {
 		{"session with path", []string{"--session", "opencode", "/g/x"}, ParsedArgs{Path: "/g/x", Agent: "opencode", PrintSession: true}, false},
 		{"project", []string{"--project"}, ParsedArgs{PrintProject: true}, false},
 		{"project equals form", []string{"-project"}, ParsedArgs{PrintProject: true}, false},
+		{"splash", []string{"--splash"}, ParsedArgs{Splash: true}, false},
+		{"splash single dash", []string{"-splash"}, ParsedArgs{Splash: true}, false},
 		{"agent missing value", []string{"--agent"}, ParsedArgs{}, true},
 		{"session missing value", []string{"--session"}, ParsedArgs{}, true},
 		{"bad kind", []string{"--agent", "vim"}, ParsedArgs{}, true},

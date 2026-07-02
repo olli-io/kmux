@@ -15,13 +15,16 @@ import (
 // dashboard mode and "claude"/"opencode" for the agent modes; PrintSession is set
 // by --session to print the resolved session name instead of launching it;
 // PrintProject is set by --project to print the project directory of the current
-// tmux session instead of launching anything; Path is the optional directory
-// argument ("" means the current directory).
+// tmux session instead of launching anything; Splash is set by --splash to render
+// the launch-overlay animation instead of the dashboard (an internal mode the
+// dashboard spawns in its own kitty tab to hide the first reconcile's pane
+// churn); Path is the optional directory argument ("" means the current directory).
 type ParsedArgs struct {
 	Path         string
 	Agent        string
 	PrintSession bool
 	PrintProject bool
+	Splash       bool
 }
 
 // ParseArgs routes the kmux command line. With no agent flag it selects the
@@ -29,10 +32,12 @@ type ParsedArgs struct {
 // --session prints the session name that --agent would create (for scripting)
 // and exits. --project prints the project directory of the tmux session the
 // caller is inside (for scripts bound to a tmux keybinding) and exits; it takes
-// no value and ignores any path. The --agent/--session flags take a kind (claude
-// or opencode) and accept either `--flag claude` or `--flag=claude`. The path and
-// the flag may appear in either order, so `kmux PATH --agent claude` and
-// `kmux --agent claude PATH` parse the same.
+// no value and ignores any path. --splash selects the launch-overlay animation
+// (an internal mode the dashboard spawns in its own kitty tab) and takes no
+// value. The --agent/--session flags take a kind (claude or opencode) and accept
+// either `--flag claude` or `--flag=claude`. The path and the flag may appear in
+// either order, so `kmux PATH --agent claude` and `kmux --agent claude PATH`
+// parse the same.
 func ParseArgs(args []string) (ParsedArgs, error) {
 	var pa ParsedArgs
 	for i := 0; i < len(args); i++ {
@@ -56,6 +61,8 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 			pa.Agent, pa.PrintSession = strings.TrimPrefix(a, "--session="), true
 		case a == "--project", a == "-project":
 			pa.PrintProject = true
+		case a == "--splash", a == "-splash":
+			pa.Splash = true
 		case strings.HasPrefix(a, "-"):
 			return pa, fmt.Errorf("unknown flag: %s", a)
 		default:

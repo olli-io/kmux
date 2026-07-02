@@ -53,6 +53,21 @@ var blankPaneInterval = macCadence(250*time.Millisecond, 500*time.Millisecond)
 // re-listing sessions each tick.
 const spinnerInterval = 150 * time.Millisecond
 
+// launcherMin is the minimum time the launch-overlay splash stays up after launch,
+// even when the first reconcile settles sooner. The first reconcile only means the
+// panes are built and sized; the poll keeps rebalancing for a few ticks after, so
+// dismissing the instant it lands blinks the splash away over visible churn. The
+// hold keeps it covering that early churn (dismissal is gated on both the reconcile
+// AND this timer — see model.dismissLauncherWhenReady).
+const launcherMin = 750 * time.Millisecond
+
+// launcherCap bounds how long the launch-overlay splash tab may stay up. Normal
+// dismissal waits for the first reconcile (and launcherMin); this cap is the
+// fallback for when no reconcile ever completes (a failed tmux poll short-circuits
+// before reconcile), so a stalled launch can't leave the splash stuck in front of
+// the dashboard.
+const launcherCap = 1500 * time.Millisecond
+
 // spinnerFrames is the rotating braille glyph cycle shown for a busy session: an
 // arc of 4 filled dots (with a 2-dot gap) sweeping clockwise around the perimeter
 // of one braille cell.
@@ -72,6 +87,18 @@ type projectsMsg struct {
 }
 type spinnerMsg struct{}
 type reconciledMsg struct{ errs []error }
+
+// launcherCapMsg fires once, launcherCap after launch, as the fallback that
+// dismisses the launch-overlay splash tab if no reconcile ever completes.
+type launcherCapMsg struct{}
+
+// launcherMinMsg fires once, launcherMin after launch, marking that the splash has
+// been held long enough to dismiss once the layout is also ready.
+type launcherMinMsg struct{}
+
+// launcherDismissedMsg reports the result of tearing down the splash tab (focus
+// the finished dashboard, then close the splash). Any error lands in lastErr.
+type launcherDismissedMsg struct{ err error }
 type attentionMsg struct {
 	states map[string]status.AttentionState
 	hashes map[string]uint64 // session name -> pane fingerprint, for idle tracking
@@ -116,6 +143,18 @@ func projectTickCmd() tea.Cmd {
 // spinnerCmd schedules the next busy-animation frame.
 func spinnerCmd() tea.Cmd {
 	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return spinnerMsg{} })
+}
+
+// launcherCapCmd fires launcherCapMsg once, launcherCap after launch — the
+// fallback that dismisses the launch-overlay splash if no reconcile completes.
+func launcherCapCmd() tea.Cmd {
+	return tea.Tick(launcherCap, func(time.Time) tea.Msg { return launcherCapMsg{} })
+}
+
+// launcherMinCmd fires launcherMinMsg once, launcherMin after launch — the minimum
+// hold that keeps the splash up over the first reconcile's pane churn.
+func launcherMinCmd() tea.Cmd {
+	return tea.Tick(launcherMin, func(time.Time) tea.Msg { return launcherMinMsg{} })
 }
 
 // pollCmd lists agent sessions off the UI goroutine.
@@ -249,6 +288,21 @@ func reconcileCmd(mgr *layout.Manager, active []string) tea.Cmd {
 func focusCmd(id int) tea.Cmd {
 	return func() tea.Msg {
 		return focusedMsg{err: kitty.FocusWindow(id)}
+	}
+}
+
+// dismissLauncherCmd tears down the launch-overlay splash tab off the UI
+// goroutine: it focuses the finished dashboard (sidebarID) first, so the reveal
+// switches to the settled layout, then closes the splash tab (launcherID). Doing
+// it in that order means the user never sees a bare tab between the splash
+// closing and the dashboard appearing. Best-effort — close ignores a missing
+// match — so a splash the user closed by hand can't error the launch.
+func dismissLauncherCmd(sidebarID, launcherID int) tea.Cmd {
+	return func() tea.Msg {
+		if err := kitty.FocusWindow(sidebarID); err != nil {
+			return launcherDismissedMsg{err: err}
+		}
+		return launcherDismissedMsg{err: kitty.CloseWindow(launcherID)}
 	}
 }
 

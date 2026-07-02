@@ -101,6 +101,29 @@ func OpenTab(exe, dir, title string) error {
 	return err
 }
 
+// OpenLauncherTab opens a focused kitty tab in the current OS window running
+// `exe --splash` — the launch-overlay animation — and returns the new window id
+// so the dashboard can close it once its first reconcile settles. Unlike the
+// fire-and-forget tab launchers it must return the id (like Launch), so the
+// caller can dismiss it. It is opened focused (no --keep-focus): it covers the
+// screen while the dashboard builds its panes in the now-background tab, hiding
+// the first reconcile's pane churn. exe is the running kmux executable's path.
+func OpenLauncherTab(exe string) (int, error) {
+	out, err := kittenAt(
+		"launch",
+		"--type=tab",
+		"--tab-title", "[kmux][launcher]",
+		exe, "--splash")
+	if err != nil {
+		return 0, err
+	}
+	id, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return 0, fmt.Errorf("parse launcher window id from %q: %w", out, err)
+	}
+	return id, nil
+}
+
 // OpenAgentTab attaches the tmux session `name` in a new kitty tab in the
 // current OS window and focuses it. Unlike a managed agent pane, this tab is
 // fire-and-forget: Manager/Reconcile/Rebalance never see it, so it stays out of

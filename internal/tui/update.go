@@ -73,6 +73,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg.errs) > 0 {
 			m.lastErr = msg.errs[0].Error()
 		}
+		// The first completed reconcile means the dashboard's panes are built and
+		// sized; mark the layout ready and drop the splash once the minimum hold has
+		// also elapsed (dismissLauncherWhenReady), so it covers the early churn rather
+		// than blinking away. Later reconciles no-op since launched is set. Compute the
+		// cmd first so the launched mutation lands on the returned m.
+		m.layoutReady = true
+		cmd := m.dismissLauncherWhenReady()
+		return m, cmd
+
+	case launcherMinMsg:
+		// The minimum hold elapsed; dismiss the splash once the layout is also ready.
+		m.minHeld = true
+		cmd := m.dismissLauncherWhenReady()
+		return m, cmd
+
+	case launcherCapMsg:
+		// Fallback: dismiss the splash even if no reconcile ever completed, ignoring
+		// the min-hold gate so a stalled launch can't strand it.
+		cmd := m.dismissLauncher()
+		return m, cmd
+
+	case launcherDismissedMsg:
+		if msg.err != nil {
+			m.lastErr = msg.err.Error()
+		}
 		return m, nil
 
 	case attentionMsg:
@@ -154,6 +179,30 @@ func (m *model) handleBlankPanes(panes []kitty.BlankPane) tea.Cmd {
 		return nil
 	}
 	return tea.Batch(cmds...)
+}
+
+// dismissLauncher returns the command to tear down the launch-overlay splash
+// tab, or nil when there is nothing to do — no splash was opened (launcherID 0)
+// or it was already dismissed. It is one-shot: the first call with a live splash
+// marks it launched so the reveal happens exactly once, whichever trigger (first
+// reconcile or the cap timer) fires first.
+func (m *model) dismissLauncher() tea.Cmd {
+	if m.launcherID == 0 || m.launched {
+		return nil
+	}
+	m.launched = true
+	return dismissLauncherCmd(m.mgr.SidebarID(), m.launcherID)
+}
+
+// dismissLauncherWhenReady tears down the splash only once both gates are met: the
+// layout has settled (first reconcile) and the minimum hold has elapsed. Either
+// trigger calls it; the second one to arrive completes the dismissal, so the splash
+// stays up for at least launcherMin and never blinks away over the early churn.
+func (m *model) dismissLauncherWhenReady() tea.Cmd {
+	if !m.layoutReady || !m.minHeld {
+		return nil
+	}
+	return m.dismissLauncher()
 }
 
 // handleKey processes navigation and fold keys (arrows + vim).

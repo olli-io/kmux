@@ -54,6 +54,15 @@ func main() {
 		}
 		return
 	}
+	if pa.Splash {
+		// Internal launch-overlay mode: the dashboard spawns `kmux --splash` in its
+		// own kitty tab and closes that tab once its layout has settled.
+		if err := runSplash(); err != nil {
+			fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	runDashboard(pa.Path)
 }
 
@@ -117,12 +126,32 @@ func runDashboard(pathArg string) {
 		status.SweepIdleAtLaunch(time.Now(), cfg.IdleDuration(), idle)
 	}
 
+	// Pop a launch-overlay splash tab in front of the dashboard so the user doesn't
+	// watch the first reconcile assemble the layout pane by pane. GotoLayoutSplits
+	// above already ran on this (still-active) tab; opening the splash focused
+	// pushes this tab to the background, where the dashboard builds its panes hidden
+	// (kitty.Launch pins them to this tab regardless of focus). The model closes the
+	// splash once its first reconcile settles. Best-effort: on failure launcherID is
+	// 0 and startup proceeds with no overlay, exactly as before.
+	var launcherID int
+	if exe, err := os.Executable(); err == nil {
+		launcherID, _ = kitty.OpenLauncherTab(exe)
+	}
+
 	mgr := layout.NewManager(sidebarID)
 	// AltScreen gives a clean, full-pane dashboard (clears on launch, restores on exit).
-	p := tea.NewProgram(tui.NewModel(mgr, scopeDir), tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
+	p := tea.NewProgram(tui.NewModel(mgr, scopeDir, launcherID), tea.WithAltScreen())
+	_, runErr := p.Run()
+	// Close the splash tab unconditionally on exit. The model normally dismisses it
+	// once the first reconcile settles, but a quit before that (or a crash) would
+	// otherwise orphan it; CloseWindow ignores a missing match, so closing an
+	// already-dismissed splash is a no-op.
+	if launcherID != 0 {
+		_ = kitty.CloseWindow(launcherID)
+	}
+	if runErr != nil {
 		mgr.CloseAll()
-		fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
+		fmt.Fprintf(os.Stderr, "kmux: %v\n", runErr)
 		os.Exit(1)
 	}
 }
