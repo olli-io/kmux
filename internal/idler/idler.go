@@ -253,8 +253,9 @@ func RunIdleLoop() error {
 
 // IdleLoopScript is the shell program that holds an interactive idle slot. It
 // loops: draw the hint, read one raw keypress, and spawn the kmux-idler picker for
-// the matching launch flow (c/o preselect a kind; any other key — Enter included —
-// runs the kind-after-project flow; q quits the slot if it is spare). The `q` hint
+// the matching launch flow (c/o preselect a kind; Enter runs the kind-after-project
+// flow; q quits the slot if it is spare). Any other key is ignored and just redraws
+// the hint, so a stray keystroke never opens the picker. The `q` hint
 // is shown only when `kmux-idler --can-quit` reports a spare pane (see CanQuit), so
 // it never advertises an inert key. The raw single-byte read (stty + dd) matches
 // the pattern kmux already uses for hold-on-error prompts. The picker exits as soon
@@ -276,7 +277,7 @@ while :; do
     c|C) "$idler" claude ;;
     o|O) "$idler" opencode ;;
     q|Q) "$idler" --quit ;;
-    *) "$idler" ;;
+    '') "$idler" ;;
   esac
 done`
 }
