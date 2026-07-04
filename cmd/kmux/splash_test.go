@@ -7,49 +7,99 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// bannerGlyph is a distinctive slice of the wordmark banner (the "m" crossbar in
-// row 3) — a contiguous run within one line, so it survives lipgloss's per-line
-// styling and centering and can stand in for "the banner rendered".
-const bannerGlyph = "███▄███▄"
+// blankCell is the empty braille pattern (no dots lit) — an all-blank render is
+// made entirely of these.
+const blankCell = rune(0x2800)
 
-// TestSplashViewBeforeSize checks the splash renders its wordmark and spinner
-// even before a WindowSizeMsg arrives (width/height still 0), so the very first
-// frame is never blank.
+// TestSplashBitmapBuilt checks the composited "[kmux]" bitmap has the expected
+// pixel width (6 glyphs × splashGlyphW plus the inter-glyph gaps) and lights at
+// least some pixels.
+func TestSplashBitmapBuilt(t *testing.T) {
+	wantWidth := 6*splashGlyphW + 0 + 2 + 2 + 2 + 0
+	if splashWidth != wantWidth {
+		t.Errorf("splashWidth = %d, want %d", splashWidth, wantWidth)
+	}
+	lit := false
+	for _, row := range splashBitmap {
+		for _, on := range row {
+			lit = lit || on
+		}
+	}
+	if !lit {
+		t.Error("splashBitmap is entirely blank, want the wordmark drawn")
+	}
+}
+
+// TestSplashRenderReveal checks the wipe: reveal 0 is all blank, and the fully
+// revealed frame lights braille cells (differs from blank).
+func TestSplashRenderReveal(t *testing.T) {
+	empty := renderSplash(0)
+	for _, r := range empty {
+		if r != '\n' && r != blankCell {
+			t.Fatalf("renderSplash(0) contains non-blank rune %q, want a blank frame", r)
+		}
+	}
+	full := renderSplash(splashWidth)
+	if full == empty {
+		t.Error("renderSplash(splashWidth) equals the blank frame, want the wordmark drawn")
+	}
+	// A partial reveal should light fewer cells than the full one.
+	if strings.Count(renderSplash(splashWidth/2), string(blankCell)) <=
+		strings.Count(full, string(blankCell)) {
+		t.Error("half reveal is not more blank than the full reveal, want a left-to-right wipe")
+	}
+}
+
+// TestSplashViewBeforeSize checks the splash renders its matrix even before a
+// WindowSizeMsg arrives (width/height still 0), so the first frame is never blank
+// once anything is revealed.
 func TestSplashViewBeforeSize(t *testing.T) {
-	out := splashModel{}.View()
-	if !strings.Contains(out, bannerGlyph) {
-		t.Errorf("View() = %q, want it to contain the wordmark banner", out)
-	}
-	if !strings.Contains(out, "launching") {
-		t.Errorf("View() = %q, want it to contain %q", out, "launching")
-	}
-	if !strings.Contains(out, splashFrames[0]) {
-		t.Errorf("View() = %q, want it to contain the first spinner frame %q", out, splashFrames[0])
+	out := splashModel{reveal: splashWidth}.View()
+	if !strings.Contains(out, renderSplash(splashWidth)) {
+		t.Errorf("View() = %q, want it to contain the fully-revealed matrix", out)
 	}
 }
 
 // TestSplashViewCentered checks that once sized, the splash places its content in
 // a block matching the terminal dimensions (lipgloss.Place pads to width/height).
 func TestSplashViewCentered(t *testing.T) {
-	m, _ := splashModel{}.Update(tea.WindowSizeMsg{Width: 40, Height: 9})
+	m, _ := splashModel{}.Update(tea.WindowSizeMsg{Width: 60, Height: 9})
 	lines := strings.Split(m.View(), "\n")
 	if len(lines) != 9 {
 		t.Errorf("centered View() has %d lines, want 9 (the terminal height)", len(lines))
 	}
-	if !strings.Contains(m.View(), bannerGlyph) {
-		t.Errorf("centered View() = %q, want it to contain the wordmark", m.View())
-	}
 }
 
-// TestSplashTickAdvancesFrame checks a tick advances the spinner frame, driving
-// the animation.
-func TestSplashTickAdvancesFrame(t *testing.T) {
+// TestSplashTickAdvancesReveal checks a tick advances the wipe one column,
+// driving the animation.
+func TestSplashTickAdvancesReveal(t *testing.T) {
 	m, cmd := splashModel{}.Update(splashTickMsg{})
-	if m.(splashModel).frame != 1 {
-		t.Errorf("frame after one tick = %d, want 1", m.(splashModel).frame)
+	if m.(splashModel).reveal != 1 {
+		t.Errorf("reveal after one tick = %d, want 1", m.(splashModel).reveal)
 	}
 	if cmd == nil {
 		t.Error("tick returned a nil cmd, want the next tick scheduled")
+	}
+}
+
+// TestSplashTickLoops checks that once the reveal passes the full width (the held
+// frame), the next tick restarts the wipe from the first column.
+func TestSplashTickLoops(t *testing.T) {
+	// Reaching splashWidth+1 holds the full frame for the loop pause.
+	held, cmd := splashModel{reveal: splashWidth}.Update(splashTickMsg{})
+	if got := held.(splashModel).reveal; got != splashWidth+1 {
+		t.Fatalf("reveal at end of wipe = %d, want %d (held frame)", got, splashWidth+1)
+	}
+	if cmd == nil {
+		t.Error("held frame returned nil cmd, want the pause tick scheduled")
+	}
+	// The next tick restarts.
+	restarted, cmd := held.Update(splashTickMsg{})
+	if got := restarted.(splashModel).reveal; got != 1 {
+		t.Errorf("reveal after loop = %d, want 1", got)
+	}
+	if cmd == nil {
+		t.Error("loop tick returned nil cmd")
 	}
 }
 
