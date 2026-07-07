@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/olli-io/kmux/internal/config"
 )
@@ -231,12 +232,89 @@ func isMainWorktree(dir string) bool {
 // listWorktrees returns the current branch of the main worktree at dir together
 // with its linked worktrees. Best-effort: any git error yields an empty branch
 // and no worktrees rather than failing the whole scan.
+//
+// Worktree topology (which worktrees exist, their branches) changes only on
+// `git worktree add/remove`, branch checkout, commit, or fetch — all of which
+// bump the main worktree's `.git` directory mtime. Working-tree edits (which flip
+// the dirty bit) do NOT, so dirty/ahead/behind are deliberately NOT cached here —
+// they are recomputed every scan by markStatus. This cache only skips the
+// `git worktree list` spawn when `.git` is unchanged since the last scan, which is
+// the common steady-state case (topology is stable between edits), cutting one git
+// process per project per scan.
 func listWorktrees(dir string) (string, []Worktree) {
+	mtime, ok := gitMtime(dir)
+	if ok {
+		if branch, wts, hit := lookupTopo(dir, mtime); hit {
+			return branch, wts
+		}
+	}
 	out, err := exec.Command("git", "-C", dir, "worktree", "list", "--porcelain").Output()
 	if err != nil {
 		return "", nil
 	}
-	return parseWorktrees(string(out), dir)
+	branch, wts := parseWorktrees(string(out), dir)
+	if ok {
+		storeTopo(dir, mtime, branch, wts)
+	}
+	return branch, wts
+}
+
+// gitMtime returns the modification time (unix nanos) of the main worktree's
+// `.git` directory at dir, and whether it could be read. Git updates this
+// directory on any ref/HEAD/worktree change (commit, checkout, fetch, worktree
+// add/remove), so it is a reliable change signal for worktree topology — unlike a
+// working-tree edit, which changes no `.git` mtime and so is left to the always-run
+// status pass. A `.git` file (linked worktree/submodule) or a stat error yields
+// ok=false, so those simply skip the cache and always re-list.
+func gitMtime(dir string) (int64, bool) {
+	info, err := os.Stat(filepath.Join(dir, ".git"))
+	if err != nil || !info.IsDir() {
+		return 0, false
+	}
+	return info.ModTime().UnixNano(), true
+}
+
+// topoEntry caches a project's worktree topology (branch + linked worktrees) keyed
+// by the `.git` mtime it was read at.
+type topoEntry struct {
+	mtime     int64
+	branch    string
+	worktrees []Worktree
+}
+
+// topoCache memoizes worktree topology per main-worktree path so a scan can skip
+// the `git worktree list` spawn when `.git` is unchanged. It is guarded by its own
+// mutex: the dashboard's scanning guard already serializes scans, but the lock
+// keeps the cache safe if that ever changes or another caller scans concurrently.
+var (
+	topoMu    sync.Mutex
+	topoCache = map[string]topoEntry{}
+)
+
+// lookupTopo returns the cached topology for dir if it was recorded at the same
+// `.git` mtime, and whether it hit. The returned worktree slice is a fresh copy so
+// a caller (which sets per-worktree status fields on it) can never mutate the
+// cached entry.
+func lookupTopo(dir string, mtime int64) (branch string, wts []Worktree, hit bool) {
+	topoMu.Lock()
+	defer topoMu.Unlock()
+	e, ok := topoCache[dir]
+	if !ok || e.mtime != mtime {
+		return "", nil, false
+	}
+	return e.branch, append([]Worktree(nil), e.worktrees...), true
+}
+
+// storeTopo records dir's topology under the `.git` mtime it was read at. It stores
+// a copy so a later mutation of the caller's slice can't corrupt the cache.
+func storeTopo(dir string, mtime int64, branch string, wts []Worktree) {
+	topoMu.Lock()
+	defer topoMu.Unlock()
+	topoCache[dir] = topoEntry{
+		mtime:     mtime,
+		branch:    branch,
+		worktrees: append([]Worktree(nil), wts...),
+	}
 }
 
 // parseWorktrees parses `git worktree list --porcelain` output, returning the

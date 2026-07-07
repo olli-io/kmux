@@ -35,11 +35,15 @@ var pollInterval = macCadence(250*time.Millisecond, 500*time.Millisecond)
 // projectInterval is how often kmux rescans ~/git for projects and their git
 // status. Far slower than pollInterval: a scan shells out to git many times over
 // (worktree list + status + ahead/behind per worktree — see project.ScanProjects),
-// and dirty/ahead/behind state barely changes second to second, so running it at
-// the session-poll cadence burned CPU spawning dozens of git processes a second.
-// A rescan in flight past this interval is skipped rather than stacked (see the
-// model's scanning guard), so a slow scan can never pile up concurrent copies.
-const projectInterval = 3 * time.Second
+// and each git call is almost pure process-startup cost (~7-10ms, the work itself
+// is negligible), so the CPU scales with the git-process count. dirty/ahead/behind
+// barely change second to second, so a 5s cadence keeps the panel fresh while
+// spawning far fewer git processes than the old poll-tied scan. The worktree-list
+// spawns are further skipped when a repo's .git is unchanged (see
+// project.ScanProjects' topology cache). A rescan in flight past this interval is
+// skipped rather than stacked (see the model's scanning guard), so a slow scan can
+// never pile up concurrent copies.
+const projectInterval = 5 * time.Second
 
 // spinnerInterval is how often the busy-session animation advances a frame.
 // Faster than pollInterval so the spinner reads as smooth motion without
