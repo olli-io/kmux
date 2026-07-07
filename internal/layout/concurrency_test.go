@@ -20,6 +20,9 @@ type fakeKitty struct {
 	// standing in for the idler's adopt hints so tests can model an in-place launch.
 	// Empty by default (no in-place launches).
 	targets map[int]string
+	// snapshots counts how many times snapshot() ran, so a test can assert the
+	// reconcile spawns one `kitten @ ls` per pass rather than two.
+	snapshots int
 }
 
 func newFakeKitty() *fakeKitty {
@@ -55,6 +58,19 @@ func (f *fakeKitty) liveIDs() (map[int]bool, error) {
 		out[id] = true
 	}
 	return out, nil
+}
+
+// snapshot stands in for kitty.Snapshot: it returns the same live-id set liveIDs
+// does plus an empty blank-pane list (these layout tests model no user-spawned
+// blank shells). It also counts its calls so a test can assert the reconcile
+// takes exactly one snapshot per pass. The manager calls it under its own lock,
+// so this mirrors the in-lock fetch liveIDs provided before the merge.
+func (f *fakeKitty) snapshot(_ int) (map[int]bool, []kitty.BlankPane, error) {
+	f.mu.Lock()
+	f.snapshots++
+	f.mu.Unlock()
+	live, err := f.liveIDs()
+	return live, nil, err
 }
 
 // liveSet returns the live ids as a plain set for assertions.
@@ -95,10 +111,12 @@ func installFakeKitty(t *testing.T, f *fakeKitty) {
 	t.Helper()
 	origLaunch, origClose := launchWindow, closeWindow
 	origLive, origCols, origResize := liveWindowIDs, windowColumns, resizeHoriz
+	origSnap := snapshot
 	origHints, origRemove, origTitle := adoptHints, removeAdoptHint, setWindowTitle
 	launchWindow = f.launch
 	closeWindow = f.close
 	liveWindowIDs = f.liveIDs
+	snapshot = f.snapshot
 	windowColumns = func() (map[int]int, error) { return map[int]int{}, nil }
 	resizeHoriz = func(_, _ int) error { return nil }
 	adoptHints = f.adoptHints
@@ -107,6 +125,7 @@ func installFakeKitty(t *testing.T, f *fakeKitty) {
 	t.Cleanup(func() {
 		launchWindow, closeWindow = origLaunch, origClose
 		liveWindowIDs, windowColumns, resizeHoriz = origLive, origCols, origResize
+		snapshot = origSnap
 		adoptHints, removeAdoptHint, setWindowTitle = origHints, origRemove, origTitle
 	})
 }
@@ -126,6 +145,22 @@ func (m *Manager) trackedWindows() map[int]bool {
 	return out
 }
 
+// TestReconcileAllSingleSnapshot asserts a reconcile pass reads exactly one
+// window snapshot (one `kitten @ ls`) — the merge that folded the blank-pane
+// scan into the reconcile so the poll spawns kitten once, not twice.
+func TestReconcileAllSingleSnapshot(t *testing.T) {
+	f := newFakeKitty()
+	installFakeKitty(t, f)
+	m := NewManager(100)
+
+	if _, _, errs := m.ReconcileAll([]string{"a", "b"}); len(errs) > 0 {
+		t.Fatalf("reconcile errors: %v", errs)
+	}
+	if f.snapshots != 1 {
+		t.Errorf("snapshots per reconcile = %d, want 1", f.snapshots)
+	}
+}
+
 // TestReconcileAllConcurrent reproduces the mass-idle-reap scenario: many
 // ReconcileAll passes run at once (one per reaped session, plus the poll tick),
 // all driving the layout toward zero agents. The transaction lock must serialize
@@ -139,7 +174,7 @@ func TestReconcileAllConcurrent(t *testing.T) {
 	m := NewManager(100) // sidebar window id 100 (not launched via the fake)
 
 	// Seed three live agent columns, as a steady state would have.
-	if _, errs := m.ReconcileAll([]string{"a", "b", "c"}); len(errs) > 0 {
+	if _, _, errs := m.ReconcileAll([]string{"a", "b", "c"}); len(errs) > 0 {
 		t.Fatalf("seed reconcile errors: %v", errs)
 	}
 	if len(m.columns) != maxColumns || len(m.placeholders) != 0 {

@@ -18,6 +18,7 @@ var (
 	launchWindow       = kitty.Launch
 	closeWindow        = kitty.CloseWindow
 	liveWindowIDs      = kitty.LiveWindowIDs
+	snapshot           = kitty.Snapshot
 	windowColumns      = kitty.WindowColumns
 	resizeHoriz     = kitty.ResizeWindowHoriz
 	adoptHints      = idler.ReadAdoptHints
@@ -158,12 +159,20 @@ func (m *Manager) WindowID(session string) (int, bool) {
 // shared layout state. The live window set is fetched in-lock so it is always
 // consistent with the serialized manager state (a stale snapshot would orphan a
 // freshly created placeholder in syncPlaceholders). It reports whether the pane
-// layout changed (so the caller can restore macOS focus) and collects per-window
-// errors; like its constituent steps it is best-effort.
-func (m *Manager) ReconcileAll(active []string) (changed bool, errs []error) {
+// layout changed (so the caller can restore macOS focus), returns the
+// dashboard-tab blank panes read from that same in-lock snapshot (so the caller
+// can adopt user-spawned panes without a second `kitten @ ls` — see
+// kitty.Snapshot), and collects per-window errors; like its constituent steps it
+// is best-effort.
+func (m *Manager) ReconcileAll(active []string) (changed bool, blanks []kitty.BlankPane, errs []error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	live, err := liveWindowIDs()
+	// One snapshot, in-lock, feeds both the live-id prune here and the blank-pane
+	// list returned to the caller — a single kitten invocation per poll instead of
+	// two. Taking it in-lock (not from outside) is what keeps the live set
+	// consistent with the serialized manager state, so syncPlaceholders never
+	// mistakes a placeholder a concurrent pass just created for a user-closed one.
+	live, blanks, err := snapshot(m.sidebarID)
 	if err != nil {
 		live = nil // best-effort: skip the manual-close prune this round
 	}
@@ -192,7 +201,7 @@ func (m *Manager) ReconcileAll(active []string) (changed bool, errs []error) {
 	if changed || cchanged || pchanged {
 		errs = append(errs, m.rebalance()...)
 	}
-	return changed, errs
+	return changed, blanks, errs
 }
 
 // adoptInPlace binds sessions that launched their agent in place to the kitty

@@ -88,15 +88,21 @@ func sessionPrefix(projPath string) string {
 	return tmuxSafe(abbrevHome(projPath))
 }
 
-// AgentCommand returns the command launched for an agent kind. Both agents are
-// launched with --continue so a respawned session (e.g. after idle reap)
-// resumes the most recent conversation in that directory; on a first-ever
-// launch with no prior conversation, --continue starts a fresh session.
+// AgentCommand returns the shell command launched for an agent kind. Both agents
+// are launched with --continue so a respawned session (e.g. after an idle reap)
+// resumes the most recent conversation in that directory. But --continue fails
+// (exits non-zero) when there is no prior conversation to continue — on some
+// agent versions it errors out instead of starting fresh, which would make an
+// idle-launched pane die instantly. So the command falls back to a plain launch
+// when --continue exits non-zero: `<agent> --continue || <agent>`. tmux runs the
+// session command through a shell, so the `||` fallback takes effect there and in
+// the idler's `new-session -A` exec path alike.
 func AgentCommand(kind string) string {
+	bin := "claude"
 	if kind == "opencode" {
-		return "opencode --continue"
+		bin = "opencode"
 	}
-	return "claude --continue"
+	return bin + " --continue || " + bin
 }
 
 // SessionForKind rewrites a claude session name (starting with [kmux][CC], as

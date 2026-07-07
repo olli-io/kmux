@@ -194,10 +194,13 @@ func TestAbbrevExpandHome(t *testing.T) {
 }
 
 func TestAgentCommand(t *testing.T) {
-	if got := AgentCommand("claude"); got != "claude --continue" {
-		t.Errorf("claude cmd = %q, want %q", got, "claude --continue")
+	// --continue resumes a prior conversation; the `|| <agent>` fallback launches
+	// fresh when --continue exits non-zero (no conversation to continue), so an
+	// idle-launched pane never dies on a first launch.
+	if got := AgentCommand("claude"); got != "claude --continue || claude" {
+		t.Errorf("claude cmd = %q, want %q", got, "claude --continue || claude")
 	}
-	if got := AgentCommand("opencode"); got != "opencode --continue" {
-		t.Errorf("opencode cmd = %q, want %q", got, "opencode --continue")
+	if got := AgentCommand("opencode"); got != "opencode --continue || opencode" {
+		t.Errorf("opencode cmd = %q, want %q", got, "opencode --continue || opencode")
 	}
 }

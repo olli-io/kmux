@@ -11,7 +11,7 @@ func TestAdoptInPlace(t *testing.T) {
 	m := NewManager(100)
 
 	// One agent + two idle slots: columns=[[a]], placeholders=[p1,p2].
-	if _, errs := m.ReconcileAll([]string{"a"}); len(errs) != 0 {
+	if _, _, errs := m.ReconcileAll([]string{"a"}); len(errs) != 0 {
 		t.Fatalf("seed reconcile: %v", errs)
 	}
 	if len(m.columns) != 1 || len(m.placeholders) != 2 {
@@ -26,7 +26,7 @@ func TestAdoptInPlace(t *testing.T) {
 	f.targets[p1] = "b"
 	f.mu.Unlock()
 
-	if _, errs := m.ReconcileAll([]string{"a", "b"}); len(errs) != 0 {
+	if _, _, errs := m.ReconcileAll([]string{"a", "b"}); len(errs) != 0 {
 		t.Fatalf("adopt reconcile: %v", errs)
 	}
 
@@ -68,7 +68,7 @@ func TestAdoptInPlaceUntracked(t *testing.T) {
 	m := NewManager(100)
 
 	// Full layout of three agent columns, no placeholders.
-	if _, errs := m.ReconcileAll([]string{"a", "b", "c"}); len(errs) != 0 {
+	if _, _, errs := m.ReconcileAll([]string{"a", "b", "c"}); len(errs) != 0 {
 		t.Fatalf("seed reconcile: %v", errs)
 	}
 	if len(m.columns) != maxColumns || len(m.placeholders) != 0 {
@@ -82,7 +82,7 @@ func TestAdoptInPlaceUntracked(t *testing.T) {
 	f.targets[spare] = "d"
 	f.mu.Unlock()
 
-	if _, errs := m.ReconcileAll([]string{"a", "b", "c", "d"}); len(errs) != 0 {
+	if _, _, errs := m.ReconcileAll([]string{"a", "b", "c", "d"}); len(errs) != 0 {
 		t.Fatalf("adopt reconcile: %v", errs)
 	}
 
@@ -113,7 +113,7 @@ func TestReorgVerticalPaneRestacks(t *testing.T) {
 	m := NewManager(100)
 
 	// A full layout: maxColumns single-pane agent columns.
-	if _, errs := m.ReconcileAll([]string{"a", "b", "c"}); len(errs) != 0 {
+	if _, _, errs := m.ReconcileAll([]string{"a", "b", "c"}); len(errs) != 0 {
 		t.Fatalf("seed reconcile: %v", errs)
 	}
 
@@ -162,7 +162,7 @@ func TestReorgVerticalPaneIgnoresOwnedWindow(t *testing.T) {
 	installFakeKitty(t, f)
 	m := NewManager(100)
 
-	if _, errs := m.ReconcileAll([]string{"a"}); len(errs) != 0 {
+	if _, _, errs := m.ReconcileAll([]string{"a"}); len(errs) != 0 {
 		t.Fatalf("seed reconcile: %v", errs)
 	}
 	owned, ok := m.WindowID("a")

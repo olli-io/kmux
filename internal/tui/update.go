@@ -25,10 +25,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		return m, tea.Batch(pollCmd(), tickCmd())
 
-	case blankTickMsg:
-		// The blank-pane scan runs on its own faster ticker (see blankPaneInterval).
-		return m, tea.Batch(blankPanesCmd(m.mgr.SidebarID()), blankTickCmd())
-
 	case projectTickMsg:
 		// Project scanning runs on its own slow ticker (see projectInterval), decoupled
 		// from the fast session poll. Skip firing a scan while one is still in flight so
@@ -43,6 +39,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinnerMsg:
 		m.spinnerFrame++
+		// Keep the animation running only while a session is actually busy; when
+		// nothing is busy the spinner glyph isn't drawn for any row, so stopping the
+		// ticker avoids a re-render every spinnerInterval for nothing. The next busy
+		// session restarts it from the attentionMsg handler.
+		if !anyBusy(m.attention) {
+			m.spinning = false
+			return m, nil
+		}
 		return m, spinnerCmd()
 
 	case sessionsMsg:
@@ -80,6 +84,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// cmd first so the launched mutation lands on the returned m.
 		m.layoutReady = true
 		cmd := m.dismissLauncherWhenReady()
+		// Adopt user-spawned blank panes off this reconcile's snapshot (the poll's
+		// reconcile carries the dashboard-tab blanks it already read in-lock), so the
+		// blank-pane scan needs no second `kitten @ ls`. Only a scanned reconcile
+		// (the poll) feeds the handler; OpenAndSync/ReattachAndSync don't scan, so
+		// they never seed blankSeeded or convert a pane.
+		if msg.scanned {
+			if blankCmd := m.handleBlankPanes(msg.blanks); blankCmd != nil {
+				cmd = tea.Batch(cmd, blankCmd)
+			}
+		}
 		return m, cmd
 
 	case launcherMinMsg:
@@ -115,14 +129,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, name := range kill {
 			cmds = append(cmds, killSessionCmd(name))
 		}
-		return m, tea.Batch(cmds...)
-
-	case blankPanesMsg:
-		if msg.err != nil {
-			m.lastErr = msg.err.Error()
-			return m, nil
+		// Start the busy spinner on the idle->busy transition. It's not armed in Init
+		// and stops itself once nothing is busy (see the spinnerMsg handler), so this
+		// is the sole place it restarts. The spinning guard prevents arming a second
+		// ticker while one is already live.
+		if !m.spinning && anyBusy(m.attention) {
+			m.spinning = true
+			cmds = append(cmds, spinnerCmd())
 		}
-		return m, m.handleBlankPanes(msg.panes)
+		return m, tea.Batch(cmds...)
 
 	case idleConvertedMsg:
 		if msg.err != nil {
@@ -387,6 +402,17 @@ func (m model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Sessions panel, i.e. a session name rather than a project/worktree node).
 func isSessionLeaf(r *row) bool {
 	return r != nil && r.section == sectionSessions && !r.collapsible
+}
+
+// anyBusy reports whether any session is in the busy (generating) attention
+// state — the condition under which the animated spinner should run.
+func anyBusy(states map[string]status.AttentionState) bool {
+	for _, st := range states {
+		if st == status.AttnBusy {
+			return true
+		}
+	}
+	return false
 }
 
 // actionSession returns the agent session name a focus/open action targets for row

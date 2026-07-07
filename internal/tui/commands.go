@@ -41,13 +41,6 @@ var pollInterval = macCadence(250*time.Millisecond, 500*time.Millisecond)
 // model's scanning guard), so a slow scan can never pile up concurrent copies.
 const projectInterval = 3 * time.Second
 
-// blankPaneInterval is how often kmux scans kitty for user-spawned blank panes to
-// turn into idle launchers (or to restack a manual vertical split). It keeps its
-// own ticker, separate from the session poll, because it is a cheap standalone
-// `kitten @ ls` with no dependency on the session/git work the main poll drives —
-// even though both now run at the same cadence (250ms on Linux, 500ms on macOS).
-var blankPaneInterval = macCadence(250*time.Millisecond, 500*time.Millisecond)
-
 // spinnerInterval is how often the busy-session animation advances a frame.
 // Faster than pollInterval so the spinner reads as smooth motion without
 // re-listing sessions each tick.
@@ -75,7 +68,6 @@ var spinnerFrames = []string{"⠹", "⠼", "⠶", "⠧", "⠏", "⠛"}
 
 // messages
 type tickMsg time.Time
-type blankTickMsg time.Time
 type projectTickMsg time.Time
 type sessionsMsg struct {
 	names []string
@@ -86,7 +78,21 @@ type projectsMsg struct {
 	err      error
 }
 type spinnerMsg struct{}
-type reconciledMsg struct{ errs []error }
+
+// reconciledMsg reports a completed reconcile: any per-window errors, plus the
+// dashboard-tab blank panes read from the same in-lock snapshot the reconcile
+// took (see kitty.Snapshot / ReconcileAll). Carrying the blanks here lets the
+// dashboard adopt user-spawned panes off the reconcile's `kitten @ ls` instead
+// of a second one. scanned distinguishes a poll reconcile (which scanned for
+// blanks — an empty blanks slice then genuinely means "no blank panes") from an
+// OpenAndSync/ReattachAndSync reconcile (which never scans); only a scanned
+// reconcile feeds the blank-pane handler, so a non-scanning one can't prematurely
+// seed blankSeeded with an empty set.
+type reconciledMsg struct {
+	errs    []error
+	blanks  []kitty.BlankPane
+	scanned bool
+}
 
 // launcherCapMsg fires once, launcherCap after launch, as the fallback that
 // dismisses the launch-overlay splash tab if no reconcile ever completes.
@@ -106,15 +112,6 @@ type attentionMsg struct {
 type focusedMsg struct{ err error }
 type savedMsg struct{ err error }
 
-// blankPanesMsg carries the bare interactive shells — panes the user spawned
-// outside kmux — found in the dashboard's tab, each tagged with how it should be
-// adopted (see kitty.BlankPane). The dashboard turns newly appearing ones into
-// idle launchers (see update's handling).
-type blankPanesMsg struct {
-	panes []kitty.BlankPane
-	err   error
-}
-
 // idleConvertedMsg reports the result of handling a blank pane: turning it into an
 // idle slot in place, or restacking a manual vertical split (see convertBlankPaneCmd).
 type idleConvertedMsg struct{ err error }
@@ -128,11 +125,6 @@ type commandErrMsg struct {
 
 func tickCmd() tea.Cmd {
 	return tea.Tick(pollInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
-}
-
-// blankTickCmd schedules the next blank-pane scan on the faster blankPaneInterval.
-func blankTickCmd() tea.Cmd {
-	return tea.Tick(blankPaneInterval, func(t time.Time) tea.Msg { return blankTickMsg(t) })
 }
 
 // projectTickCmd schedules the next project rescan on the slow projectInterval.
@@ -204,18 +196,6 @@ func attentionCmd(sessions []string) tea.Cmd {
 	}
 }
 
-// blankPanesCmd lists kitty windows that are bare interactive shells (panes the
-// user spawned outside kmux), off the UI goroutine. The scan is confined to the
-// dashboard's own tab (sidebarID), so blank shells in kmux's other tabs (lazygit,
-// agent attach, project sessions) are left alone. The dashboard uses the result
-// to convert newly appearing blank panes into idle launchers.
-func blankPanesCmd(sidebarID int) tea.Cmd {
-	return func() tea.Msg {
-		panes, err := kitty.BlankShellWindows(sidebarID)
-		return blankPanesMsg{panes: panes, err: err}
-	}
-}
-
 // convertBlankPaneCmd handles a newly appeared user-spawned blank pane off the UI
 // goroutine. A pane that is its own full-height column is a manual *vertical* split
 // — a fourth column the fixed sidebar+maxColumns layout has no room for — so it is
@@ -275,12 +255,15 @@ func reconcileCmd(mgr *layout.Manager, active []string) tea.Cmd {
 		}
 		// The whole reconcile->compact->sync->rebalance pass runs atomically inside
 		// the Manager, so overlapping reconciles (one per idle-reaped session, plus
-		// the poll tick) serialize instead of racing the layout into extra slots.
-		changed, errs := mgr.ReconcileAll(active)
+		// the poll tick) serialize instead of racing the layout into extra slots. It
+		// also returns the dashboard-tab blank panes from its in-lock snapshot, so
+		// the blank-pane scan rides this reconcile rather than spawning a second
+		// `kitten @ ls`.
+		changed, blanks, errs := mgr.ReconcileAll(active)
 		if changed && prevApp != "" {
 			restoreFrontmostApp(prevApp)
 		}
-		return reconciledMsg{errs: errs}
+		return reconciledMsg{errs: errs, blanks: blanks, scanned: true}
 	}
 }
 

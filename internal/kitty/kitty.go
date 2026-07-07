@@ -319,6 +319,59 @@ func LiveWindowIDs() (map[int]bool, error) {
 	return ids, nil
 }
 
+// Snapshot runs a single `kitten @ ls` and derives from that one call both the
+// flat set of live window ids (across all tabs, for the manual-close prune) and
+// the bare-shell blank panes in the tab holding tabWindowID (the dashboard's own
+// tab). The poll's reconcile needs both every cycle, so folding them into one
+// snapshot spawns `kitten` once per poll instead of twice — the dominant
+// steady-state cost on macOS, where each kitten invocation is a ~30ms cold start.
+//
+// The blank-pane scan is confined to the tab holding tabWindowID (the dashboard's
+// sidebar window): kmux also opens unrelated tabs (lazygit, agent attach, project
+// sessions), and a blank shell in one of those is not the dashboard's to adopt. A
+// tab that doesn't hold tabWindowID yields no blanks (nil). The live-id set spans
+// every tab, since the manual-close prune must see all of kmux's managed windows.
+func Snapshot(tabWindowID int) (live map[int]bool, blanks []BlankPane, err error) {
+	tabs, err := lsTabs()
+	if err != nil {
+		return nil, nil, err
+	}
+	live = map[int]bool{}
+	for _, t := range tabs {
+		holdsTarget := false
+		for _, w := range t {
+			live[w.ID] = true
+			if w.ID == tabWindowID {
+				holdsTarget = true
+			}
+		}
+		if holdsTarget {
+			blanks = blankPanesIn(t)
+		}
+	}
+	return live, blanks, nil
+}
+
+// blankPanesIn returns the bare-shell blank panes among the windows of a single
+// tab, tagged with their StandaloneColumn classification. A bare shell is a pane
+// the user spawned outside kmux (kitty's own new-window keybinding) sitting at a
+// prompt running nothing; kmux's own panes never match (the sidebar runs kmux,
+// agent panes run a tmux client, idle slots run `sh -c <loop>` — a script,
+// excluded by the -c check). The StandaloneColumn flag (no vertical neighbor)
+// lets the caller adopt the pane without a second `ls`.
+func blankPanesIn(windows []lsWindow) []BlankPane {
+	var panes []BlankPane
+	for _, w := range windows {
+		if windowIsBareShell(w) {
+			panes = append(panes, BlankPane{
+				ID:               w.ID,
+				StandaloneColumn: len(w.Neighbors.Top) == 0 && len(w.Neighbors.Bottom) == 0,
+			})
+		}
+	}
+	return panes
+}
+
 // WindowsInTab returns how many windows live in the kitty tab that contains the
 // window with the given id (the id itself included), or 0 if that window isn't
 // found. kmux uses it to gate the idle slot's quit key on there being a spare pane
@@ -355,36 +408,6 @@ type BlankPane struct {
 	StandaloneColumn bool // no Top/Bottom neighbor: it's its own full-height column
 }
 
-// BlankShellWindows returns the windows whose foreground process is a bare
-// interactive shell — a pane sitting at a prompt running nothing, which is what a
-// pane the user spawned outside kmux (via kitty's own new-window keybinding) looks
-// like. It is how the dashboard spots such a blank pane so it can turn it into a
-// kmux idle launcher. kmux's own panes never match: the sidebar runs kmux, agent
-// panes run a tmux client, and idle slots run `sh -c <loop>` (a script, excluded
-// by the -c check) — so only genuinely external blank shells are reported. Each
-// pane carries its StandaloneColumn classification (derived from kitty's reported
-// neighbors) so the caller needs no second `ls` to decide how to adopt it.
-//
-// The scan is confined to the kitty tab that holds tabWindowID (the dashboard's
-// sidebar window): kmux also opens unrelated tabs (lazygit, agent attach, project
-// sessions), and a blank shell sitting in one of those is not the dashboard's to
-// adopt. If no tab holds tabWindowID, nothing is reported.
-func BlankShellWindows(tabWindowID int) ([]BlankPane, error) {
-	windows, err := tabWindows(tabWindowID)
-	if err != nil {
-		return nil, err
-	}
-	var panes []BlankPane
-	for _, w := range windows {
-		if windowIsBareShell(w) {
-			panes = append(panes, BlankPane{
-				ID:               w.ID,
-				StandaloneColumn: len(w.Neighbors.Top) == 0 && len(w.Neighbors.Bottom) == 0,
-			})
-		}
-	}
-	return panes, nil
-}
 
 // windowIsBareShell reports whether every one of a window's foreground processes
 // is a bare interactive shell (and there is at least one). A window running a

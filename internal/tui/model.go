@@ -24,6 +24,7 @@ type model struct {
 	idle          status.IdleTracker               // per-session pane-stability clock for idle-kill
 	cursor        int                              // index into rows()
 	spinnerFrame  int                              // animation frame for busy-session glyphs
+	spinning      bool                             // whether the spinner ticker is currently armed (only while a session is busy)
 	prompt        *agentPrompt                     // non-nil while the agent-picker overlay is open
 	commands      []config.CustomCommand           // user-configurable command keybindings (editor, lazygit, …)
 	cmdErr        *commandError                    // non-nil while a failed-command error float is shown
@@ -199,10 +200,13 @@ func panelName(s section) string {
 func (m model) Init() tea.Cmd {
 	// Kick off an immediate poll and project scan, then tick each on its own
 	// interval — sessions on the fast pollInterval, projects on the slow
-	// projectInterval (see projectTickCmd). The first blank-pane scan seeds the set
-	// of pre-existing shells so only later ones become launchers; blankTickCmd then
-	// re-scans on its own faster ticker.
-	cmds := []tea.Cmd{pollCmd(), projectsCmd(m.scopeDir), blankPanesCmd(m.mgr.SidebarID()), tickCmd(), blankTickCmd(), projectTickCmd(), spinnerCmd()}
+	// projectInterval (see projectTickCmd). The blank-pane scan rides the session
+	// poll's reconcile (which returns the dashboard-tab blanks from its in-lock
+	// snapshot — see reconcileCmd), so the first poll seeds the set of pre-existing
+	// shells and later polls convert new ones; no separate blank ticker is needed.
+	// The spinner ticker is not armed here — it only runs while a session is busy,
+	// started by the first busy attentionMsg (see the attentionMsg handler).
+	cmds := []tea.Cmd{pollCmd(), projectsCmd(m.scopeDir), tickCmd(), projectTickCmd()}
 	// When the dashboard is building behind a launch-overlay splash tab, arm a
 	// fallback cap: if the first reconcile never completes (e.g. the tmux poll
 	// errored and short-circuited before reconcile), the cap timer still dismisses
