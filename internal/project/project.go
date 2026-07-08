@@ -129,6 +129,26 @@ func ScanProjects() ([]Project, error) {
 	return projects, nil
 }
 
+// ScanProjectsAt rescans only the given main-worktree paths (e.g. the projects
+// that currently have a running session) and returns fresh Project values,
+// sorted by name. It is the steady-state refresh: kmux does one full ScanProjects
+// sweep at launch, then rescans only active projects on each tick, so a recurring
+// scan spends git calls on the repos being worked in rather than all of ~/git. A
+// path that no longer resolves to a git repository is skipped (best-effort, like
+// the rest of a scan) rather than failing the batch.
+func ScanProjectsAt(paths []string) []Project {
+	out := make([]Project, 0, len(paths))
+	for _, dir := range paths {
+		p, err := ScanProject(dir)
+		if err != nil {
+			continue
+		}
+		out = append(out, *p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
 // ScanProject builds the Project for the git repository containing dir, together
 // with its linked worktrees. dir may be the main worktree, a linked worktree, or
 // any subdirectory of either: git resolves the whole worktree set regardless,

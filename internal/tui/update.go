@@ -30,10 +30,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// from the fast session poll. Skip firing a scan while one is still in flight so
 		// a scan slower than projectInterval can't stack concurrent copies; always
 		// re-arm the ticker so scanning resumes once the outstanding scan lands.
+		//
+		// The launch sweep (Init) is the only full ~/git scan. Each recurring tick
+		// rescans only the projects with a running session (activeProjectsCmd), so a
+		// steady-state scan spends git calls on the repos being worked in rather than
+		// all of ~/git — and an idle kmux with nothing running spends none. Scoped
+		// mode has a single project, so it keeps doing the full (one-project) scoped
+		// scan.
 		cmd := projectTickCmd()
 		if !m.scanning {
-			m.scanning = true
-			cmd = tea.Batch(cmd, projectsCmd(m.scopeDir))
+			switch {
+			case m.scopeDir != "":
+				m.scanning = true
+				cmd = tea.Batch(cmd, projectsCmd(m.scopeDir))
+			default:
+				if paths := m.activeProjectPaths(); len(paths) > 0 {
+					m.scanning = true
+					cmd = tea.Batch(cmd, activeProjectsCmd(paths))
+				}
+				// Nothing running: skip this tick, leaving m.projects as-is.
+			}
 		}
 		return m, cmd
 
@@ -70,7 +86,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastErr = msg.err.Error()
 			return m, nil
 		}
-		m.projects = msg.projects
+		// A partial refresh (the active-only ticker) carries just the rescanned
+		// projects; patch them into m.projects by path so projects with no running
+		// session keep their last-known status. A full sweep (launch / scoped)
+		// replaces wholesale.
+		if msg.partial {
+			m.projects = mergeProjects(m.projects, msg.projects)
+		} else {
+			m.projects = msg.projects
+		}
 		return m, nil
 
 	case reconciledMsg:

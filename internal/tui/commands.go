@@ -32,17 +32,21 @@ func macCadence(linux, mac time.Duration) time.Duration {
 // pollInterval is how often kmux lists tmux sessions (the main session poll).
 var pollInterval = macCadence(250*time.Millisecond, 500*time.Millisecond)
 
-// projectInterval is how often kmux rescans ~/git for projects and their git
-// status. Far slower than pollInterval: a scan shells out to git many times over
-// (worktree list + status + ahead/behind per worktree — see project.ScanProjects),
-// and each git call is almost pure process-startup cost (~7-10ms, the work itself
-// is negligible), so the CPU scales with the git-process count. dirty/ahead/behind
+// projectInterval is how often kmux refreshes projects' git status. Far slower
+// than pollInterval: a scan shells out to git many times over (worktree list +
+// status + ahead/behind per worktree — see project.ScanProjects), and each git
+// call is almost pure process-startup cost (~7-10ms, the work itself is
+// negligible), so the CPU scales with the git-process count. dirty/ahead/behind
 // barely change second to second, so a 5s cadence keeps the panel fresh while
-// spawning far fewer git processes than the old poll-tied scan. The worktree-list
-// spawns are further skipped when a repo's .git is unchanged (see
-// project.ScanProjects' topology cache). A rescan in flight past this interval is
-// skipped rather than stacked (see the model's scanning guard), so a slow scan can
-// never pile up concurrent copies.
+// spawning far fewer git processes than the old poll-tied scan.
+//
+// Only the launch sweep scans all of ~/git; each recurring tick rescans just the
+// projects with a running session (activeProjectsCmd → project.ScanProjectsAt),
+// so steady-state git-process count scales with the projects being worked in, not
+// the whole tree — and an idle kmux spends none. The worktree-list spawns are
+// further skipped when a repo's .git is unchanged (see the topology cache). A
+// rescan in flight past this interval is skipped rather than stacked (see the
+// model's scanning guard), so a slow scan can never pile up concurrent copies.
 const projectInterval = 5 * time.Second
 
 // spinnerInterval is how often the busy-session animation advances a frame.
@@ -80,6 +84,12 @@ type sessionsMsg struct {
 type projectsMsg struct {
 	projects []project.Project
 	err      error
+	// partial marks a projectsMsg that carries only the rescanned active projects
+	// (from activeProjectsCmd), not a full ~/git sweep. The model merges a partial
+	// update into m.projects by path instead of replacing it, so projects with no
+	// running session keep their last-known status. The launch sweep and scoped
+	// scan leave this false, so they replace wholesale.
+	partial bool
 }
 type spinnerMsg struct{}
 
@@ -234,6 +244,17 @@ func projectsCmd(scopeDir string) tea.Cmd {
 		}
 		projects, err := project.ScanProjects()
 		return projectsMsg{projects: projects, err: err}
+	}
+}
+
+// activeProjectsCmd rescans only the projects with a running session (paths) off
+// the UI goroutine, returning a partial projectsMsg the model merges into
+// m.projects. This is the steady-state refresh: after the launch sweep, each
+// project tick spends git calls only on active projects rather than sweeping all
+// of ~/git (see project.ScanProjectsAt).
+func activeProjectsCmd(paths []string) tea.Cmd {
+	return func() tea.Msg {
+		return projectsMsg{projects: project.ScanProjectsAt(paths), partial: true}
 	}
 }
 

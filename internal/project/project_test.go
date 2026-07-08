@@ -178,6 +178,49 @@ func TestListWorktreesCacheInvalidation(t *testing.T) {
 	_ = branch
 }
 
+func TestScanProjectsAt(t *testing.T) {
+	resetTopoCache()
+	// Two independent repos under a temp root; ScanProjectsAt should return a fresh
+	// Project for each valid path (sorted by name) and skip a non-repo path.
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mkRepo := func(name string) string {
+		dir := filepath.Join(root, name)
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		runGit(t, dir, "init")
+		runGit(t, dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "init")
+		return dir
+	}
+	beta := mkRepo("beta")
+	alpha := mkRepo("alpha")
+	notRepo := filepath.Join(root, "not-a-repo")
+	if err := os.Mkdir(notRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ScanProjectsAt([]string{beta, alpha, notRepo})
+	if len(got) != 2 {
+		t.Fatalf("ScanProjectsAt returned %d projects, want 2 (non-repo skipped): %+v", len(got), got)
+	}
+	// Sorted by name: alpha before beta.
+	if got[0].Name != "alpha" || got[0].Path != alpha {
+		t.Errorf("got[0] = {Name:%q Path:%q}, want alpha at %q", got[0].Name, got[0].Path, alpha)
+	}
+	if got[1].Name != "beta" || got[1].Path != beta {
+		t.Errorf("got[1] = {Name:%q Path:%q}, want beta at %q", got[1].Name, got[1].Path, beta)
+	}
+}
+
+func TestScanProjectsAtEmpty(t *testing.T) {
+	if got := ScanProjectsAt(nil); len(got) != 0 {
+		t.Fatalf("ScanProjectsAt(nil) = %+v, want empty", got)
+	}
+}
+
 // runGit runs a git command in dir, failing the test on error.
 func runGit(t *testing.T, dir string, args ...string) {
 	t.Helper()

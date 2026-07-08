@@ -198,9 +198,11 @@ func panelName(s section) string {
 }
 
 func (m model) Init() tea.Cmd {
-	// Kick off an immediate poll and project scan, then tick each on its own
+	// Kick off an immediate poll and a full project scan, then tick each on its own
 	// interval — sessions on the fast pollInterval, projects on the slow
-	// projectInterval (see projectTickCmd). The blank-pane scan rides the session
+	// projectInterval (see projectTickCmd). This projectsCmd is the one full ~/git
+	// sweep; the recurring project ticks rescan only projects with a running session
+	// (see the projectTickMsg handler). The blank-pane scan rides the session
 	// poll's reconcile (which returns the dashboard-tab blanks from its in-lock
 	// snapshot — see reconcileCmd), so the first poll seeds the set of pre-existing
 	// shells and later polls convert new ones; no separate blank ticker is needed.
@@ -227,6 +229,52 @@ func (m model) rows() []row {
 	out := make([]row, 0, len(sess)+len(proj))
 	out = append(out, sess...)
 	out = append(out, proj...)
+	return out
+}
+
+// activeProjectPaths returns the distinct main-worktree paths of projects that
+// currently have a running session — attached or detached, since a detached
+// session still shows ahead/behind glyphs and so wants fresh status. It is the
+// set the steady-state project ticker rescans (activeProjectsCmd) instead of
+// sweeping all of ~/git: a session name is mapped back to its project via
+// agent.MatchProject, the same match used to group sessions under projects.
+// Ungrouped (orphan) sessions match no project and are skipped.
+func (m model) activeProjectPaths() []string {
+	paths := agent.ProjectPaths(m.projects)
+	seen := map[string]bool{}
+	out := make([]string, 0, len(paths))
+	for _, s := range m.sessions {
+		if p, _, ok := agent.MatchProject(s, paths); ok && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// mergeProjects returns existing with each project replaced by its fresh copy
+// from updates (matched by Path), leaving projects absent from updates untouched.
+// It backs the partial project refresh: the active-only ticker rescans just the
+// projects with a running session, and this patches those fresh values in while
+// inactive projects keep their last-known status. Order is preserved (updates
+// carry no new paths — an active project was necessarily present at launch), so
+// the panel doesn't reshuffle on a refresh.
+func mergeProjects(existing, updates []project.Project) []project.Project {
+	if len(updates) == 0 {
+		return existing
+	}
+	byPath := make(map[string]project.Project, len(updates))
+	for _, p := range updates {
+		byPath[p.Path] = p
+	}
+	out := make([]project.Project, len(existing))
+	for i, p := range existing {
+		if fresh, ok := byPath[p.Path]; ok {
+			out[i] = fresh
+		} else {
+			out[i] = p
+		}
+	}
 	return out
 }
 

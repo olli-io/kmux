@@ -28,8 +28,8 @@ var splashWordmark = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("1
 // splashGlyphW columns wide with splashThick-thick strokes, then composited
 // left-to-right (with gaps) and rendered into Unicode braille cells — each cell
 // packs a 2×4 block of pixels. The animation reveals the bitmap one pixel column
-// (half a braille cell) at a time from left to right, then loops. This is a direct
-// port of the kmux braille dot-matrix animation.
+// (half a braille cell) at a time from left to right, then holds the finished
+// wordmark. This is a direct port of the kmux braille dot-matrix animation.
 const (
 	splashRows   = 16 // pixel rows of the glyph grid
 	splashGlyphW = 8  // pixel columns per glyph
@@ -194,18 +194,15 @@ func renderSplash(reveal int) string {
 
 // splashSweepDuration is how long the full left-to-right wipe takes;
 // splashRevealInterval advances it one pixel column per tick to hit that total.
-// splashLoopPause holds the fully-drawn wordmark before the animation restarts.
-const (
-	splashSweepDuration = 400 * time.Millisecond
-	splashLoopPause     = 1000 * time.Millisecond
-)
+// The wipe runs once and then holds the fully-drawn wordmark.
+const splashSweepDuration = 400 * time.Millisecond
 
 var splashRevealInterval = splashSweepDuration / time.Duration(splashWidth)
 
 type splashTickMsg struct{}
 
 type splashModel struct {
-	reveal        int // pixel columns exposed so far (splashWidth+1 == held full frame)
+	reveal        int // pixel columns exposed so far (splashWidth == held full frame)
 	width, height int
 }
 
@@ -226,16 +223,12 @@ func (m splashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case splashTickMsg:
-		if m.reveal > splashWidth {
-			// The full wordmark was held through the pause; restart the wipe.
-			m.reveal = 1
-			return m, splashTick(splashRevealInterval)
+		if m.reveal >= splashWidth {
+			// Fully drawn: stop ticking and hold the final frame. The dashboard
+			// closes this tab once its layout has settled (see runSplash).
+			return m, nil
 		}
 		m.reveal++
-		if m.reveal > splashWidth {
-			// Fully drawn: hold this frame for the loop pause, then restart above.
-			return m, splashTick(splashLoopPause)
-		}
 		return m, splashTick(splashRevealInterval)
 	}
 	return m, nil
