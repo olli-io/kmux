@@ -37,6 +37,33 @@ func TestParseCapturePanesCountMismatch(t *testing.T) {
 	}
 }
 
+func TestParseSessionList(t *testing.T) {
+	// Agent sessions are kept (with their dir) and sorted by name; non-agent
+	// sessions and lines missing the tab separator are dropped.
+	out := "[kmux][OC]~/git/b\t/home/u/git/b\n" +
+		"scratch\t/tmp\n" +
+		"[kmux][CC]~/git/a\t/home/u/git/a\n" +
+		"[kmux][CC]~/git/c-no-tab\n"
+	got := parseSessionList(out)
+	want := []AgentSession{
+		{Name: "[kmux][CC]~/git/a", Dir: "/home/u/git/a"},
+		{Name: "[kmux][OC]~/git/b", Dir: "/home/u/git/b"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
+func TestParseSessionListEmptyDir(t *testing.T) {
+	// tmux may report an empty session_path; the trailing tab still parses, leaving
+	// an empty Dir (the caller treats that as "present", never orphaned).
+	got := parseSessionList("[kmux][CC]~/git/a\t\n")
+	want := []AgentSession{{Name: "[kmux][CC]~/git/a", Dir: ""}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
 func TestAgentSessionRegex(t *testing.T) {
 	match := []string{"[kmux][CC]~/git/a", "[kmux][OC]~/git/a@b", "[kmux][cc]/x/y/z"}
 	noMatch := []string{"scratch", "CC", "kmux[CC]~/git/a", "~/git/a[kmux][CC]", "oc_thing"}

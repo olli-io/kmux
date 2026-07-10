@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,6 +33,13 @@ func macCadence(linux, mac time.Duration) time.Duration {
 
 // pollInterval is how often kmux lists tmux sessions (the main session poll).
 var pollInterval = macCadence(250*time.Millisecond, 500*time.Millisecond)
+
+// orphanConfirmPolls is how many consecutive polls a session's anchor directory
+// must be found missing before kmux kills it (see model.trackOrphans). Requiring
+// more than one poll keeps a single transient stat miss — a briefly unavailable
+// mount, a directory swapped out and back during a checkout — from reaping a live
+// agent, while still pruning a genuinely deleted repo within a couple of ticks.
+const orphanConfirmPolls = 2
 
 // projectInterval is how often kmux refreshes projects' git status. Far slower
 // than pollInterval: a scan shells out to git many times over (worktree list +
@@ -79,7 +88,12 @@ type tickMsg time.Time
 type projectTickMsg time.Time
 type sessionsMsg struct {
 	names []string
-	err   error
+	// orphaned lists the sessions whose anchor directory no longer exists — a
+	// freshly deleted repo or removed worktree. The model confirms these across a
+	// few polls before killing them (see model.trackOrphans). It is nil on a poll
+	// that couldn't compute it (e.g. the post-kill re-list only needs names).
+	orphaned []string
+	err      error
 }
 type projectsMsg struct {
 	projects []project.Project
@@ -166,9 +180,46 @@ func launcherMinCmd() tea.Cmd {
 // pollCmd lists agent sessions off the UI goroutine.
 func pollCmd() tea.Cmd {
 	return func() tea.Msg {
-		names, err := tmux.ListAgentSessions()
-		return sessionsMsg{names: names, err: err}
+		return pollSessions()
 	}
+}
+
+// pollSessions lists the live agent sessions with their anchor directories and
+// flags those whose directory has vanished (a deleted repo or removed worktree)
+// as orphaned. It is shared by the poll tick and the post-kill re-list so both
+// carry a consistent orphan set. A tmux error is returned verbatim so the caller
+// surfaces it and leaves the session list untouched.
+func pollSessions() tea.Msg {
+	sessions, err := tmux.ListAgentSessionsFull()
+	if err != nil {
+		return sessionsMsg{err: err}
+	}
+	names := make([]string, len(sessions))
+	var orphaned []string
+	for i, s := range sessions {
+		names[i] = s.Name
+		// Only a session bound to a repo/worktree can be *freshly* orphaned by that
+		// directory being deleted. A deliberately-orphaned session (launched outside
+		// any git repo, carrying the orphan mark) is left alone — it was never bound
+		// to a project, so its directory going away isn't a repo/worktree removal.
+		if !agent.IsOrphan(s.Name) && isMissingDir(s.Dir) {
+			orphaned = append(orphaned, s.Name)
+		}
+	}
+	return sessionsMsg{names: names, orphaned: orphaned}
+}
+
+// isMissingDir reports whether dir is a non-empty path that definitively does not
+// exist. Only a not-exist error counts: an empty path (tmux reported none) or any
+// other stat error — a permission or transient I/O hiccup, a briefly unavailable
+// mount — reads as present, so a session is flagged orphaned only when its
+// directory is genuinely gone.
+func isMissingDir(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(dir)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // attentionCmd captures every session's tmux pane off the UI goroutine and
@@ -332,8 +383,7 @@ func killSessionCmd(name string) tea.Cmd {
 		if err := tmux.KillSession(name); err != nil {
 			return sessionsMsg{err: err}
 		}
-		names, err := tmux.ListAgentSessions()
-		return sessionsMsg{names: names, err: err}
+		return pollSessions()
 	}
 }
 

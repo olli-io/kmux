@@ -13,11 +13,43 @@ import (
 // [kmux][CC] (claude) or [kmux][OC] (opencode), case-insensitively.
 var agentSession = regexp.MustCompile(`(?i)^\[kmux\]\[(cc|oc)\]`)
 
+// AgentSession is a live kmux agent session together with its anchor directory.
+// Dir is the session's tmux session_path — the `-c` directory it was created in,
+// which (unlike a pane's current path) does not drift when the agent or a shell
+// cds elsewhere. An empty Dir means tmux reported none.
+type AgentSession struct {
+	Name string
+	Dir  string
+}
+
+// sessionListFmt is the tmux -F format ListAgentSessionsFull requests: the
+// session name and its anchor directory, tab-separated. Neither field contains a
+// tab, so a single Cut splits them cleanly.
+const sessionListFmt = "#{session_name}\t#{session_path}"
+
 // ListAgentSessions returns the sorted names of live tmux sessions whose names
 // begin with [kmux][CC] or [kmux][OC]. A missing tmux server (no sessions) yields
 // an empty slice, not an error.
 func ListAgentSessions() ([]string, error) {
-	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	full, err := ListAgentSessionsFull()
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(full))
+	for i, s := range full {
+		names[i] = s.Name
+	}
+	return names, nil
+}
+
+// ListAgentSessionsFull returns the live kmux agent sessions (names beginning
+// with [kmux][CC] or [kmux][OC]), sorted by name, each with its anchor directory
+// (see AgentSession). It is ListAgentSessions plus the per-session directory, in
+// the same single tmux call, so the poll can tell which sessions have been
+// orphaned by a deleted repo or removed worktree without a second round-trip. A
+// missing tmux server (no sessions) yields an empty slice, not an error.
+func ListAgentSessionsFull() ([]AgentSession, error) {
+	out, err := exec.Command("tmux", "list-sessions", "-F", sessionListFmt).Output()
 	if err != nil {
 		// `tmux ls` exits non-zero when no server is running: treat as empty.
 		if _, ok := err.(*exec.ExitError); ok {
@@ -25,16 +57,27 @@ func ListAgentSessions() ([]string, error) {
 		}
 		return nil, err
 	}
+	return parseSessionList(string(out)), nil
+}
 
-	var names []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		name := strings.TrimSpace(line)
+// parseSessionList parses `tmux list-sessions -F sessionListFmt` output into the
+// sorted kmux agent sessions. Each line is "<name>\t<dir>"; non-agent sessions
+// (names not matching agentSession) and blank lines are dropped. A line missing
+// the tab separator is skipped rather than misread as a name with no directory.
+func parseSessionList(out string) []AgentSession {
+	var sessions []AgentSession
+	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
+		name, dir, ok := strings.Cut(line, "\t")
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
 		if name != "" && agentSession.MatchString(name) {
-			names = append(names, name)
+			sessions = append(sessions, AgentSession{Name: name, Dir: dir})
 		}
 	}
-	sort.Strings(names)
-	return names, nil
+	sort.Slice(sessions, func(i, j int) bool { return sessions[i].Name < sessions[j].Name })
+	return sessions
 }
 
 // CurrentSession returns the name and active-pane working directory of the tmux

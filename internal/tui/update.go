@@ -78,6 +78,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if pruned {
 			cmd = tea.Batch(cmd, m.saveStateCmd())
 		}
+		// Kill sessions whose repo/worktree has been deleted, once confirmed missing
+		// across enough polls. killSessionCmd re-lists, so the panel and panes update.
+		for _, name := range m.trackOrphans(msg.orphaned) {
+			cmd = tea.Batch(cmd, killSessionCmd(name))
+		}
 		return m, cmd
 
 	case projectsMsg:

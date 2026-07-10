@@ -39,6 +39,13 @@ type model struct {
 	idledPanes  map[int]bool
 	blankSeeded bool
 
+	// orphanStrikes counts, per session name, consecutive polls its anchor
+	// directory has been found missing (its repo deleted or worktree removed). A
+	// session is killed once it reaches orphanConfirmPolls; one whose directory
+	// reappears, or that leaves the session list, is dropped so its count restarts
+	// (see trackOrphans).
+	orphanStrikes map[string]int
+
 	// scanning is set while a project rescan (projectsCmd) is in flight and cleared
 	// when its projectsMsg lands. The project ticker skips a tick while it's set, so
 	// a scan that outruns projectInterval can't stack concurrent copies — the pileup
@@ -125,19 +132,20 @@ func NewModel(mgr *layout.Manager, scopeDir string, launcherID int) tea.Model {
 	keys := cfg.Keybindings
 	reserved := reservedKeys(keys)
 	return model{
-		mgr:        mgr,
-		collapsed:  map[string]bool{},
-		idledPanes: map[int]bool{},
-		detached:   detached,
-		attention:  map[string]status.AttentionState{},
-		idle:       status.NewIdleTrackerFrom(cfg.IdleDuration(), idle),
-		commands:   effectiveCommands(cfg.CustomCommands, reserved),
-		keys:       keys,
-		keyAction:  keyActionMap(keys),
-		conflicts:  cfg.KeybindingConflicts(),
-		scopeDir:   scopeDir,
-		scopeName:  scopeName,
-		launcherID: launcherID,
+		mgr:           mgr,
+		collapsed:     map[string]bool{},
+		idledPanes:    map[int]bool{},
+		orphanStrikes: map[string]int{},
+		detached:      detached,
+		attention:     map[string]status.AttentionState{},
+		idle:          status.NewIdleTrackerFrom(cfg.IdleDuration(), idle),
+		commands:      effectiveCommands(cfg.CustomCommands, reserved),
+		keys:          keys,
+		keyAction:     keyActionMap(keys),
+		conflicts:     cfg.KeybindingConflicts(),
+		scopeDir:      scopeDir,
+		scopeName:     scopeName,
+		launcherID:    launcherID,
 	}
 }
 
@@ -333,6 +341,43 @@ func (m *model) pruneDetached() (changed bool) {
 // hasSession reports whether an agent session with the given name is running.
 func (m model) hasSession(name string) bool {
 	return slices.Contains(m.sessions, name)
+}
+
+// trackOrphans advances the freshly-orphaned confirmation counters from a poll's
+// set of sessions whose anchor directory is missing (their repo deleted or
+// worktree removed), returning the sessions that have now been missing for
+// orphanConfirmPolls consecutive polls and should be killed. A tracked session
+// whose directory reappears, or that has left the session list (killed, or gone
+// on its own), is dropped so its count restarts from zero — so a single transient
+// stat miss never reaps a live agent, and a reused name starts fresh. Only
+// sessions kmux currently manages (m.sessions, already scope-filtered) are
+// considered, so a scoped dashboard never reaps another project's session. The
+// orphaned set already excludes deliberately-orphaned sessions (see pollSessions).
+func (m *model) trackOrphans(orphaned []string) []string {
+	missing := make(map[string]bool, len(orphaned))
+	for _, s := range orphaned {
+		missing[s] = true
+	}
+	var kill []string
+	for _, s := range m.sessions {
+		if !missing[s] {
+			delete(m.orphanStrikes, s)
+			continue
+		}
+		m.orphanStrikes[s]++
+		if m.orphanStrikes[s] >= orphanConfirmPolls {
+			delete(m.orphanStrikes, s)
+			kill = append(kill, s)
+		}
+	}
+	// Drop counters for sessions no longer listed (e.g. an agent that exited on its
+	// own between polls) so the map can't leak stale entries.
+	for s := range m.orphanStrikes {
+		if !slices.Contains(m.sessions, s) {
+			delete(m.orphanStrikes, s)
+		}
+	}
+	return kill
 }
 
 // projectLive reports a project/worktree's aggregate live state for row coloring,
