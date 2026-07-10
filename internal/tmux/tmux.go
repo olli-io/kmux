@@ -9,27 +9,24 @@ import (
 	"strings"
 )
 
-// agentSession matches tmux session names beginning with the kmux agent prefix
-// [kmux][CC] (claude) or [kmux][OC] (opencode), case-insensitively.
+// agentSession matches the kmux agent prefix [kmux][CC] (claude) or [kmux][OC]
+// (opencode), case-insensitively.
 var agentSession = regexp.MustCompile(`(?i)^\[kmux\]\[(cc|oc)\]`)
 
-// AgentSession is a live kmux agent session together with its anchor directory.
-// Dir is the session's tmux session_path — the `-c` directory it was created in,
-// which (unlike a pane's current path) does not drift when the agent or a shell
-// cds elsewhere. An empty Dir means tmux reported none.
+// AgentSession is a live agent session with its anchor directory. Dir is the tmux
+// session_path (the `-c` dir), which unlike a pane's path doesn't drift when a shell
+// cds elsewhere; empty means tmux reported none.
 type AgentSession struct {
 	Name string
 	Dir  string
 }
 
-// sessionListFmt is the tmux -F format ListAgentSessionsFull requests: the
-// session name and its anchor directory, tab-separated. Neither field contains a
-// tab, so a single Cut splits them cleanly.
+// sessionListFmt requests the session name and anchor directory, tab-separated.
+// Neither field contains a tab, so a single Cut splits them.
 const sessionListFmt = "#{session_name}\t#{session_path}"
 
-// ListAgentSessions returns the sorted names of live tmux sessions whose names
-// begin with [kmux][CC] or [kmux][OC]. A missing tmux server (no sessions) yields
-// an empty slice, not an error.
+// ListAgentSessions returns just the sorted session names. A missing tmux server
+// yields an empty slice, not an error.
 func ListAgentSessions() ([]string, error) {
 	full, err := ListAgentSessionsFull()
 	if err != nil {
@@ -42,12 +39,9 @@ func ListAgentSessions() ([]string, error) {
 	return names, nil
 }
 
-// ListAgentSessionsFull returns the live kmux agent sessions (names beginning
-// with [kmux][CC] or [kmux][OC]), sorted by name, each with its anchor directory
-// (see AgentSession). It is ListAgentSessions plus the per-session directory, in
-// the same single tmux call, so the poll can tell which sessions have been
-// orphaned by a deleted repo or removed worktree without a second round-trip. A
-// missing tmux server (no sessions) yields an empty slice, not an error.
+// ListAgentSessionsFull returns the agent sessions sorted by name, each with its
+// anchor directory, in one tmux call so the poll can spot orphaned sessions without
+// a second round-trip. A missing tmux server yields an empty slice, not an error.
 func ListAgentSessionsFull() ([]AgentSession, error) {
 	out, err := exec.Command("tmux", "list-sessions", "-F", sessionListFmt).Output()
 	if err != nil {
@@ -60,10 +54,9 @@ func ListAgentSessionsFull() ([]AgentSession, error) {
 	return parseSessionList(string(out)), nil
 }
 
-// parseSessionList parses `tmux list-sessions -F sessionListFmt` output into the
-// sorted kmux agent sessions. Each line is "<name>\t<dir>"; non-agent sessions
-// (names not matching agentSession) and blank lines are dropped. A line missing
-// the tab separator is skipped rather than misread as a name with no directory.
+// parseSessionList parses the -F output into sorted agent sessions. Non-agent and
+// blank lines are dropped; a line missing the tab separator is skipped rather than
+// misread as a name with no directory.
 func parseSessionList(out string) []AgentSession {
 	var sessions []AgentSession
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
@@ -80,12 +73,9 @@ func parseSessionList(out string) []AgentSession {
 	return sessions
 }
 
-// CurrentSession returns the name and active-pane working directory of the tmux
-// session the caller is running inside, via `tmux display-message`. It is meant
-// for code invoked from within a session (e.g. a script bound to a tmux
-// keybinding), where #S and #{pane_current_path} resolve against the pane that
-// triggered it. It errors when not run inside tmux ($TMUX unset), the intended
-// guard for context that only makes sense within a session.
+// CurrentSession returns the name and active-pane directory of the tmux session the
+// caller runs inside, for code invoked from within a session (e.g. a tmux keybinding).
+// It errors when not run inside tmux ($TMUX unset).
 func CurrentSession() (name, paneDir string, err error) {
 	if os.Getenv("TMUX") == "" {
 		return "", "", fmt.Errorf("not inside a tmux session ($TMUX unset)")
@@ -102,10 +92,9 @@ func CurrentSession() (name, paneDir string, err error) {
 	return name, paneDir, nil
 }
 
-// CapturePane returns the visible pane text of a session's active pane (the live
-// screen, no scrollback). A missing session or dead tmux server yields empty text,
-// not an error, mirroring ListAgentSessions so attention polling never fails the
-// whole cycle over one gone session.
+// CapturePane returns the visible pane text of a session's active pane (no
+// scrollback). A missing session or dead server yields empty text, not an error, so
+// attention polling never fails the whole cycle over one gone session.
 func CapturePane(session string) (string, error) {
 	out, err := exec.Command("tmux", "capture-pane", "-t", session, "-p").Output()
 	if err != nil {
@@ -117,30 +106,22 @@ func CapturePane(session string) (string, error) {
 	return string(out), nil
 }
 
-// captureSentinel delimits the per-session sections of a batched CapturePanes
-// call. Its ASCII record-separator bytes (0x1e) never appear in visible pane
-// text, so a section boundary can't collide with captured screen content.
+// captureSentinel delimits the per-session sections of a batched CapturePanes call.
+// Its record-separator bytes never appear in visible pane text, so a boundary can't
+// collide with captured content.
 const captureSentinel = "\x1e\x1eKMUXCAP\x1e\x1e"
 
-// CapturePanes captures the visible pane text of many sessions in a single tmux
-// invocation, returning a map from session name to text. It chains one
-// capture-pane per session, each preceded by a sentinel line, so the N per-poll
-// capture spawns collapse to one process.
-//
-// Chained tmux commands abort at the first error, so a session that died since it
-// was listed aborts the rest of the chain; CapturePanes then returns an error (a
-// non-zero tmux exit, or a section count that no longer matches the input) rather
-// than a partial map, and the caller falls back to capturing each session on its
-// own. An empty session list yields an empty map and no tmux call.
+// CapturePanes captures many sessions' panes in a single tmux invocation, mapping
+// name to text, so the N per-poll spawns collapse to one. Chained tmux commands
+// abort at the first error, so a session that died since it was listed returns an
+// error (not a partial map) and the caller falls back to per-session capture.
 func CapturePanes(sessions []string) (map[string]string, error) {
 	if len(sessions) == 0 {
 		return map[string]string{}, nil
 	}
-	// Build: display-message -p -t s <sentinel> ; capture-pane -t s -p ; ... — the
-	// sentinel precedes each capture so stdout splits into ordered sections. The
-	// bare ";" args are tmux command separators (no shell is involved). Targeting
-	// display-message at the session avoids needing an attached client, since kmux
-	// runs outside tmux ($TMUX unset).
+	// The sentinel precedes each capture so stdout splits into ordered sections. The
+	// bare ";" args are tmux command separators (no shell). Targeting display-message
+	// at the session avoids needing an attached client, since kmux runs outside tmux.
 	args := make([]string, 0, len(sessions)*8)
 	for i, s := range sessions {
 		if i > 0 {
@@ -156,11 +137,9 @@ func CapturePanes(sessions []string) (map[string]string, error) {
 	return parseCapturePanes(string(out), sessions)
 }
 
-// parseCapturePanes splits batched capture output into per-session text. stdout is
-// <sentinel>\n<pane>\n<sentinel>\n<pane>… ; splitting on the sentinel line yields
-// an empty leading section then one section per session, in order. A count that no
-// longer matches the input (a truncated/aborted chain, or the sentinel appearing
-// in captured text) is an error so the caller falls back to per-session capture.
+// parseCapturePanes splits batched output on the sentinel line into per-session
+// text. A count that no longer matches the input (a truncated chain, or the sentinel
+// appearing in captured text) is an error so the caller falls back to per-session.
 func parseCapturePanes(out string, sessions []string) (map[string]string, error) {
 	parts := strings.Split(out, captureSentinel+"\n")
 	if len(parts) != len(sessions)+1 {
@@ -173,9 +152,8 @@ func parseCapturePanes(out string, sessions []string) (map[string]string, error)
 	return texts, nil
 }
 
-// KillSession kills the tmux session named `name` outright, ending the agent
-// process running in it. A missing session is treated as success (it is already
-// gone). The next poll drops it from the list and reconcile closes its pane.
+// KillSession kills the named tmux session outright. A missing session is treated
+// as success (already gone).
 func KillSession(name string) error {
 	cmd := exec.Command("tmux", "kill-session", "-t", name)
 	out, err := cmd.CombinedOutput()
@@ -188,10 +166,8 @@ func KillSession(name string) error {
 	return nil
 }
 
-// NewDetachedSession creates a detached tmux session named `name` whose first
-// window runs `agentCmd` (e.g. "claude" or "opencode") in dir. If the session
-// already exists, tmux reports a duplicate and we treat it as success so the
-// caller can attach to it.
+// NewDetachedSession creates a detached session running agentCmd in dir. A
+// duplicate (session already exists) is treated as success so the caller can attach.
 func NewDetachedSession(name, dir, agentCmd string) error {
 	cmd := exec.Command("tmux", "new-session", "-d", "-s", name, "-c", dir, agentCmd)
 	out, err := cmd.CombinedOutput()
