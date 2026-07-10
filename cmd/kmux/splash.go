@@ -8,28 +8,20 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// runSplash renders the launch-overlay animation until the process is killed.
-// It backs the internal `kmux --splash` mode the dashboard spawns in its own
-// kitty tab (see kitty.OpenLauncherTab): the splash covers the screen while the
-// dashboard builds its panes in the background tab, hiding the first reconcile's
-// pane churn, and the dashboard closes this tab once its layout has settled — so
-// the splash has no exit logic of its own, it just animates until then. Run
-// standalone (for a look), q or ctrl+c quits it.
+// runSplash animates the launch overlay until the process is killed. It has no
+// exit logic of its own: the dashboard closes this tab once its layout settles.
+// Run standalone, q or ctrl+c quits it.
 func runSplash() error {
 	_, err := tea.NewProgram(splashModel{}, tea.WithAltScreen()).Run()
 	return err
 }
 
-// splashWordmark styles the braille "[kmux]" matrix (bold blue, matching the
-// dashboard's folder/claude accent).
+// splashWordmark is bold blue to match the dashboard's folder/claude accent.
 var splashWordmark = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("12"))
 
-// The wordmark "[kmux]" is drawn on a pixel grid splashRows tall, each glyph
-// splashGlyphW columns wide with splashThick-thick strokes, then composited
-// left-to-right (with gaps) and rendered into Unicode braille cells — each cell
-// packs a 2×4 block of pixels. The animation reveals the bitmap one pixel column
-// (half a braille cell) at a time from left to right, then holds the finished
-// wordmark. This is a direct port of the kmux braille dot-matrix animation.
+// "[kmux]" is drawn on a pixel grid, composited left-to-right with gaps, then
+// rendered into Unicode braille cells (each packs a 2×4 pixel block). The reveal
+// wipes the bitmap one pixel column at a time, then holds the finished wordmark.
 const (
 	splashRows   = 16 // pixel rows of the glyph grid
 	splashGlyphW = 8  // pixel columns per glyph
@@ -81,8 +73,7 @@ func (g pixGrid) hline(y, x0, x1 int) {
 	}
 }
 
-// diag draws a thick line from (x0,y0) to (x1,y1) via Bresenham, stamping a block
-// at each step.
+// diag draws a thick line from (x0,y0) to (x1,y1) via Bresenham.
 func (g pixGrid) diag(x0, y0, x1, y1 int) {
 	dx, dy := splashAbs(x1-x0), splashAbs(y1-y0)
 	sx, sy := 1, 1
@@ -126,13 +117,11 @@ func glyphM() pixGrid        { g := newGrid(); g.hline(4, 0, 7); g.vline(0, 4, 1
 func glyphU() pixGrid        { g := newGrid(); g.vline(0, 4, 15); g.vline(6, 4, 15); g.hline(14, 0, 7); return g }
 func glyphX() pixGrid        { g := newGrid(); g.diag(0, 4, 6, 15); g.diag(6, 4, 0, 15); return g }
 
-// splashGaps is the extra pixel spacing after each glyph (the closing bracket, the
-// last entry, takes no trailing gap). Brackets sit flush against k/x; the inner
-// letters breathe. len == len(seq)-1 in buildSplashBitmap.
+// splashGaps is the extra pixel spacing after each glyph; brackets sit flush
+// against k/x while the inner letters breathe. len == len(seq)-1.
 var splashGaps = []int{0, 2, 2, 2, 0}
 
-// splashBitmap is the full composited "[kmux]" pixel bitmap and splashWidth its
-// pixel width; both are built once at startup.
+// splashBitmap and its pixel width splashWidth are built once at startup.
 var splashBitmap, splashWidth = buildSplashBitmap()
 
 func buildSplashBitmap() ([][]bool, int) {
@@ -192,9 +181,8 @@ func renderSplash(reveal int) string {
 	return b.String()
 }
 
-// splashSweepDuration is how long the full left-to-right wipe takes;
-// splashRevealInterval advances it one pixel column per tick to hit that total.
-// The wipe runs once and then holds the fully-drawn wordmark.
+// splashSweepDuration is the full wipe time; splashRevealInterval advances one
+// pixel column per tick to hit that total.
 const splashSweepDuration = 400 * time.Millisecond
 
 var splashRevealInterval = splashSweepDuration / time.Duration(splashWidth)
@@ -224,8 +212,7 @@ func (m splashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case splashTickMsg:
 		if m.reveal >= splashWidth {
-			// Fully drawn: stop ticking and hold the final frame. The dashboard
-			// closes this tab once its layout has settled (see runSplash).
+			// Fully drawn: stop ticking and hold the final frame.
 			return m, nil
 		}
 		m.reveal++
