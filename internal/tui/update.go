@@ -26,17 +26,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(pollCmd(), tickCmd())
 
 	case projectTickMsg:
-		// Project scanning runs on its own slow ticker (see projectInterval), decoupled
-		// from the fast session poll. Skip firing a scan while one is still in flight so
-		// a scan slower than projectInterval can't stack concurrent copies; always
-		// re-arm the ticker so scanning resumes once the outstanding scan lands.
-		//
-		// The launch sweep (Init) is the only full ~/git scan. Each recurring tick
-		// rescans only the projects with a running session (activeProjectsCmd), so a
-		// steady-state scan spends git calls on the repos being worked in rather than
-		// all of ~/git — and an idle kmux with nothing running spends none. Scoped
-		// mode has a single project, so it keeps doing the full (one-project) scoped
-		// scan.
+		// Skip firing a scan while one is still in flight so a slow scan can't stack
+		// concurrent copies; always re-arm the ticker. Recurring ticks rescan only the
+		// active projects; scoped mode rescans its single project.
 		cmd := projectTickCmd()
 		if !m.scanning {
 			switch {
@@ -55,10 +47,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case spinnerMsg:
 		m.spinnerFrame++
-		// Keep the animation running only while a session is actually busy; when
-		// nothing is busy the spinner glyph isn't drawn for any row, so stopping the
-		// ticker avoids a re-render every spinnerInterval for nothing. The next busy
-		// session restarts it from the attentionMsg handler.
+		// Stop the ticker when nothing is busy to avoid a re-render every interval for
+		// nothing; the attentionMsg handler restarts it on the next busy session.
 		if !anyBusy(m.attention) {
 			m.spinning = false
 			return m, nil
@@ -91,10 +81,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.lastErr = msg.err.Error()
 			return m, nil
 		}
-		// A partial refresh (the active-only ticker) carries just the rescanned
-		// projects; patch them into m.projects by path so projects with no running
-		// session keep their last-known status. A full sweep (launch / scoped)
-		// replaces wholesale.
+		// A partial refresh patches the rescanned projects into m.projects by path so
+		// projects with no running session keep their status; a full sweep replaces.
 		if msg.partial {
 			m.projects = mergeProjects(m.projects, msg.projects)
 		} else {
@@ -106,18 +94,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(msg.errs) > 0 {
 			m.lastErr = msg.errs[0].Error()
 		}
-		// The first completed reconcile means the dashboard's panes are built and
-		// sized; mark the layout ready and drop the splash once the minimum hold has
-		// also elapsed (dismissLauncherWhenReady), so it covers the early churn rather
-		// than blinking away. Later reconciles no-op since launched is set. Compute the
-		// cmd first so the launched mutation lands on the returned m.
+		// The first reconcile means the panes are built; mark the layout ready and drop
+		// the splash once the minimum hold has also elapsed. Later reconciles no-op.
 		m.layoutReady = true
 		cmd := m.dismissLauncherWhenReady()
-		// Adopt user-spawned blank panes off this reconcile's snapshot (the poll's
-		// reconcile carries the dashboard-tab blanks it already read in-lock), so the
-		// blank-pane scan needs no second `kitten @ ls`. Only a scanned reconcile
-		// (the poll) feeds the handler; OpenAndSync/ReattachAndSync don't scan, so
-		// they never seed blankSeeded or convert a pane.
+		// Adopt user-spawned blank panes off this reconcile's snapshot. Only a scanned
+		// reconcile (the poll) feeds the handler; the others never seed or convert.
 		if msg.scanned {
 			if blankCmd := m.handleBlankPanes(msg.blanks); blankCmd != nil {
 				cmd = tea.Batch(cmd, blankCmd)
@@ -145,8 +127,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case attentionMsg:
 		m.attention = msg.states // display-only: no reconcile, no pane churn
-		// Reap agent sessions whose pane has sat unchanged past idleTimeout,
-		// freeing the memory their idle agent processes hold.
+		// Reap agent sessions whose pane has sat unchanged past idleTimeout, freeing
+		// the memory their idle agent processes hold.
 		busy := make(map[string]bool, len(msg.states))
 		for s, st := range msg.states {
 			busy[s] = st == status.AttnBusy
@@ -158,10 +140,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, name := range kill {
 			cmds = append(cmds, killSessionCmd(name))
 		}
-		// Start the busy spinner on the idle->busy transition. It's not armed in Init
-		// and stops itself once nothing is busy (see the spinnerMsg handler), so this
-		// is the sole place it restarts. The spinning guard prevents arming a second
-		// ticker while one is already live.
+		// Start the busy spinner on the idle->busy transition; this is the sole place
+		// it restarts. The spinning guard prevents arming a second ticker.
 		if !m.spinning && anyBusy(m.attention) {
 			m.spinning = true
 			cmds = append(cmds, spinnerCmd())
@@ -196,13 +176,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleBlankPanes converts newly appeared blank panes (shells the user spawned
-// outside kmux) into idle launchers. The first call only seeds idledPanes — panes
-// already open when kmux started are recorded and left untouched — so only panes
-// that appear afterwards are converted. Each pane is converted at most once; a
-// converted pane is no longer a bare shell, so it won't be detected again. It
-// returns the batch of conversion commands, or nil when there's nothing to do or
-// the kmux-idler helper isn't installed.
+// handleBlankPanes converts newly appeared blank panes into idle launchers. The
+// first call only seeds idledPanes, so panes already open at startup are left
+// untouched; each pane is converted at most once.
 func (m *model) handleBlankPanes(panes []kitty.BlankPane) tea.Cmd {
 	idlerPath := layout.IdlerPath()
 	if idlerPath == "" {
@@ -225,11 +201,9 @@ func (m *model) handleBlankPanes(panes []kitty.BlankPane) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// dismissLauncher returns the command to tear down the launch-overlay splash
-// tab, or nil when there is nothing to do — no splash was opened (launcherID 0)
-// or it was already dismissed. It is one-shot: the first call with a live splash
-// marks it launched so the reveal happens exactly once, whichever trigger (first
-// reconcile or the cap timer) fires first.
+// dismissLauncher tears down the splash tab, or returns nil when there's no splash
+// or it was already dismissed. One-shot: it marks launched so the reveal happens
+// exactly once, whichever trigger fires first.
 func (m *model) dismissLauncher() tea.Cmd {
 	if m.launcherID == 0 || m.launched {
 		return nil
@@ -239,9 +213,8 @@ func (m *model) dismissLauncher() tea.Cmd {
 }
 
 // dismissLauncherWhenReady tears down the splash only once both gates are met: the
-// layout has settled (first reconcile) and the minimum hold has elapsed. Either
-// trigger calls it; the second one to arrive completes the dismissal, so the splash
-// stays up for at least launcherMin and never blinks away over the early churn.
+// layout has settled and the minimum hold has elapsed. The second trigger to arrive
+// completes the dismissal, so the splash never blinks away over the early churn.
 func (m *model) dismissLauncherWhenReady() tea.Cmd {
 	if !m.layoutReady || !m.minHeld {
 		return nil
@@ -299,11 +272,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.focusPanel(rows, false)
 
 	case config.ActionDetachAgent:
-		// Detach a session leaf: close the agent's kitty pane while leaving the
-		// tmux session running, so the row stays in the panel (now unattached) and
-		// can be re-opened with createOrAttachAgent. Marking it detached keeps
-		// reconcile from immediately re-attaching a pane; the reconcile below closes
-		// the current pane right away.
+		// Detach a session leaf: close its kitty pane but leave the tmux session
+		// running. Marking it detached keeps reconcile from re-attaching; the
+		// reconcile below closes the current pane.
 		if r := rowAt(rows, m.cursor); isSessionLeaf(r) && !m.detached[r.session] {
 			m.detached[r.session] = true
 			return m, tea.Batch(reconcileCmd(m.mgr, m.attachable()), m.saveStateCmd())
@@ -341,9 +312,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case config.ActionFullscreenAgent:
 		// Open the selected agent in its own kitty tab instead of a managed pane.
-		// Works in both panels: a session leaf attaches its session; a project row
-		// launches (or attaches) an agent, opening the picker when the kind is
-		// ambiguous.
+		// Works in both panels: a session leaf attaches; a project row launches.
 		r := rowAt(rows, m.cursor)
 		if cmd := m.openSessionTab(r); cmd != nil {
 			return m, cmd
@@ -373,10 +342,8 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// focusPanel moves the cursor to the start of the previous or next panel, cycling
-// through the panel order. With only two panels prev and next land on the same
-// other panel, but it's written generically over the panel list so a third panel
-// would just work.
+// focusPanel moves the cursor to the start of the previous or next panel. It's
+// written generically over the panel list so a third panel would just work.
 func (m *model) focusPanel(rows []row, next bool) {
 	panels := []section{sectionProjects, sectionSessions}
 	cur := m.focusedSection(rows)
@@ -427,14 +394,12 @@ func (m model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// isSessionLeaf reports whether r is an actionable session row (a leaf in the
-// Sessions panel, i.e. a session name rather than a project/worktree node).
+// isSessionLeaf reports whether r is a session leaf: a session name rather than a
+// project/worktree node.
 func isSessionLeaf(r *row) bool {
 	return r != nil && r.section == sectionSessions && !r.collapsible
 }
 
-// anyBusy reports whether any session is in the busy (generating) attention
-// state — the condition under which the animated spinner should run.
 func anyBusy(states map[string]status.AttentionState) bool {
 	for _, st := range states {
 		if st == status.AttnBusy {
@@ -444,9 +409,8 @@ func anyBusy(states map[string]status.AttentionState) bool {
 	return false
 }
 
-// actionSession returns the agent session name a focus/open action targets for row
-// r: a session leaf carries it in its session field. It returns "" for any other
-// row.
+// actionSession returns the session name a focus/open action targets for row r,
+// or "" for a non-session row.
 func actionSession(r *row) string {
 	if isSessionLeaf(r) {
 		return r.session
@@ -454,9 +418,8 @@ func actionSession(r *row) string {
 	return ""
 }
 
-// openOrFocusSession returns a command to focus the agent pane for a session leaf
-// row, re-opening a pane first when the session is running but currently has none
-// (e.g. its pane was closed by hand). It returns nil when r targets no session.
+// openOrFocusSession focuses a session leaf row's pane, re-opening one first when
+// the session has none. Returns nil when r targets no session.
 func (m *model) openOrFocusSession(r *row) tea.Cmd {
 	name := actionSession(r)
 	if name == "" {
@@ -465,10 +428,8 @@ func (m *model) openOrFocusSession(r *row) tea.Cmd {
 	return m.focusOrReattach(name)
 }
 
-// focusOrReattach focuses a running session's pane, re-opening one first when the
-// session is alive but has no pane (e.g. closed by hand or detached). Either way
-// it clears any detached flag so reconcile keeps the pane, persisting that change
-// when there was one.
+// focusOrReattach focuses a session's pane, re-opening one first when it has none.
+// It clears any detached flag so reconcile keeps the pane, persisting the change.
 func (m *model) focusOrReattach(name string) tea.Cmd {
 	save := m.clearDetached(name)
 	if id, ok := m.mgr.WindowID(name); ok {
@@ -477,9 +438,8 @@ func (m *model) focusOrReattach(name string) tea.Cmd {
 	return tea.Batch(reattachSessionCmd(m.mgr, name), save)
 }
 
-// openSessionTab returns a command to attach a session leaf row's session in its
-// own standalone kitty tab (not a managed pane). The tmux session already
-// exists, so it just attaches. It returns nil when r is not a session leaf.
+// openSessionTab attaches a session leaf row's session in its own kitty tab, not a
+// managed pane. Returns nil when r is not a session leaf.
 func (m *model) openSessionTab(r *row) tea.Cmd {
 	if !isSessionLeaf(r) {
 		return nil
@@ -487,12 +447,9 @@ func (m *model) openSessionTab(r *row) tea.Cmd {
 	return openAgentTabCmd(r.session, "", "")
 }
 
-// launchProjectTab is the standalone-tab counterpart of launchProject: it opens
-// the project/worktree row's agent in its own kitty tab rather than a pane. When
-// exactly one agent kind is running it attaches that one directly; when neither
-// (or both) is running it opens the agent picker in tab mode so the chosen kind
-// launches into a tab. It returns (cmd, true) for rows it handled and
-// (nil, false) for rows it doesn't act on, mirroring launchProject.
+// launchProjectTab is the standalone-tab counterpart of launchProject: it opens the
+// row's agent in a kitty tab rather than a pane. One running kind attaches directly;
+// neither or both opens the picker in tab mode.
 func (m *model) launchProjectTab(r *row) (tea.Cmd, bool) {
 	if r == nil || r.section != sectionProjects || r.session == "" {
 		return nil, false
@@ -519,8 +476,7 @@ func (m *model) launchProjectTab(r *row) (tea.Cmd, bool) {
 }
 
 // launchKindTab is the standalone-tab counterpart of launchKind: it attaches the
-// given agent kind's session in a new kitty tab, creating the tmux session first
-// when it isn't already running.
+// given kind's session in a kitty tab, creating the tmux session first if needed.
 func (m *model) launchKindTab(session, dir, kind string) tea.Cmd {
 	name := agent.SessionForKind(session, kind)
 	if m.hasSession(name) {
@@ -529,13 +485,9 @@ func (m *model) launchKindTab(session, dir, kind string) tea.Cmd {
 	return openAgentTabCmd(name, dir, agent.AgentCommand(kind))
 }
 
-// launchProject activates a project/worktree leaf row. When exactly one agent
-// kind already has a running session it focuses that session directly, skipping
-// the picker — there is nothing to choose. When neither (or both) kinds are
-// running it opens the agent picker. It returns (cmd, true) for rows it handled
-// (cmd is non-nil only for the direct-focus case) and (nil, false) for rows it
-// doesn't act on — folder headers (empty session) and non-project rows — so
-// callers fall through to fold/collapse handling.
+// launchProject activates a project/worktree leaf row: one running kind focuses it
+// directly, neither or both opens the picker. Returns (nil, false) for rows it
+// doesn't act on (folder headers, non-project rows) so callers fall through to fold.
 func (m *model) launchProject(r *row) (tea.Cmd, bool) {
 	if r.section != sectionProjects || r.session == "" {
 		return nil, false
@@ -560,8 +512,7 @@ func (m *model) launchProject(r *row) (tea.Cmd, bool) {
 	return nil, true
 }
 
-// confirmPrompt acts on the agent picker's current selection, launching the
-// chosen agent kind and clearing the picker.
+// confirmPrompt launches the agent picker's selected kind and clears the picker.
 func (m *model) confirmPrompt() tea.Cmd {
 	p := m.prompt
 	m.prompt = nil
@@ -571,9 +522,8 @@ func (m *model) confirmPrompt() tea.Cmd {
 	return m.launchKind(p.session, p.dir, promptOptions[p.cursor].kind)
 }
 
-// launchKind focuses the given agent kind's session if it is already running,
-// otherwise creates and attaches one. session is the row's claude session name
-// (the base for agent.SessionForKind), dir its working directory.
+// launchKind focuses the given kind's session if running, otherwise creates and
+// attaches one. session is the base name for agent.SessionForKind.
 func (m *model) launchKind(session, dir, kind string) tea.Cmd {
 	name := agent.SessionForKind(session, kind)
 	// Opening a session clears any detached flag so reconcile keeps its pane;

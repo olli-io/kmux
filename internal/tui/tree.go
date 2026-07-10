@@ -20,11 +20,8 @@ const (
 // ungrouped holds sessions whose project prefix matches no ~/git project.
 const ungrouped = "(ungrouped)"
 
-// liveState is a project/worktree row's aggregate session state, driving its name
-// color: no running session (default), a running session whose pane the user
-// detached (red, mirroring the Sessions panel's "D"), or a running session with a
-// live pane (green). Ordered by precedence so a numeric max rolls several sessions
-// up to the strongest state.
+// liveState is a row's aggregate session state, driving its name color. Ordered
+// by precedence so a numeric max rolls several sessions up to the strongest state.
 type liveState int
 
 const (
@@ -33,8 +30,6 @@ const (
 	liveAttached
 )
 
-// maxLive returns the higher-precedence of two live states (attached > detached >
-// none), used to roll a folder's worktrees into one header state.
 func maxLive(a, b liveState) liveState {
 	if b > a {
 		return b
@@ -42,9 +37,8 @@ func maxLive(a, b liveState) liveState {
 	return a
 }
 
-// row is one visible line in the dashboard tree. Rows for both panels live in a
-// single flat slice so a single cursor can traverse them; section tells the
-// renderer which panel each belongs to.
+// row is one visible line in the dashboard tree. Both panels' rows share one flat
+// slice so a single cursor traverses them; section says which panel.
 type row struct {
 	section     section
 	depth       int    // indent level
@@ -54,23 +48,21 @@ type row struct {
 	badge       string // pre-styled agent badge with attach state, e.g. ACC/DOC (sessions only)
 	mark        string // pre-styled attention glyph: what the agent is doing (sessions only)
 
-	// Actionable metadata. dir is the directory to operate in (lazygit, new
-	// sessions), set on project-section leaves. session is the agent session name
-	// to focus, create, or kill: the claude session for project-section leaves, the
-	// row's own session for session-section leaves; empty on folder headers.
+	// dir is the directory to operate in, set on project-section leaves. session is
+	// the agent session to focus, create, or kill; empty on folder headers.
 	dir     string
 	session string
 }
 
-// sessionGroup collects the sessions of one project: those on the main worktree,
-// and those keyed by worktree segment.
+// sessionGroup collects one project's sessions: those on the main worktree, and
+// those keyed by worktree segment.
 type sessionGroup struct {
 	main []string
 	wts  map[string][]string
 }
 
 // groupSessions buckets sessions by matched project and worktree segment. names
-// holds the projects' main-worktree paths (the group key is the matched path).
+// holds the projects' main-worktree paths.
 func groupSessions(sessions, names []string) (map[string]*sessionGroup, []string) {
 	groups := map[string]*sessionGroup{}
 	var order []string
@@ -105,9 +97,8 @@ func groupSessions(sessions, names []string) (map[string]*sessionGroup, []string
 	return groups, order
 }
 
-// sessionsOf returns a project group's sessions in display order: main-worktree
-// sessions first, then worktree sessions ordered by worktree segment then session
-// name (no intermediate worktree node).
+// sessionsOf returns a group's sessions in display order: main-worktree first,
+// then worktree sessions by segment then name.
 func sessionsOf(g *sessionGroup) []string {
 	out := append([]string(nil), g.main...)
 	sort.Strings(out)
@@ -125,13 +116,8 @@ func sessionsOf(g *sessionGroup) []string {
 }
 
 // buildSessionRows flattens sessions into project > session rows, mirroring the
-// Projects pane's folder rules: a project with a single session is a bare leaf
-// (no folder header), while a project with several sessions becomes a collapsible
-// folder whose children hang directly off it. Folders sort to the top, single-
-// session leaves after, and the ungrouped bucket sinks to the very end.
-// attention carries each session's latest attention state (drives the leading
-// status glyph). attached reports whether a session has a live pane; detached
-// reports whether the user detached it (tmux alive, pane closed).
+// Projects pane: a single-session project is a bare leaf, several become a
+// collapsible folder. Folders sort first, leaves next, ungrouped last.
 func buildSessionRows(sessions, names []string, collapsed map[string]bool, attention map[string]status.AttentionState, attached, detached func(string) bool, deco rowDeco) []row {
 	groups, order := groupSessions(sessions, names)
 
@@ -163,9 +149,8 @@ func buildSessionRows(sessions, names []string, collapsed map[string]bool, atten
 		}
 	}
 
-	// Split into multi-session folders and single-session leaves, preserving the
-	// alphabetical order within each group; the ungrouped bucket is held back and
-	// emitted last regardless of its size.
+	// Split into folders and leaves, preserving alphabetical order; the ungrouped
+	// bucket is emitted last regardless of size.
 	type grp struct {
 		name string
 		ss   []string
@@ -196,13 +181,11 @@ func buildSessionRows(sessions, names []string, collapsed map[string]bool, atten
 	return rows
 }
 
-// buildProjectRows flattens projects into rows. A project with no linked
-// worktrees is a single actionable leaf. A multi-worktree project becomes a
-// collapsible folder whose expanded children list the main worktree first,
-// then each linked worktree; every child is an actionable leaf.
+// buildProjectRows flattens projects into rows: a project with no linked worktrees
+// is a single leaf; a multi-worktree project is a collapsible folder listing the
+// main worktree first, then each linked worktree.
 func buildProjectRows(projects []project.Project, collapsed map[string]bool, live func(string) liveState, deco rowDeco) []row {
-	// Folders (multi-worktree projects) sort to the top, single-worktree leaves
-	// after; order within each group is preserved.
+	// Folders sort to the top, single-worktree leaves after; order preserved.
 	ordered := make([]project.Project, 0, len(projects))
 	for _, p := range projects {
 		if len(p.Worktrees) > 0 {
@@ -228,8 +211,8 @@ func buildProjectRows(projects []project.Project, collapsed map[string]bool, liv
 			continue
 		}
 
-		// The collapsed folder header rolls up its worktrees (main or linked):
-		// green when any has a live pane, red when any has only a detached one.
+		// The collapsed header rolls up its worktrees: green if any has a live pane,
+		// red if any has only a detached one.
 		folderLive := live(mainSession)
 		for _, w := range p.Worktrees {
 			folderLive = maxLive(folderLive, live(agent.ExpectedSession(p.Path, w.Name)))

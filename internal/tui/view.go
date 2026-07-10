@@ -9,16 +9,14 @@ import (
 	"github.com/olli-io/kmux/internal/config"
 )
 
-// keyHint is one row in the bottom keybind panel: the key(s) and what they do.
 type keyHint struct{ key, desc string }
 
 // maxConflictLines caps how many keybinding-conflict lines the Keys panel shows,
 // so a badly broken config can't grow the footer without bound.
 const maxConflictLines = 6
 
-// keyLabel renders a resolved key for the footer, swapping the names that don't
-// read well literally (enter, arrows, space) for glyphs or words. An empty key
-// (an action with no binding) renders empty.
+// keyLabel swaps key names that don't read well literally (enter, arrows, space)
+// for glyphs. An empty key renders empty.
 func keyLabel(key string) string {
 	switch key {
 	case "":
@@ -39,11 +37,9 @@ func keyLabel(key string) string {
 	return key
 }
 
-// helpHints returns the keybind hints for the focused section, labeled from the
-// resolved keybindings (m.keys): the section's action keys, then the
-// user-configured commands that apply to the panel (e.g. editor, lazygit), then
-// quit. The panel-focus digits 1/2 are documented by the panel titles instead, and
-// the arrow-alias actions are omitted as conventional.
+// helpHints returns the focused section's hints: its action keys, then the panel's
+// user-configured commands, then quit. Panel-focus digits are documented by the
+// panel titles, and arrow-alias actions are omitted as conventional.
 func (m model) helpHints(focused section) []keyHint {
 	kb := func(action string) string { return keyLabel(m.keys[action]) }
 	pair := func(a, b string) string { return kb(a) + "/" + kb(b) }
@@ -87,9 +83,8 @@ func (m model) helpHints(focused section) []keyHint {
 	return append(hints, keyHint{kb(config.ActionQuit), "Quit"})
 }
 
-// conflictLines renders the keybinding-conflict report (m.conflicts) as
-// error-styled body lines, capped at maxConflictLines with a "+N more" summary
-// when there are more. It returns nil when there are no conflicts.
+// conflictLines renders the keybinding-conflict report as error-styled body lines,
+// capped at maxConflictLines with a "+N more" summary. Nil when there are none.
 func (m model) conflictLines() []string {
 	if len(m.conflicts) == 0 {
 		return nil
@@ -110,9 +105,8 @@ func (m model) conflictLines() []string {
 	return lines
 }
 
-// renderPrompt formats the agent picker's body lines: one row per agent kind,
-// the selected one highlighted full-width, plus a hint row. width is the panel's
-// inner width (for the selection highlight).
+// renderPrompt formats the agent picker's body: one row per agent kind, the
+// selected one highlighted full-width, plus a hint row.
 func renderPrompt(p *agentPrompt, width int) []string {
 	lines := make([]string, 0, len(promptOptions)+2)
 	for i, o := range promptOptions {
@@ -130,15 +124,12 @@ func renderPrompt(p *agentPrompt, width int) []string {
 	return lines
 }
 
-// promptHint renders the picker's key-hint footer line.
 func promptHint() string {
 	return keyStyle.Render("↵") + dimStyle.Render(" launch  ") + keyStyle.Render("esc") + dimStyle.Render(" cancel")
 }
 
-// promptBox renders the floating agent picker: a focused, rounded box titled with
-// the project being launched, one row per agent kind, and the key hint. It is
-// sized to its widest line but capped at maxInner inner columns so it never
-// overflows the screen.
+// promptBox renders the floating agent picker, sized to its widest line but capped
+// at maxInner inner columns so it never overflows the screen.
 func promptBox(p *agentPrompt, maxInner int) string {
 	title := "Launch agent · " + p.title
 	inner := lipgloss.Width(title)
@@ -161,10 +152,9 @@ func promptBox(p *agentPrompt, maxInner int) string {
 	return panel(title, body, inner+2, len(body)+2, true)
 }
 
-// helpHeight is the body-row count of the keybind panel: the tallest of the
-// sections' hint lists or the (capped) conflict report, so the panel stays a
-// constant height, the dashboard doesn't jump when switching panels, and a
-// conflict report is never clipped (shorter content pads with blank rows).
+// helpHeight is the keybind panel's body-row count: the tallest of the sections'
+// hint lists or the capped conflict report, so the panel stays a constant height
+// and the dashboard doesn't jump when switching panels.
 func (m model) helpHeight() int {
 	hints := max(
 		len(m.helpHints(sectionSessions)),
@@ -173,9 +163,8 @@ func (m model) helpHeight() int {
 	return max(hints, min(len(m.conflicts), maxConflictLines))
 }
 
-// renderHelp formats the keybind hints into panel body lines, keys left-aligned
-// to a common width with dim descriptions. While the config has keybinding
-// conflicts the hints are replaced by the error-styled conflict report, so a
+// renderHelp formats the keybind hints into body lines, keys left-aligned. While
+// the config has conflicts the hints are replaced by the conflict report, so a
 // broken config is visible rather than silently mis-behaving.
 func (m model) renderHelp(focused section) []string {
 	if lines := m.conflictLines(); lines != nil {
@@ -220,9 +209,8 @@ func (m model) View() string {
 	}
 
 	// Track the selected row's position within its panel so the picker overlay can
-	// anchor to it: selPanel is which panel holds the cursor, selPanelIdx its index
-	// among that panel's body lines (-1 if the cursor isn't on a real row), selDepth
-	// its tree indentation.
+	// anchor to it: selPanelIdx is its index among the panel's body lines (-1 if the
+	// cursor isn't on a real row), selDepth its tree indentation.
 	var sLines, pLines []string
 	selPanel, selPanelIdx, selDepth := sectionSessions, -1, 0
 	for i, r := range rows {
@@ -298,10 +286,9 @@ func (m model) View() string {
 	return frame
 }
 
-// overlayPrompt composites the floating agent picker onto the rendered frame,
-// anchored just below the selected row (selY) at its indentation. It flips above
-// the row when there isn't room below, and clamps horizontally so the box stays
-// on screen.
+// overlayPrompt composites the floating picker onto the frame, anchored just below
+// the selected row. It flips above the row when there isn't room below, and clamps
+// horizontally so the box stays on screen.
 func (m model) overlayPrompt(frame string, selY, depth int) string {
 	box := promptBox(m.prompt, m.width-2)
 	boxLines := strings.Split(box, "\n")
@@ -330,9 +317,8 @@ func (m model) overlayPrompt(frame string, selY, depth int) string {
 	return strings.Join(lines, "\n")
 }
 
-// errorBox renders the command-error float: a red-bordered box titled with the
-// failed command, the wrapped message, and a dismiss hint. maxInner/maxHeight cap
-// its size; overflow message lines are dropped with an ellipsis.
+// errorBox renders the command-error float: a red-bordered box, the wrapped message,
+// and a dismiss hint. maxInner/maxHeight cap its size; overflow lines are ellipsized.
 func errorBox(e *commandError, maxInner, maxHeight int) string {
 	bs := lipgloss.NewStyle().Foreground(errColor)
 	ts := bs.Bold(true)
@@ -379,9 +365,8 @@ func (m model) overlayError(frame string) string {
 	return strings.Join(lines, "\n")
 }
 
-// overlayLine splices over onto base starting at display column x, ANSI-aware,
-// leaving the base on either side intact. Resets bracket the inserted span so the
-// box's colors don't bleed into the surrounding frame and vice versa.
+// overlayLine splices over onto base at display column x, ANSI-aware. Resets bracket
+// the inserted span so the box's colors don't bleed into the frame and vice versa.
 func overlayLine(base, over string, x int) string {
 	left := ansi.Truncate(base, x, "")
 	if w := lipgloss.Width(left); w < x {
@@ -424,24 +409,18 @@ func renderRow(r row, selected bool, collapsed map[string]bool, width int) strin
 	return line
 }
 
-// selectLine paints a composed row line with the uniform selection background.
-// Inner styled segments (chevrons, marks, badges, dim branch text) each end with
-// an ANSI reset that also clears the background, which would punch
-// default-colored gaps into the highlight; re-emitting the background after every
-// reset keeps the bar one solid color while preserving the inner foregrounds.
-//
-// The line is truncated/padded to exactly width before styling: lipgloss's
-// .Width() would wrap an over-long line onto extra rows (unlike the truncating
-// padCell used for unselected rows), breaking the layout, so we size the line
-// ourselves and render the background without it.
+// selectLine paints a row line with the uniform selection background. Inner styled
+// segments each end with a reset that also clears the background, so the background
+// is re-emitted after every reset to keep the bar one solid color. The line is
+// truncated/padded to exactly width first, since lipgloss's .Width() would wrap an
+// over-long line onto extra rows and break the layout.
 func selectLine(line string, width int) string {
 	line = strings.ReplaceAll(line, "\x1b[0m", "\x1b[0m"+selectedOpenSeq)
 	return selectedStyle.Render(padCell(line, width))
 }
 
-// panel draws a rounded, titled box (lazygit-style: title in the top border,
-// border color reflecting focus) sized to width x height, filling/clipping body
-// lines to fit. width and height include the border.
+// panel draws a rounded, titled box (lazygit-style: title in the top border, color
+// reflecting focus) sized to width x height. width and height include the border.
 func panel(title string, body []string, width, height int, focused bool) string {
 	// Focused panels use the default text color; idle panels are dimmed grey.
 	bs := lipgloss.NewStyle()
@@ -453,9 +432,8 @@ func panel(title string, body []string, width, height int, focused bool) string 
 	return box(title, body, width, height, bs, ts)
 }
 
-// box draws a rounded, titled frame with border style bs and title style ts
-// (panel and the error float differ only in color). width/height include the
-// border; body lines are clipped/padded to the inner width.
+// box draws a rounded, titled frame with border style bs and title style ts.
+// width/height include the border; body lines are clipped/padded to the inner width.
 func box(title string, body []string, width, height int, bs, ts lipgloss.Style) string {
 	inner := width - 2 // columns between the vertical borders
 	if inner < 1 {

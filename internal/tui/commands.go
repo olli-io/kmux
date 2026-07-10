@@ -20,10 +20,8 @@ import (
 	"github.com/olli-io/kmux/internal/tmux"
 )
 
-// macCadence throttles a polling interval on macOS while leaving Linux untouched.
-// The kitty (`kitten @ ls`) and tmux control-mode round-trips are noticeably more
-// expensive on macOS, so the session poll and blank-pane scan run at 500ms there;
-// Linux keeps the snappier 250ms cadence.
+// macCadence throttles a polling interval on macOS, where the kitty and tmux
+// round-trips are noticeably more expensive.
 func macCadence(linux, mac time.Duration) time.Duration {
 	if runtime.GOOS == "darwin" {
 		return mac
@@ -31,56 +29,23 @@ func macCadence(linux, mac time.Duration) time.Duration {
 	return linux
 }
 
-// pollInterval is how often kmux lists tmux sessions (the main session poll).
 var pollInterval = macCadence(250*time.Millisecond, 500*time.Millisecond)
 
-// orphanConfirmPolls is how many consecutive polls a session's anchor directory
-// must be found missing before kmux kills it (see model.trackOrphans). Requiring
-// more than one poll keeps a single transient stat miss — a briefly unavailable
-// mount, a directory swapped out and back during a checkout — from reaping a live
-// agent, while still pruning a genuinely deleted repo within a couple of ticks.
+// orphanConfirmPolls requires more than one miss so a transient stat failure
+// can't reap a live agent.
 const orphanConfirmPolls = 2
 
-// projectInterval is how often kmux refreshes projects' git status. Far slower
-// than pollInterval: a scan shells out to git many times over (worktree list +
-// status + ahead/behind per worktree — see project.ScanProjects), and each git
-// call is almost pure process-startup cost (~7-10ms, the work itself is
-// negligible), so the CPU scales with the git-process count. dirty/ahead/behind
-// barely change second to second, so a 5s cadence keeps the panel fresh while
-// spawning far fewer git processes than the old poll-tied scan.
-//
-// Only the launch sweep scans all of ~/git; each recurring tick rescans just the
-// projects with a running session (activeProjectsCmd → project.ScanProjectsAt),
-// so steady-state git-process count scales with the projects being worked in, not
-// the whole tree — and an idle kmux spends none. The worktree-list spawns are
-// further skipped when a repo's .git is unchanged (see the topology cache). A
-// rescan in flight past this interval is skipped rather than stacked (see the
-// model's scanning guard), so a slow scan can never pile up concurrent copies.
+// projectInterval is far slower than pollInterval: a scan shells out to git many
+// times over, and dirty/ahead/behind barely change second to second.
 const projectInterval = 5 * time.Second
 
-// spinnerInterval is how often the busy-session animation advances a frame.
-// Faster than pollInterval so the spinner reads as smooth motion without
-// re-listing sessions each tick.
 const spinnerInterval = 150 * time.Millisecond
 
-// launcherMin is the minimum time the launch-overlay splash stays up after launch,
-// even when the first reconcile settles sooner. The first reconcile only means the
-// panes are built and sized; the poll keeps rebalancing for a few ticks after, so
-// dismissing the instant it lands blinks the splash away over visible churn. The
-// hold keeps it covering that early churn (dismissal is gated on both the reconcile
-// AND this timer — see model.dismissLauncherWhenReady).
+// launcherMin keeps the splash covering the pane churn that continues past the
+// first reconcile; launcherCap dismisses it if no reconcile ever completes.
 const launcherMin = 750 * time.Millisecond
-
-// launcherCap bounds how long the launch-overlay splash tab may stay up. Normal
-// dismissal waits for the first reconcile (and launcherMin); this cap is the
-// fallback for when no reconcile ever completes (a failed tmux poll short-circuits
-// before reconcile), so a stalled launch can't leave the splash stuck in front of
-// the dashboard.
 const launcherCap = 1500 * time.Millisecond
 
-// spinnerFrames is the rotating braille glyph cycle shown for a busy session: an
-// arc of 4 filled dots (with a 2-dot gap) sweeping clockwise around the perimeter
-// of one braille cell.
 var spinnerFrames = []string{"⠹", "⠼", "⠶", "⠧", "⠏", "⠛"}
 
 // messages
@@ -88,50 +53,31 @@ type tickMsg time.Time
 type projectTickMsg time.Time
 type sessionsMsg struct {
 	names []string
-	// orphaned lists the sessions whose anchor directory no longer exists — a
-	// freshly deleted repo or removed worktree. The model confirms these across a
-	// few polls before killing them (see model.trackOrphans). It is nil on a poll
-	// that couldn't compute it (e.g. the post-kill re-list only needs names).
+	// orphaned sessions are killed after orphanConfirmPolls consecutive misses.
+	// Nil on a poll that couldn't compute it.
 	orphaned []string
 	err      error
 }
 type projectsMsg struct {
 	projects []project.Project
 	err      error
-	// partial marks a projectsMsg that carries only the rescanned active projects
-	// (from activeProjectsCmd), not a full ~/git sweep. The model merges a partial
-	// update into m.projects by path instead of replacing it, so projects with no
-	// running session keep their last-known status. The launch sweep and scoped
-	// scan leave this false, so they replace wholesale.
+	// partial carries only the rescanned active projects; the model merges those
+	// by path instead of replacing m.projects wholesale.
 	partial bool
 }
 type spinnerMsg struct{}
 
-// reconciledMsg reports a completed reconcile: any per-window errors, plus the
-// dashboard-tab blank panes read from the same in-lock snapshot the reconcile
-// took (see kitty.Snapshot / ReconcileAll). Carrying the blanks here lets the
-// dashboard adopt user-spawned panes off the reconcile's `kitten @ ls` instead
-// of a second one. scanned distinguishes a poll reconcile (which scanned for
-// blanks — an empty blanks slice then genuinely means "no blank panes") from an
-// OpenAndSync/ReattachAndSync reconcile (which never scans); only a scanned
-// reconcile feeds the blank-pane handler, so a non-scanning one can't prematurely
-// seed blankSeeded with an empty set.
+// reconciledMsg carries the blank panes read from the same snapshot the reconcile
+// took. scanned marks the reconciles that looked for blanks, so an empty slice
+// means "none" rather than "didn't check".
 type reconciledMsg struct {
 	errs    []error
 	blanks  []kitty.BlankPane
 	scanned bool
 }
 
-// launcherCapMsg fires once, launcherCap after launch, as the fallback that
-// dismisses the launch-overlay splash tab if no reconcile ever completes.
 type launcherCapMsg struct{}
-
-// launcherMinMsg fires once, launcherMin after launch, marking that the splash has
-// been held long enough to dismiss once the layout is also ready.
 type launcherMinMsg struct{}
-
-// launcherDismissedMsg reports the result of tearing down the splash tab (focus
-// the finished dashboard, then close the splash). Any error lands in lastErr.
 type launcherDismissedMsg struct{ err error }
 type attentionMsg struct {
 	states map[string]status.AttentionState
@@ -139,13 +85,9 @@ type attentionMsg struct {
 }
 type focusedMsg struct{ err error }
 type savedMsg struct{ err error }
-
-// idleConvertedMsg reports the result of handling a blank pane: turning it into an
-// idle slot in place, or restacking a manual vertical split (see convertBlankPaneCmd).
 type idleConvertedMsg struct{ err error }
 
-// commandErrMsg reports a user-configured command that failed to launch; it
-// drives the dismissible error float.
+// commandErrMsg drives the dismissible error float.
 type commandErrMsg struct {
 	title string
 	err   error
@@ -155,40 +97,31 @@ func tickCmd() tea.Cmd {
 	return tea.Tick(pollInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-// projectTickCmd schedules the next project rescan on the slow projectInterval.
 func projectTickCmd() tea.Cmd {
 	return tea.Tick(projectInterval, func(t time.Time) tea.Msg { return projectTickMsg(t) })
 }
 
-// spinnerCmd schedules the next busy-animation frame.
 func spinnerCmd() tea.Cmd {
 	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return spinnerMsg{} })
 }
 
-// launcherCapCmd fires launcherCapMsg once, launcherCap after launch — the
-// fallback that dismisses the launch-overlay splash if no reconcile completes.
 func launcherCapCmd() tea.Cmd {
 	return tea.Tick(launcherCap, func(time.Time) tea.Msg { return launcherCapMsg{} })
 }
 
-// launcherMinCmd fires launcherMinMsg once, launcherMin after launch — the minimum
-// hold that keeps the splash up over the first reconcile's pane churn.
 func launcherMinCmd() tea.Cmd {
 	return tea.Tick(launcherMin, func(time.Time) tea.Msg { return launcherMinMsg{} })
 }
 
-// pollCmd lists agent sessions off the UI goroutine.
 func pollCmd() tea.Cmd {
 	return func() tea.Msg {
 		return pollSessions()
 	}
 }
 
-// pollSessions lists the live agent sessions with their anchor directories and
-// flags those whose directory has vanished (a deleted repo or removed worktree)
-// as orphaned. It is shared by the poll tick and the post-kill re-list so both
-// carry a consistent orphan set. A tmux error is returned verbatim so the caller
-// surfaces it and leaves the session list untouched.
+// pollSessions lists the live agent sessions and flags those whose anchor
+// directory has vanished. A tmux error is returned verbatim so the caller leaves
+// the session list untouched.
 func pollSessions() tea.Msg {
 	sessions, err := tmux.ListAgentSessionsFull()
 	if err != nil {
@@ -198,10 +131,8 @@ func pollSessions() tea.Msg {
 	var orphaned []string
 	for i, s := range sessions {
 		names[i] = s.Name
-		// Only a session bound to a repo/worktree can be *freshly* orphaned by that
-		// directory being deleted. A deliberately-orphaned session (launched outside
-		// any git repo, carrying the orphan mark) is left alone — it was never bound
-		// to a project, so its directory going away isn't a repo/worktree removal.
+		// A deliberately-orphaned session was never bound to a project, so its
+		// directory going away isn't a worktree removal.
 		if !agent.IsOrphan(s.Name) && isMissingDir(s.Dir) {
 			orphaned = append(orphaned, s.Name)
 		}
@@ -209,11 +140,8 @@ func pollSessions() tea.Msg {
 	return sessionsMsg{names: names, orphaned: orphaned}
 }
 
-// isMissingDir reports whether dir is a non-empty path that definitively does not
-// exist. Only a not-exist error counts: an empty path (tmux reported none) or any
-// other stat error — a permission or transient I/O hiccup, a briefly unavailable
-// mount — reads as present, so a session is flagged orphaned only when its
-// directory is genuinely gone.
+// isMissingDir counts only a not-exist error; an empty path or any other stat
+// error (permissions, transient I/O, an unavailable mount) reads as present.
 func isMissingDir(dir string) bool {
 	if dir == "" {
 		return false
@@ -222,14 +150,10 @@ func isMissingDir(dir string) bool {
 	return errors.Is(err, fs.ErrNotExist)
 }
 
-// attentionCmd captures every session's tmux pane off the UI goroutine and
-// classifies its attention state. All panes are captured in one batched tmux call
-// (tmux.CapturePanes); if that batch fails — e.g. a session died mid-cycle and
-// aborted the chain — it falls back to capturing each session on its own so one
-// gone session can't blank the rest. Either way it is best-effort: a session with
-// no capture yields status.AttnUnknown rather than failing the whole batch.
-// It is fed the full session list (including detached ones — tmux keeps their
-// buffers), so a detached-but-waiting agent still shows its status glyph.
+// attentionCmd classifies every session's attention state from its tmux pane.
+// Panes are captured in one batched call, falling back to one call per session
+// so a session that died mid-cycle can't blank the rest. Detached sessions are
+// included; tmux keeps their buffers.
 func attentionCmd(sessions []string) tea.Cmd {
 	snap := append([]string(nil), sessions...)
 	return func() tea.Msg {
@@ -247,10 +171,8 @@ func attentionCmd(sessions []string) tea.Cmd {
 		for _, s := range snap {
 			text, ok := texts[s]
 			if !ok {
-				// No capture recorded: the idle tracker treats this session as gone
-				// for this poll (no hash) and resets its clock when capture recovers,
-				// so a flaky capture never causes a kill, and AttnUnknown hides its
-				// glyph until it comes back.
+				// Omitting the hash makes the idle tracker treat this session as gone
+				// for this poll, so a flaky capture never causes a kill.
 				states[s] = status.AttnUnknown
 				continue
 			}
@@ -261,16 +183,10 @@ func attentionCmd(sessions []string) tea.Cmd {
 	}
 }
 
-// convertBlankPaneCmd handles a newly appeared user-spawned blank pane off the UI
-// goroutine. A pane that is its own full-height column is a manual *vertical* split
-// — a fourth column the fixed sidebar+maxColumns layout has no room for — so it is
-// restacked under an existing column (layout.ReorgVerticalPane). Any other blank
-// pane (already stacked, i.e. a horizontal split) is turned into a kmux idle
-// launcher in place: an `exec` of `kmux-idler --idle-loop` makes it show the idle
-// hint and launch the picker on a keypress, exactly like a managed placeholder
-// slot. The standalone-column classification rides along on the pane from the scan
-// (see kitty.BlankPane), so no second `ls` is needed here. idlerPath is the
-// absolute path to the helper (from layout.IdlerPath).
+// convertBlankPaneCmd adopts a user-spawned blank pane. A pane that is its own
+// full-height column is a manual vertical split, which the fixed layout has no
+// room for, so it is restacked under an existing column; any other blank pane
+// becomes an idle launcher in place.
 func convertBlankPaneCmd(mgr *layout.Manager, pane kitty.BlankPane, idlerPath string) tea.Cmd {
 	return func() tea.Msg {
 		if pane.StandaloneColumn {
@@ -281,9 +197,8 @@ func convertBlankPaneCmd(mgr *layout.Manager, pane kitty.BlankPane, idlerPath st
 	}
 }
 
-// projectsCmd scans projects off the UI goroutine. When scopeDir is set it
-// resolves just that one project (scoped mode); otherwise it scans ~/git plus
-// any folders listed in the config file.
+// projectsCmd resolves just scopeDir when set, otherwise scans ~/git plus any
+// folders listed in the config file.
 func projectsCmd(scopeDir string) tea.Cmd {
 	return func() tea.Msg {
 		if scopeDir != "" {
@@ -298,30 +213,22 @@ func projectsCmd(scopeDir string) tea.Cmd {
 	}
 }
 
-// activeProjectsCmd rescans only the projects with a running session (paths) off
-// the UI goroutine, returning a partial projectsMsg the model merges into
-// m.projects. This is the steady-state refresh: after the launch sweep, each
-// project tick spends git calls only on active projects rather than sweeping all
-// of ~/git (see project.ScanProjectsAt).
+// activeProjectsCmd is the steady-state refresh: it rescans only the projects
+// with a running session.
 func activeProjectsCmd(paths []string) tea.Cmd {
 	return func() tea.Msg {
 		return projectsMsg{projects: project.ScanProjectsAt(paths), partial: true}
 	}
 }
 
-// reconcileCmd performs kitty RC work off the UI goroutine. It attaches/detaches
-// agent panes, then pads the layout with placeholder panes so real agent panes
-// keep a fixed width. When the pane layout changes it follows up with a
-// Rebalance to pin the sidebar width and even out the agent columns.
+// reconcileCmd attaches/detaches agent panes, then pads the layout with
+// placeholders so real agent panes keep a fixed width.
 func reconcileCmd(mgr *layout.Manager, active []string) tea.Cmd {
 	return func() tea.Msg {
-		// A reconcile that adds a pane pulls the kitty app to the macOS foreground
-		// even with --keep-focus, stealing system focus from whatever the user was
-		// doing. These spawns are automatic (a session appeared on its own, not via
-		// a manual open), so capture the frontmost app first and hand focus back
-		// afterwards to keep the spawn in the background. Only query when an add is
-		// actually pending, so the idle tick stays cheap. The Attached check is a
-		// quick lock-free read; a slightly stale result at worst omits a restore.
+		// Adding a pane pulls kitty to the macOS foreground even with --keep-focus,
+		// stealing system focus. These spawns are automatic, so capture the frontmost
+		// app first and hand focus back afterwards. Only query when an add is pending;
+		// a stale Attached read at worst omits a restore.
 		var prevApp string
 		for _, s := range active {
 			if !mgr.Attached(s) {
@@ -329,12 +236,8 @@ func reconcileCmd(mgr *layout.Manager, active []string) tea.Cmd {
 				break
 			}
 		}
-		// The whole reconcile->compact->sync->rebalance pass runs atomically inside
-		// the Manager, so overlapping reconciles (one per idle-reaped session, plus
-		// the poll tick) serialize instead of racing the layout into extra slots. It
-		// also returns the dashboard-tab blank panes from its in-lock snapshot, so
-		// the blank-pane scan rides this reconcile rather than spawning a second
-		// `kitten @ ls`.
+		// Atomic inside the Manager, so overlapping reconciles serialize instead of
+		// racing the layout into extra slots.
 		changed, blanks, errs := mgr.ReconcileAll(active)
 		if changed && prevApp != "" {
 			restoreFrontmostApp(prevApp)
@@ -343,19 +246,15 @@ func reconcileCmd(mgr *layout.Manager, active []string) tea.Cmd {
 	}
 }
 
-// focusCmd gives keyboard focus to a session's kitty pane off the UI goroutine.
 func focusCmd(id int) tea.Cmd {
 	return func() tea.Msg {
 		return focusedMsg{err: kitty.FocusWindow(id)}
 	}
 }
 
-// dismissLauncherCmd tears down the launch-overlay splash tab off the UI
-// goroutine: it focuses the finished dashboard (sidebarID) first, so the reveal
-// switches to the settled layout, then closes the splash tab (launcherID). Doing
-// it in that order means the user never sees a bare tab between the splash
-// closing and the dashboard appearing. Best-effort — close ignores a missing
-// match — so a splash the user closed by hand can't error the launch.
+// dismissLauncherCmd focuses the finished dashboard before closing the splash tab,
+// so the user never sees a bare tab in between. Close ignores a missing match, so
+// a splash the user closed by hand can't error the launch.
 func dismissLauncherCmd(sidebarID, launcherID int) tea.Cmd {
 	return func() tea.Msg {
 		if err := kitty.FocusWindow(sidebarID); err != nil {
@@ -365,19 +264,16 @@ func dismissLauncherCmd(sidebarID, launcherID int) tea.Cmd {
 	}
 }
 
-// openSessionCmd creates (if needed) and attaches an agent session pane off the
-// UI goroutine, then pads/rebalances the layout the same way reconcileCmd does
-// so the new pane lands at the fixed agent width. agentCmd is the executable the
-// new tmux session runs (e.g. "claude" or "opencode").
+// openSessionCmd creates (if needed) and attaches an agent session pane, then
+// pads/rebalances the layout. agentCmd is the executable the new tmux session runs.
 func openSessionCmd(mgr *layout.Manager, name, dir, agentCmd string) tea.Cmd {
 	return func() tea.Msg {
 		return reconciledMsg{errs: mgr.OpenAndSync(name, dir, agentCmd)}
 	}
 }
 
-// killSessionCmd kills a session's tmux session off the UI goroutine, then
-// re-lists so the panel updates immediately (the resulting sessionsMsg drives
-// reconcile, which closes the now-orphaned pane).
+// killSessionCmd re-lists after the kill so the panel updates immediately; the
+// resulting sessionsMsg drives the reconcile that closes the orphaned pane.
 func killSessionCmd(name string) tea.Cmd {
 	return func() tea.Msg {
 		if err := tmux.KillSession(name); err != nil {
@@ -387,18 +283,14 @@ func killSessionCmd(name string) tea.Cmd {
 	}
 }
 
-// reattachSessionCmd re-opens a pane for an already-running session off the UI
-// goroutine (for a session whose pane was lost), then pads/rebalances the layout
-// the same way openSessionCmd does.
+// reattachSessionCmd re-opens a pane for a running session whose pane was lost.
 func reattachSessionCmd(mgr *layout.Manager, name string) tea.Cmd {
 	return func() tea.Msg {
 		return reconciledMsg{errs: mgr.ReattachAndSync(name)}
 	}
 }
 
-// saveStateCmd persists the detached-session set and the idle clocks off the UI
-// goroutine. It snapshots both maps first so a later mutation can't race the
-// write. (idle.snapshot already returns a fresh copy.)
+// saveStateCmd snapshots both maps before writing so a later mutation can't race.
 func (m model) saveStateCmd() tea.Cmd {
 	detached := make(map[string]bool, len(m.detached))
 	for k, on := range m.detached {
@@ -413,9 +305,8 @@ func (m model) saveStateCmd() tea.Cmd {
 }
 
 // runUserCommand dispatches the configured command bound to key in the focused
-// panel: it resolves the selected row's directory, substitutes {dir}, and runs
-// the command in a new kitty tab. It returns nil when no command matches the key
-// and panel, or when the row has no associated directory.
+// panel, run against the selected row's directory. Returns nil when no command
+// matches, or when the row has no directory.
 func (m model) runUserCommand(key string, rows []row) tea.Cmd {
 	panel := panelName(m.focusedSection(rows))
 	r := rowAt(rows, m.cursor)
@@ -444,10 +335,9 @@ func (m model) runUserCommand(key string, rows []row) tea.Cmd {
 	return nil
 }
 
-// holdOnError wraps a tab/window command so a non-zero exit keeps its kitty
-// surface open with a labeled notice (awaiting a keypress) instead of flashing
-// shut; a zero exit closes normally. It runs out of kmux's reach, so this is how
-// a tab/window command's own failure surfaces. label is shell-escaped.
+// holdOnError keeps a failed command's kitty surface open with a labeled notice
+// instead of flashing shut. The command runs out of kmux's reach, so this is how
+// its failure surfaces. label is shell-escaped.
 func holdOnError(runline, label string) string {
 	return runline +
 		`; __kmux_st=$?; if [ "$__kmux_st" -ne 0 ]; then ` +
@@ -457,9 +347,8 @@ func holdOnError(runline, label string) string {
 		`[ -n "$__kmux_stty" ] && stty "$__kmux_stty" 2>/dev/null; fi`
 }
 
-// expandCommandVars substitutes each {name} placeholder in run with its
-// shell-escaped value from vars; placeholders with no matching key are left
-// as-is. See commandVars for the available names.
+// expandCommandVars shell-escapes each substituted value; placeholders with no
+// matching key are left as-is. See commandVars for the available names.
 func expandCommandVars(run string, vars map[string]string) string {
 	for k, v := range vars {
 		run = strings.ReplaceAll(run, "{"+k+"}", shellQuote(v))
@@ -467,8 +356,6 @@ func expandCommandVars(run string, vars map[string]string) string {
 	return run
 }
 
-// userCommandCmd runs a configured command's expanded run line off the UI
-// goroutine via open (OpenCommandTab or OpenCommandWindow), with cwd set to dir.
 func userCommandCmd(dir, title, runline string, open func(dir, title, runline string) error) tea.Cmd {
 	return func() tea.Msg {
 		if err := open(dir, title, runline); err != nil {
@@ -482,12 +369,9 @@ func userCommandCmd(dir, title, runline string, open func(dir, title, runline st
 // to fail before treating it as a launched, live app.
 const detachGrace = 600 * time.Millisecond
 
-// detachProcessCmd runs runline (via `sh -c`) as a detached background process in
-// dir with no kitty surface — for fork-and-return GUI apps (Zed, VS Code). The
-// child gets its own process group, survives kmux, and has stdio at /dev/null.
-// As kmux's own child its exit is observable: a failure within detachGrace floats
-// a commandErrMsg; anything still alive is reaped in the background and reported
-// launched.
+// detachProcessCmd runs runline as a detached background process with no kitty
+// surface, for fork-and-return GUI apps. The child gets its own process group and
+// survives kmux, but its early exit is still observable.
 func detachProcessCmd(dir, title, runline string) tea.Cmd {
 	return func() tea.Msg {
 		c := exec.Command("sh", "-c", runline)
@@ -513,16 +397,14 @@ func detachProcessCmd(dir, title, runline string) tea.Cmd {
 	}
 }
 
-// shellQuote wraps s in single quotes for safe interpolation into a `sh -c` line,
-// escaping any embedded single quotes.
+// shellQuote wraps s in single quotes for safe interpolation into a `sh -c` line.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// openAgentTabCmd attaches an agent session in a new standalone kitty tab (not a
-// managed pane), off the UI goroutine. When agentCmd is non-empty it first
-// ensures a detached tmux session exists; for an already-running session pass an
-// empty agentCmd to skip creation and just attach.
+// openAgentTabCmd attaches an agent session in a standalone kitty tab, not a
+// managed pane. A non-empty agentCmd first ensures a detached tmux session exists;
+// pass an empty one to just attach.
 func openAgentTabCmd(name, dir, agentCmd string) tea.Cmd {
 	return func() tea.Msg {
 		if agentCmd != "" {
@@ -534,9 +416,7 @@ func openAgentTabCmd(name, dir, agentCmd string) tea.Cmd {
 	}
 }
 
-// openTabCmd launches a new kitty tab running a fresh kmux scoped to dir, off
-// the UI goroutine. The new tab is an independent kmux session in the same
-// terminal window.
+// openTabCmd launches a new kitty tab running a fresh kmux scoped to dir.
 func openTabCmd(dir string) tea.Cmd {
 	return func() tea.Msg {
 		exe, err := os.Executable()

@@ -18,12 +18,8 @@ import (
 )
 
 func main() {
-	// Route the command line: `--session` prints the resolved session name and
-	// exits (for scripting); `--project` prints the project directory of the tmux
-	// session the caller is inside and exits (for scripts bound to a tmux
-	// keybinding); `--agent` selects the agent launcher (create/attach a tmux
-	// session in the current terminal, no kitty needed); otherwise kmux runs the
-	// dashboard as before.
+	// The print/agent modes are for scripting and keybindings; otherwise kmux runs
+	// the dashboard.
 	pa, err := agent.ParseArgs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
@@ -55,8 +51,7 @@ func main() {
 		return
 	}
 	if pa.Splash {
-		// Internal launch-overlay mode: the dashboard spawns `kmux --splash` in its
-		// own kitty tab and closes that tab once its layout has settled.
+		// Internal launch-overlay mode, spawned by the dashboard in its own kitty tab.
 		if err := runSplash(); err != nil {
 			fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
 			os.Exit(1)
@@ -66,15 +61,11 @@ func main() {
 	runDashboard(pa.Path)
 }
 
-// runDashboard launches the kmux dashboard. pathArg, when non-empty, scopes kmux
-// to the single git project containing it: the Sessions and Projects panels then
-// show only that project (and its worktrees). Without it, kmux scans ~/git plus
-// any configured folders. The dashboard requires kitty with remote control.
+// runDashboard launches the kmux dashboard. A non-empty pathArg scopes kmux to the
+// single git project containing it; otherwise it scans ~/git plus configured folders.
 func runDashboard(pathArg string) {
-	// kmux drives its split-pane dashboard through kitty's remote control, so it
-	// only works inside the kitty terminal. Detect a non-kitty host first and fail
-	// with a clear compatibility message, rather than the remote-control hint below
-	// (which wrongly implies the user is already in kitty).
+	// Detect a non-kitty host before the remote-control check below, whose hint
+	// wrongly implies the user is already in kitty.
 	if !kitty.InKitty() {
 		fmt.Fprintln(os.Stderr, "kmux: incompatible terminal — kmux only runs inside the kitty terminal.")
 		if term := os.Getenv("TERM"); term != "" {
@@ -113,26 +104,22 @@ func runDashboard(pathArg string) {
 		os.Exit(1)
 	}
 
-	// Label the sidebar window "[kmux]dashboard" so the dashboard process is
-	// identifiable alongside the [kmux]… agent sessions. Best-effort: a title
-	// failure must not stop the dashboard from launching.
+	// Label the sidebar window so the dashboard is identifiable alongside the
+	// [kmux]… agent sessions. Best-effort.
 	_ = kitty.SetWindowTitle(sidebarID, agent.DashboardTitle())
 
-	// Reap sessions that were already idle past the timeout when this run
-	// started, before the dashboard attaches panes to them. Best-effort: config
-	// or state read errors just skip the sweep.
+	// Reap sessions already idle past the timeout at launch, before the dashboard
+	// attaches panes to them. Best-effort: read errors skip the sweep.
 	cfg, _ := config.LoadConfig()
 	if _, idle, err := status.LoadState(); err == nil {
 		status.SweepIdleAtLaunch(time.Now(), cfg.IdleDuration(), idle)
 	}
 
-	// Pop a launch-overlay splash tab in front of the dashboard so the user doesn't
-	// watch the first reconcile assemble the layout pane by pane. GotoLayoutSplits
-	// above already ran on this (still-active) tab; opening the splash focused
-	// pushes this tab to the background, where the dashboard builds its panes hidden
-	// (kitty.Launch pins them to this tab regardless of focus). The model closes the
+	// Pop a splash tab in front so the user doesn't watch the first reconcile
+	// assemble the layout pane by pane; opening it focused pushes this tab to the
+	// background, where the dashboard builds its panes hidden. The model closes the
 	// splash once its first reconcile settles. Best-effort: on failure launcherID is
-	// 0 and startup proceeds with no overlay, exactly as before.
+	// 0 and startup proceeds with no overlay.
 	var launcherID int
 	if exe, err := os.Executable(); err == nil {
 		launcherID, _ = kitty.OpenLauncherTab(exe)
@@ -142,10 +129,8 @@ func runDashboard(pathArg string) {
 	// AltScreen gives a clean, full-pane dashboard (clears on launch, restores on exit).
 	p := tea.NewProgram(tui.NewModel(mgr, scopeDir, launcherID), tea.WithAltScreen())
 	_, runErr := p.Run()
-	// Close the splash tab unconditionally on exit. The model normally dismisses it
-	// once the first reconcile settles, but a quit before that (or a crash) would
-	// otherwise orphan it; CloseWindow ignores a missing match, so closing an
-	// already-dismissed splash is a no-op.
+	// Close the splash tab unconditionally on exit; a quit or crash before the model
+	// dismisses it would otherwise orphan it. CloseWindow ignores a missing match.
 	if launcherID != 0 {
 		_ = kitty.CloseWindow(launcherID)
 	}

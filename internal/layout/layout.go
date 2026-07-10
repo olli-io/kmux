@@ -13,7 +13,6 @@ import (
 )
 
 // Indirection seams over the kitty package so tests can inject a fake backend.
-// Defaults are the real kitty calls, so production behavior is unchanged.
 var (
 	launchWindow       = kitty.Launch
 	closeWindow        = kitty.CloseWindow
@@ -31,26 +30,18 @@ const (
 	sidebarBias = 85 // % given to the first agent column on creation
 
 	// Target pane fractions of the tab width, converged toward by rebalance.
-	// The layout is always sidebar + maxColumns columns (real agent panes padded
-	// with placeholders), so these sum to 1: 0.16 + 3*0.28 = 1.0.
+	// Always sidebar + maxColumns columns, so these sum to 1: 0.16 + 3*0.28 = 1.0.
 	sidebarFrac = 0.16 // fraction of the tab width pinned to the sidebar
 	agentFrac   = 0.28 // fraction of the tab width per agent column
 )
 
-// placeholderTitle labels the inert filler panes that pad the layout up to
-// maxColumns so that real agent panes always render at the same fixed width.
+// placeholderTitle labels the filler panes that pad the layout to maxColumns so
+// real agent panes always render at a fixed width.
 const placeholderTitle = "·idle"
 
-// placeholderCmd is the command a placeholder pane runs. When the kmux-idler
-// helper is installed beside the kmux binary the slot becomes an interactive
-// launcher: a tiny shell loop draws a hint and blocks on a single keypress, then
-// spawns kmux-idler only for the moment the user is choosing what to launch. On
-// select kmux-idler creates the agent's tmux session detached and exits; the next
-// poll then gives that session its own kmux-managed pane via reconcile. Holding the
-// idle slot with a shell — not a resting Go process — keeps an idle pane's
-// footprint to a shell instead of a whole runtime. Without the helper it falls back
-// to an inert pane that shows a dim hint and sleeps forever, never touching any
-// agent's tmux session.
+// placeholderCmd is the command a placeholder pane runs. With the kmux-idler helper
+// installed beside the binary the slot is an interactive launcher held by a cheap
+// shell loop; without it, an inert pane that shows a hint and sleeps forever.
 func placeholderCmd() []string {
 	if p := idlerPath(); p != "" {
 		return []string{"sh", "-c", idler.IdleLoopScript(p)}
@@ -61,18 +52,13 @@ func placeholderCmd() []string {
 	}
 }
 
-// IdlerPath returns the absolute path to the kmux-idler helper installed beside
-// the kmux binary, or "" when it isn't present. The dashboard uses it to learn
-// both whether the helper exists and how to invoke it when turning a user-spawned
-// blank pane into an idle launcher (`<IdlerPath> --idle-loop`).
+// IdlerPath returns the path to the kmux-idler helper, or "" when it isn't present.
 func IdlerPath() string {
 	return idlerPath()
 }
 
-// idlerPath returns the path to the kmux-idler helper installed beside the kmux
-// binary, or "" when it isn't present (so placeholderCmd falls back to the inert
-// slot). Resolving it relative to the running executable — through any symlink —
-// mirrors how the default config.yaml is located.
+// idlerPath resolves the helper relative to the running executable, through any
+// symlink, mirroring how the default config.yaml is located. "" when not present.
 func idlerPath() string {
 	exe, err := os.Executable()
 	if err != nil {
@@ -91,11 +77,9 @@ func idlerPath() string {
 // Manager owns the mapping between tmux agent sessions and the kitty windows
 // (panes) attached to them, plus the column layout state.
 type Manager struct {
-	// mu serializes every layout transaction. bubbletea runs each tea.Cmd in its
-	// own goroutine, so reconcile/open/reattach passes (and the UI's render-path
-	// reads) would otherwise mutate columns/placeholders/bySession concurrently —
-	// racing the maps and double-creating/orphaning placeholder panes. The
-	// exported entry points take the lock; unexported cores assume it is held.
+	// mu serializes every layout transaction: bubbletea runs each tea.Cmd in its own
+	// goroutine, so passes would otherwise race the maps. Exported entry points take
+	// the lock; unexported cores assume it is held.
 	mu           sync.RWMutex
 	sidebarID    int            // KITTY_WINDOW_ID; the kmux sidebar itself
 	columns      [][]int        // up to maxColumns; each is window ids top->bottom
@@ -110,7 +94,6 @@ func NewManager(sidebarID int) *Manager {
 	}
 }
 
-// Sessions returns the currently tracked session names, sorted.
 func (m *Manager) Sessions() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -122,9 +105,8 @@ func (m *Manager) Sessions() []string {
 	return names
 }
 
-// Attached reports whether a session currently has a pane. It is called from the
-// UI render path (rows -> buildSessionRows) while transactions mutate bySession,
-// so it takes the read lock.
+// Attached reports whether a session currently has a pane. Called from the UI
+// render path while transactions mutate bySession, so it takes the read lock.
 func (m *Manager) Attached(session string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -137,14 +119,12 @@ func (m *Manager) attached(session string) bool {
 	return ok
 }
 
-// SidebarID returns the kitty window id of the kmux sidebar (the dashboard's own
-// window). It is fixed at construction, so no lock is needed. The blank-pane
-// watcher uses it to confine its scan to the dashboard's tab.
+// SidebarID returns the sidebar's kitty window id. Fixed at construction, so no
+// lock is needed.
 func (m *Manager) SidebarID() int {
 	return m.sidebarID
 }
 
-// WindowID returns the kitty window id attached to session, if any.
 func (m *Manager) WindowID(session string) (int, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -152,26 +132,14 @@ func (m *Manager) WindowID(session string) (int, bool) {
 	return id, ok
 }
 
-// ReconcileAll runs the full layout transaction atomically: it reconciles panes
-// against the active session set, compacts freed slots, pads with placeholders,
-// and rebalances — all under the lock so overlapping reconcile passes (one per
-// idle-reaped session, plus the periodic poll) serialize instead of racing the
-// shared layout state. The live window set is fetched in-lock so it is always
-// consistent with the serialized manager state (a stale snapshot would orphan a
-// freshly created placeholder in syncPlaceholders). It reports whether the pane
-// layout changed (so the caller can restore macOS focus), returns the
-// dashboard-tab blank panes read from that same in-lock snapshot (so the caller
-// can adopt user-spawned panes without a second `kitten @ ls` — see
-// kitty.Snapshot), and collects per-window errors; like its constituent steps it
-// is best-effort.
+// ReconcileAll runs the full layout transaction atomically under the lock, so
+// overlapping passes serialize instead of racing the shared state. The live window
+// set is fetched in-lock so it stays consistent with the serialized manager state.
 func (m *Manager) ReconcileAll(active []string) (changed bool, blanks []kitty.BlankPane, errs []error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// One snapshot, in-lock, feeds both the live-id prune here and the blank-pane
-	// list returned to the caller — a single kitten invocation per poll instead of
-	// two. Taking it in-lock (not from outside) is what keeps the live set
-	// consistent with the serialized manager state, so syncPlaceholders never
-	// mistakes a placeholder a concurrent pass just created for a user-closed one.
+	// One in-lock snapshot feeds both the live-id prune here and the blank-pane list
+	// returned to the caller, a single kitten invocation per poll instead of two.
 	live, blanks, err := snapshot(m.sidebarID)
 	if err != nil {
 		live = nil // best-effort: skip the manual-close prune this round
@@ -180,9 +148,8 @@ func (m *Manager) ReconcileAll(active []string) (changed bool, blanks []kitty.Bl
 	if err != nil {
 		hints = nil // best-effort: skip in-place adoption; reconcile.add still opens a pane
 	}
-	// Prune hints whose window is gone (e.g. the launch's pane was closed before we
-	// adopted it) so a stale hint can never mis-adopt a later session, and so
-	// adoptInPlace can trust every remaining hint points at a live window.
+	// Prune hints whose window is gone so a stale hint can't mis-adopt a later
+	// session, and adoptInPlace can trust every remaining hint points at a live window.
 	if live != nil {
 		for id := range hints {
 			if !live[id] {
@@ -204,29 +171,10 @@ func (m *Manager) ReconcileAll(active []string) (changed bool, blanks []kitty.Bl
 	return changed, blanks, errs
 }
 
-// adoptInPlace binds sessions that launched their agent in place to the kitty
-// window they took over, before reconcile.add runs. When an idle slot's kmux-idler
-// launches an agent, it execs a tmux client in the SAME kitty window and leaves an
-// adopt hint (window id -> session) behind; hints is that map (already pruned to
-// live windows). For each active, not-yet-attached session with a hint we bind the
-// session to that existing window so reconcile finds it attached and never opens a
-// second pane, and delete the consumed hint. There are two kinds of idle slot:
-//
-//   - A tracked placeholder (one of the dashboard's own idle slots): it already
-//     occupies a known full-width column slot, so we promote it placeholders ->
-//     columns. That is pure bookkeeping — real columns sit left of all placeholders
-//     and every slot targets the same width, so appending is width-neutral (see
-//     columnAnchors/rebalance) — and it drops placeholderTarget by one so
-//     syncPlaceholders won't spawn a duplicate.
-//   - An untracked spare pane (a pane the user split that kmux adopted as a
-//     launcher, deliberately left out of the column model because kitty can't
-//     report a user-split pane's geometry): we bind the session but leave the
-//     window untracked, so it keeps its own geometry as the user's spare pane. The
-//     binding exists only to stop reconcile opening a duplicate; when the session
-//     ends, reconcile closes this window like any other.
-//
-// It reports whether it adopted anything (so the caller rebalances). The caller must
-// hold mu.
+// adoptInPlace binds sessions that launched their agent in place to the kitty window
+// they took over, before reconcile.add runs, so reconcile never opens a second pane.
+// A tracked placeholder is promoted into the columns; an untracked user-split pane is
+// bound but left out of the column model. The caller must hold mu.
 func (m *Manager) adoptInPlace(active []string, hints map[int]string, live map[int]bool) (changed bool) {
 	if len(hints) == 0 {
 		return false
@@ -261,8 +209,8 @@ func (m *Manager) adoptInPlace(active []string, hints map[int]string, live map[i
 	return changed
 }
 
-// hintedWindow returns the window id hinted for session, or 0 if none. kitty window
-// ids are always positive, so 0 is a safe "none".
+// hintedWindow returns the window id hinted for session, or 0 if none (kitty ids
+// are always positive, so 0 is a safe "none").
 func hintedWindow(hints map[int]string, session string) int {
 	for id, s := range hints {
 		if s == session {
@@ -272,7 +220,6 @@ func hintedWindow(hints map[int]string, session string) int {
 	return 0
 }
 
-// removePlaceholder drops a window id from the placeholder list (a no-op if absent).
 func (m *Manager) removePlaceholder(id int) {
 	for i, pid := range m.placeholders {
 		if pid == id {
@@ -282,21 +229,9 @@ func (m *Manager) removePlaceholder(id int) {
 	}
 }
 
-// reconcile makes the live panes match the set of active sessions: it attaches a
-// managed pane for every new session and closes panes for vanished ones. It also
-// prunes panes the user closed manually (detected via the live id set). It reports
-// whether the pane layout changed (so the caller can trigger a rebalance). Errors
-// from individual kitty calls are collected and returned together; reconcile is
-// best-effort and continues past failures. The caller must hold mu.
-//
-// kmux owns every agent pane. An idle slot's picker (kmux-idler) launches its agent
-// in place, replacing the placeholder's shell with the session's tmux client in the
-// same window; adoptInPlace (run just before reconcile) promotes that placeholder to
-// a managed column, so this add loop finds the session already attached. Any session
-// that still isn't attached here — one created some other way, or an in-place launch
-// whose adoption was skipped this round — is given a fresh kmux-controlled pane via
-// add. Either way kmux owns the split, keeping the column model in step with kitty's
-// real geometry.
+// reconcile makes the live panes match the active session set: attach new sessions,
+// close vanished ones, and prune panes the user closed by hand. Best-effort; the
+// caller must hold mu.
 func (m *Manager) reconcile(active []string, live map[int]bool) (changed bool, errs []error) {
 	// Prune panes the user closed by hand so our state stays truthful.
 	if live != nil {
@@ -339,10 +274,9 @@ func (m *Manager) reconcile(active []string, live map[int]bool) (changed bool, e
 	return changed, errs
 }
 
-// ownsWindow reports whether id is a window the manager already tracks — the
-// sidebar, an attached agent pane, or a placeholder. The pane watcher uses it to
-// recognize a genuinely external window (one the user spawned) so it never
-// reorganizes a window kmux itself created. The caller must hold mu.
+// ownsWindow reports whether id is a window the manager already tracks (sidebar,
+// agent pane, or placeholder), so the watcher never reorganizes a kmux-owned window.
+// The caller must hold mu.
 func (m *Manager) ownsWindow(id int) bool {
 	if id == m.sidebarID {
 		return true
@@ -362,10 +296,8 @@ func (m *Manager) ownsWindow(id int) bool {
 	return false
 }
 
-// OpenAndSync opens a pane for a manually launched session, then pads and
-// rebalances the layout — all under the lock so it serializes with reconcile
-// passes. It mirrors ReconcileAll's transaction shape for the single-session
-// open path. Returns collected per-window errors.
+// OpenAndSync opens a pane for a manually launched session, then pads and rebalances
+// under the lock so it serializes with reconcile passes.
 func (m *Manager) OpenAndSync(name, dir, agentCmd string) []error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -380,9 +312,8 @@ func (m *Manager) OpenAndSync(name, dir, agentCmd string) []error {
 	return append(errs, m.rebalance()...)
 }
 
-// ReattachAndSync re-opens a pane for an already-running session whose pane was
-// lost, then pads and rebalances — the reattach counterpart of OpenAndSync,
-// under the lock.
+// ReattachAndSync re-opens a pane for a running session whose pane was lost, then
+// pads and rebalances under the lock. The reattach counterpart of OpenAndSync.
 func (m *Manager) ReattachAndSync(name string) []error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -397,10 +328,8 @@ func (m *Manager) ReattachAndSync(name string) []error {
 	return append(errs, m.rebalance()...)
 }
 
-// open ensures a detached tmux session named `name` (running agentCmd in dir)
-// exists, then attaches a pane for it and records it in the layout. If the
-// session is already attached it is a no-op; callers should focus it instead.
-// The caller must hold mu.
+// open ensures a detached tmux session exists, then attaches a pane for it. A no-op
+// when already attached; callers should focus it instead. The caller must hold mu.
 func (m *Manager) open(name, dir, agentCmd string) error {
 	if m.attached(name) {
 		return nil
@@ -411,11 +340,8 @@ func (m *Manager) open(name, dir, agentCmd string) error {
 	return m.add(name)
 }
 
-// reattach attaches a fresh pane to an already-running session, without creating
-// a tmux session. It is used to re-open a pane the user closed by hand (or
-// otherwise lost) for a session that is still live. It is a no-op when the
-// session is already attached; callers should focus it instead. The caller must
-// hold mu.
+// reattach attaches a fresh pane to a running session without creating a tmux
+// session. A no-op when already attached. The caller must hold mu.
 func (m *Manager) reattach(session string) error {
 	if m.attached(session) {
 		return nil
@@ -423,13 +349,9 @@ func (m *Manager) reattach(session string) error {
 	return m.add(session)
 }
 
-// add launches a pane for session and records it in the layout.
 func (m *Manager) add(session string) error {
-	// When a placeholder slot is reserved, a new agent column must take it over
-	// rather than carve space out of an existing column: splitting a real column
-	// would trap both agents inside that column's single slot (two thin panes),
-	// and no later resize can free them. Consuming the placeholder lands the new
-	// column in a full-width slot of its own.
+	// A new agent column must consume a reserved placeholder rather than split a real
+	// column, which would trap both agents in one slot with no way to resize free.
 	if len(m.columns) < maxColumns && len(m.placeholders) > 0 {
 		return m.addInPlaceholderSlot(session)
 	}
@@ -448,19 +370,16 @@ func (m *Manager) add(session string) error {
 	return nil
 }
 
-// addInPlaceholderSlot launches a new agent column into the leftmost reserved
-// placeholder's slot: it splits that placeholder (so the new pane shares its
-// slot) and then closes the placeholder (so the new pane absorbs the whole
-// slot). The result is a fixed-width column instead of a half-width split of an
-// existing agent column.
+// addInPlaceholderSlot splits the leftmost placeholder then closes it, so the new
+// column absorbs the whole slot at fixed width instead of half-splitting a real column.
 func (m *Manager) addInPlaceholderSlot(session string) error {
 	ph := m.placeholders[0]
 	id, err := launchWindow(kitty.VSplit, ph, 0, session, "tmux", "attach", "-t", session)
 	if err != nil {
 		return err
 	}
-	// Drop the placeholder so the new column expands to fill its slot. Best
-	// effort: even if the close call fails, syncPlaceholders prunes it later.
+	// Drop the placeholder so the new column fills its slot; syncPlaceholders prunes
+	// it later if the close fails.
 	_ = closeWindow(ph)
 	m.placeholders = m.placeholders[1:]
 	m.columns = append(m.columns, []int{id})
@@ -471,9 +390,6 @@ func (m *Manager) addInPlaceholderSlot(session string) error {
 // placement decides where the next pane goes:
 //   - fewer than maxColumns columns -> open a NEW column via vsplit
 //   - otherwise -> STACK via hsplit under the column with the fewest panes
-//
-// It returns the split location, the window id to split from, the bias, and the
-// index of the target column.
 func (m *Manager) placement() (kitty.SplitLocation, int, int, int) {
 	if len(m.columns) < maxColumns {
 		col := len(m.columns)
@@ -497,7 +413,6 @@ func (m *Manager) placement() (kitty.SplitLocation, int, int, int) {
 	return kitty.HSplit, bottom, 0, target
 }
 
-// sessionFor returns the session name attached to a window id, or "" if none.
 func (m *Manager) sessionFor(id int) string {
 	for session, wid := range m.bySession {
 		if wid == id {
@@ -507,15 +422,9 @@ func (m *Manager) sessionFor(id int) string {
 	return ""
 }
 
-// promotable returns the window id of a stacked pane that should be lifted into
-// its own column, and whether one exists. A pane is promotable when the layout
-// has a free column slot (fewer than maxColumns columns) yet some column still
-// holds more than one pane: it picks the bottom pane of the *rightmost* such
-// column. The freed slot is always added on the right (see add/placement), so
-// pulling from the rightmost stack keeps horizontal splits packed on the left:
-// e.g. (A-B)|(C-D)|E losing E lifts D, yielding (A-B)|C|D rather than A|(C-D)|B.
-// This is what makes detaching a single-pane column collapse a horizontal split
-// into the freed slot instead of leaving an idle placeholder.
+// promotable returns a stacked pane to lift into its own free column slot: the
+// bottom pane of the rightmost stacked column. Pulling from the right keeps splits
+// packed left, e.g. (A-B)|(C-D)|E losing E gives (A-B)|C|D not A|(C-D)|B.
 func promotable(columns [][]int) (id int, ok bool) {
 	if len(columns) >= maxColumns {
 		return 0, false
@@ -529,14 +438,9 @@ func promotable(columns [][]int) (id int, ok bool) {
 	return 0, false
 }
 
-// compact lifts stacked agent panes into free column slots so that detaching a
-// column collapses a horizontal split rather than leaving an idle slot behind.
-// While a slot is free (fewer than maxColumns columns) and some column is still
-// stacked, it moves the bottom pane of the tallest stack into a new column of its
-// own. Moving a pane means closing its kitty window (which only detaches tmux)
-// and re-attaching it as a fresh column via add. It reports whether anything
-// changed (so the caller can rebalance) and collects per-window errors; like
-// reconcile it is best-effort. The caller must hold mu.
+// compact lifts stacked panes into free column slots so detaching a column collapses
+// a horizontal split rather than leaving an idle slot. Moving a pane means closing
+// its window (which only detaches tmux) and re-adding it. Best-effort; caller holds mu.
 func (m *Manager) compact() (changed bool, errs []error) {
 	for {
 		id, ok := promotable(m.columns)
@@ -547,8 +451,7 @@ func (m *Manager) compact() (changed bool, errs []error) {
 		if session == "" {
 			return changed, errs // unknown id; avoid spinning
 		}
-		// Detach the stacked pane and re-attach it as its own column. add lands it
-		// in a free slot (vsplit) since columns < maxColumns here.
+		// Re-attach the stacked pane as its own column; add lands it in a free slot.
 		if err := closeWindow(id); err != nil {
 			errs = append(errs, err)
 		}
@@ -561,7 +464,6 @@ func (m *Manager) compact() (changed bool, errs []error) {
 	}
 }
 
-// forget removes a window id from the session map and its column.
 func (m *Manager) forget(session string, id int) {
 	delete(m.bySession, session)
 	for c := range m.columns {
@@ -582,13 +484,9 @@ func (m *Manager) forget(session string, id int) {
 	m.columns = cleaned
 }
 
-// placeholderTarget is how many filler panes the layout should currently hold:
-// enough to keep the agent area at maxColumns columns so the dashboard and any
-// real agent panes stay a fixed width. It holds even with zero agents: an idle
-// dashboard shows the sidebar beside maxColumns idle slots rather than a lone
-// sidebar stretched across the whole tab (and rather than degrading to a single
-// wide pane as sessions are reaped one by one). Once the columns stack
-// (>= maxColumns) the width is already fixed and no padding is needed.
+// placeholderTarget is how many filler panes to hold to keep the agent area at
+// maxColumns columns, so real panes stay a fixed width. Holds even with zero agents;
+// once columns reach maxColumns the width is already fixed and no padding is needed.
 func (m *Manager) placeholderTarget() int {
 	if len(m.columns) >= maxColumns {
 		return 0
@@ -597,9 +495,7 @@ func (m *Manager) placeholderTarget() int {
 }
 
 // columnAnchors returns one window id per agent column, real columns first then
-// placeholders, left-to-right. A real column's anchor is its top window; a
-// placeholder is its own anchor. rebalance evens these out so each occupies an
-// equal fixed slice of the agent area.
+// placeholders. A real column's anchor is its top window; a placeholder is its own.
 func (m *Manager) columnAnchors() []int {
 	anchors := make([]int, 0, len(m.columns)+len(m.placeholders))
 	for _, col := range m.columns {
@@ -620,14 +516,9 @@ func (m *Manager) rightmostAnchor() int {
 	return m.sidebarID
 }
 
-// syncPlaceholders adds or removes filler panes so the agent area always holds
-// maxColumns columns (real + placeholder) while any agent is active, keeping
-// real agent panes at a constant width. It first prunes placeholders the user
-// closed by hand (via the live id set), then converges to placeholderTarget. It
-// reports whether anything changed (so the caller can rebalance) and collects
-// per-window errors; like reconcile it is best-effort. The caller must hold mu,
-// and live must be a snapshot taken under that same lock so a freshly created
-// placeholder is never mistaken for one the user closed and orphaned.
+// syncPlaceholders adds or removes filler panes to converge on placeholderTarget,
+// first pruning placeholders the user closed by hand. Best-effort; the caller must
+// hold mu, and live must be a snapshot taken under that same lock.
 func (m *Manager) syncPlaceholders(live map[int]bool) (changed bool, errs []error) {
 	if live != nil {
 		kept := m.placeholders[:0]
@@ -643,8 +534,8 @@ func (m *Manager) syncPlaceholders(live map[int]bool) (changed bool, errs []erro
 
 	want := m.placeholderTarget()
 
-	// Close surplus placeholders from the right (the freed column is reused by
-	// the real agent that just claimed it).
+	// Close surplus placeholders from the right; the freed column is reused by the
+	// real agent that just claimed it.
 	for len(m.placeholders) > want {
 		last := m.placeholders[len(m.placeholders)-1]
 		if err := closeWindow(last); err != nil {
@@ -667,11 +558,9 @@ func (m *Manager) syncPlaceholders(live map[int]bool) (changed bool, errs []erro
 	return changed, errs
 }
 
-// rebalanceTargets computes the target sidebar and per-column widths (in cells)
-// as fixed fractions of the total tab width, given the current sidebar width and
-// the per-column widths. Total text-columns is invariant under resizing, so
-// these absolute targets can be computed once and then converged toward. The
-// last column absorbs any rounding remainder.
+// rebalanceTargets computes target sidebar and per-column widths as fixed fractions
+// of the total tab width. Total width is invariant under resizing, so these absolute
+// targets can be computed once and converged toward; the last column absorbs rounding.
 func rebalanceTargets(curSidebar int, colWidths []int) (total, targetSidebar, targetCol int) {
 	total = curSidebar
 	for _, w := range colWidths {
@@ -695,19 +584,13 @@ func rebalanceTargets(curSidebar int, colWidths []int) (total, targetSidebar, ta
 // rebalance stops trying to correct it.
 const rebalanceTolerance = 1
 
-// rebalanceMaxPasses caps how many convergence passes rebalance makes. A single
-// relative-resize pass often under-shoots (kitty's resize-window does not always
-// move the full requested delta in one call, and an unbalanced split tree needs
-// several nudges), so we repeat until widths settle or this cap is hit.
+// rebalanceMaxPasses caps rebalance's convergence passes: a single relative-resize
+// pass often under-shoots, so we repeat until widths settle or this cap is hit.
 const rebalanceMaxPasses = 6
 
-// rebalance sizes the sidebar and agent columns to their target fractions of the
-// tab width (sidebarFrac / agentFrac). It resizes the sidebar and every column
-// but the last (which absorbs the remainder), re-reading live widths before each
-// step so the relative resizes converge regardless of the underlying split tree
-// shape, and repeats the whole pass until every window is within
-// rebalanceTolerance of its target or rebalanceMaxPasses is reached. The caller
-// must hold mu.
+// rebalance sizes the sidebar and agent columns to their target fractions, resizing
+// every column but the last (which absorbs the remainder) and re-reading live widths
+// before each step so the relative resizes converge. The caller must hold mu.
 func (m *Manager) rebalance() []error {
 	anchors := m.columnAnchors()
 	if len(anchors) == 0 {
@@ -738,9 +621,8 @@ func (m *Manager) rebalance() []error {
 		}
 
 		converged := true
-		// The first step reuses the pass-opening snapshot (no resize has happened
-		// yet); each later step re-reads, because the resize before it shifts the
-		// widths of every window to its right.
+		// The first step reuses the pass-opening snapshot; each later step re-reads,
+		// since the resize before it shifts the widths of every window to its right.
 		cur := widths
 		for i, s := range steps {
 			if i > 0 {
@@ -765,15 +647,10 @@ func (m *Manager) rebalance() []error {
 	return errs
 }
 
-// ReorgVerticalPane absorbs a user-spawned pane that became an extra full-height
-// column (a manual *vertical* split) back into the fixed layout: it closes that
-// pane and re-creates an idle slot stacked *under* the shortest agent column, so
-// the agent area stays at maxColumns columns instead of growing a fourth that would
-// throw off the fixed widths. The restacked slot runs the idle launcher
-// (placeholderCmd), so it is immediately usable, but is intentionally left
-// untracked — it is the user's spare pane, sharing its column's width, and can be
-// dismissed with the idle loop's `q`. id must be a window the manager does not own
-// (the watcher guards this); owning it is treated as a no-op. It takes the lock.
+// ReorgVerticalPane absorbs a user-spawned full-height column (a manual vertical
+// split) back into the fixed layout: it closes that pane and re-creates an idle slot
+// stacked under the shortest column, so the area stays at maxColumns. The restacked
+// slot is left untracked as the user's spare pane. Owning id is a no-op. Takes the lock.
 func (m *Manager) ReorgVerticalPane(id int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -787,10 +664,8 @@ func (m *Manager) ReorgVerticalPane(id int) error {
 	return err
 }
 
-// stackAnchor is the window to hsplit a new stacked pane beneath: the bottom pane
-// of the shortest agent column, else the first placeholder, else the sidebar. It
-// keeps a restacked spare pane within the existing column grid rather than opening
-// a new column.
+// stackAnchor is the window to hsplit a new stacked pane beneath: the bottom pane of
+// the shortest agent column, else the first placeholder, else the sidebar.
 func (m *Manager) stackAnchor() int {
 	if len(m.columns) > 0 {
 		t := 0
@@ -808,9 +683,8 @@ func (m *Manager) stackAnchor() int {
 	return m.sidebarID
 }
 
-// CloseAll closes every pane kmux spawned (detaching tmux, not killing it). It
-// mutates the layout and is called from the UI goroutine on quit, so it takes the
-// exclusive lock — running after any in-flight transaction completes.
+// CloseAll closes every pane kmux spawned (detaching tmux, not killing it). Called on
+// quit, so it takes the exclusive lock, running after any in-flight transaction.
 func (m *Manager) CloseAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()

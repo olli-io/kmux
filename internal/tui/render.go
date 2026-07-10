@@ -23,8 +23,7 @@ var (
 	selectedStyle = lipgloss.NewStyle().Background(lipgloss.Color("238"))
 
 	// selectedOpenSeq is selectedStyle's background as a bare SGR open sequence,
-	// derived (not hardcoded) so it tracks the color above across terminal color
-	// profiles. selectLine re-emits it after inner ANSI resets.
+	// derived so it tracks the color above. selectLine re-emits it after inner resets.
 	selectedOpenSeq = func() string {
 		const sentinel = "\x00"
 		if open, _, ok := strings.Cut(selectedStyle.Render(sentinel), sentinel); ok {
@@ -39,20 +38,17 @@ var (
 	borderIdle = lipgloss.Color("240") // unfocused panel border (grey)
 )
 
-// rowDeco renders styled row labels/badges. It keeps lipgloss styling out of the
-// pure tree-building code in tree.go. spinner is the current busy-animation frame,
-// advanced on each spinner tick.
+// rowDeco renders styled row labels/badges, keeping lipgloss out of the tree
+// building in tree.go.
 type rowDeco struct{ spinner int }
 
-// orphanGlyph marks an orphaned (no-repo) session in its Sessions-panel row,
-// shown after the label and before the agent badge ("kmux ∅ A‧CC"). It mirrors
-// the leading mark agent.OrphanSession bakes into the session name.
+// orphanGlyph marks an orphaned (no-repo) session, mirroring the mark
+// agent.OrphanSession bakes into the session name.
 const orphanGlyph = "∅" // U+2205 EMPTY SET
 
 func (d rowDeco) session(name string, depth int, st status.AttentionState, attached, detached bool) row {
-	// The leading mark is the attention glyph (what the agent is doing); the
-	// attach state (A/D) rides on the agent badge instead. An orphaned session
-	// (no git repo) shows a dim ∅ between its label and badge: "kmux ∅ A‧CC".
+	// The leading mark is the attention glyph; the attach state (A/D) rides on the
+	// agent badge. An orphaned session shows a dim ∅ between label and badge.
 	label := sessionLabel(name)
 	if agent.IsOrphan(name) {
 		label += " " + dimStyle.Render(orphanGlyph)
@@ -67,9 +63,8 @@ func (d rowDeco) session(name string, depth int, st status.AttentionState, attac
 	}
 }
 
-// sessionLabel is the text a session row displays, mirroring the Projects panel:
-// a main-worktree session shows the project name, a linked-worktree session shows
-// the worktree name alone (the agent kind shows as a trailing badge).
+// sessionLabel mirrors the Projects panel: a main-worktree session shows the
+// project name, a linked-worktree session shows the worktree name alone.
 func sessionLabel(name string) string {
 	if wt := agent.WorktreeName(name); wt != "" {
 		return wt
@@ -77,12 +72,9 @@ func sessionLabel(name string) string {
 	return agent.ProjectName(name)
 }
 
-// agentBadge renders the styled agent-kind badge for a session name ("CC" for
-// Claude, "OC" for OpenCode), prefixed with its attach state: a green "A" when
-// attached (live pane) or a red "D" when detached (tmux alive, pane closed), so
-// the badge reads "A‧CC"/"D‧CC"/"CC" or "A‧OC"/"D‧OC"/"OC" (‧ is U+2027, a purely
-// cosmetic separator in the badge). The prefix keeps its own color (green/red)
-// distinct from the agent color. Returns "" for a non-agent name.
+// agentBadge renders the styled agent-kind badge ("CC"/"OC") prefixed with its
+// attach state: green "A" attached, red "D" detached. ‧ (U+2027) is a cosmetic
+// separator. Returns "" for a non-agent name.
 func agentBadge(name string, attached, detached bool) string {
 	prefix := ""
 	switch {
@@ -100,9 +92,8 @@ func agentBadge(name string, attached, detached bool) string {
 	return ""
 }
 
-// attentionGlyph returns the styled status glyph for an attention state, shown at
-// the head of a session row. For the busy state it returns the spinner frame
-// selected by frame, producing a rotating braille animation across ticks.
+// attentionGlyph returns the styled status glyph for an attention state. Busy
+// returns the spinner frame at frame, animating across ticks.
 func attentionGlyph(st status.AttentionState, frame int) string {
 	switch st {
 	case status.AttnPermission:
@@ -119,22 +110,19 @@ func attentionGlyph(st status.AttentionState, frame int) string {
 // branchGlyph is the git-branch symbol () shown before a branch name.
 const branchGlyph = ""
 
-// chevronCollapsed / chevronExpanded are the nerdfont chevrons shown before a
-// collapsible header: right-pointing when collapsed, down-pointing when expanded.
+// chevronCollapsed / chevronExpanded precede a collapsible header.
 const (
 	chevronCollapsed = "" // nf-fa-chevron_right
 	chevronExpanded  = "" // nf-fa-chevron_down
 )
 
-// folderGlyph / folderOpenGlyph are the folder symbols shown before a
-// multi-worktree project header: a filled folder when collapsed, the outlined
-// open folder when expanded.
+// folderGlyph / folderOpenGlyph precede a multi-worktree project header (open
+// variant when expanded).
 const (
 	folderGlyph     = "" // nf-fa-folder
 	folderOpenGlyph = "" // nf-fa-folder_open_o
 )
 
-// branchSuffix renders the dim " <glyph> <branch>" tail, or "" when no branch.
 func branchSuffix(branch string) string {
 	if branch == "" {
 		return ""
@@ -142,8 +130,7 @@ func branchSuffix(branch string) string {
 	return dimStyle.Render(" " + branchGlyph + " " + branch)
 }
 
-// gitStatus is the per-checkout git state a row's leading mark renders: whether
-// the working tree is dirty and how it sits relative to its upstream (origin).
+// gitStatus is the per-checkout git state a row's leading mark renders.
 type gitStatus struct {
 	dirty    bool
 	ahead    int
@@ -159,20 +146,13 @@ func projectGit(p project.Project) gitStatus {
 	return gitStatus{dirty: p.Dirty, ahead: p.Ahead, behind: p.Behind, upstream: p.Upstream}
 }
 
-// branchLabel labels a worktree/project leaf: a leading git-status mark (in place
-// of a plain git glyph), the project name (colored by live session state), and the
-// dim branch tail.
 func branchLabel(name, branch string, live liveState, gs gitStatus) string {
 	return gitStatusGlyph(gs) + " " + projectName(name, live) + branchSuffix(branch)
 }
 
-// gitStatusGlyph marks a checkout's git state at the head of its row. A dirty
-// working tree (staged or unstaged changes) always shows a red "M", as before.
-// Otherwise the mark reports how the branch sits against its upstream (origin):
-// a yellow ↑ when ahead, ↓ when behind, a red ⇕ when diverged (both), and a
-// green "=" when it matches. A clean checkout with no upstream configured is
-// local-only and shows a dim "L" — distinct from "=" so a branch never pushed
-// doesn't masquerade as one in sync with origin.
+// gitStatusGlyph marks a checkout's git state: red "M" dirty, else ↑/↓/⇕ against
+// upstream or green "=" in sync. A clean checkout with no upstream shows a dim
+// "L", distinct from "=" so a never-pushed branch isn't read as in sync.
 func gitStatusGlyph(gs gitStatus) string {
 	switch {
 	case gs.dirty:
@@ -190,9 +170,8 @@ func gitStatusGlyph(gs gitStatus) string {
 	}
 }
 
-// projectName renders a project/worktree name, colored by its live session state:
-// green when a session has a live pane, red when its only session is detached
-// (mirroring the Sessions panel's "D"), uncolored when it has no session.
+// projectName colors a project/worktree name by live session state: green with a
+// live pane, red when its only session is detached, uncolored with no session.
 func projectName(name string, live liveState) string {
 	switch live {
 	case liveAttached:
@@ -203,13 +182,11 @@ func projectName(name string, live liveState) string {
 	return name
 }
 
-// projectLeaf labels a single-worktree project (name + branch).
 func (rowDeco) projectLeaf(p project.Project, live liveState) string {
 	return branchLabel(p.Name, p.Branch, live, projectGit(p))
 }
 
-// projectFolder labels a multi-worktree project header (folder glyph + name).
-// The glyph is the open variant when expanded, the closed variant otherwise.
+// projectFolder labels a multi-worktree project header, open glyph when expanded.
 // The branch moves onto the main-worktree child row inside the expanded list.
 func (rowDeco) projectFolder(p project.Project, open bool, live liveState) string {
 	glyph := folderGlyph
@@ -217,20 +194,17 @@ func (rowDeco) projectFolder(p project.Project, open bool, live liveState) strin
 		glyph = folderOpenGlyph
 	}
 	label := folderStyle.Render(glyph) + " " + projectName(p.Name, live)
-	// When collapsed the worktree rows (with their own marks) are hidden, so the
-	// header carries an aggregate status rolled up across the main worktree and
-	// every linked one. Expanded, the per-row marks below say it instead.
+	// Collapsed, the header carries an aggregate status rolled up across all
+	// worktrees; expanded, the per-row marks say it instead.
 	if !open {
 		label += " " + gitStatusGlyph(projectStatus(p))
 	}
 	return label
 }
 
-// projectStatus rolls a project's main worktree and every linked worktree into
-// one git status for the collapsed-folder mark: dirty if any is dirty, ahead/
-// behind if any is, and upstream-tracked if any has an upstream. The rollup
-// favors action — a single behind worktree shows ↓ for the whole folder — so a
-// collapsed project never hides changes that an expanded one would surface.
+// projectStatus rolls all of a project's worktrees into one status for the
+// collapsed-folder mark. The rollup favors action so a collapsed project never
+// hides changes an expanded one would surface.
 func projectStatus(p project.Project) gitStatus {
 	gs := projectGit(p)
 	for _, w := range p.Worktrees {
@@ -242,10 +216,8 @@ func projectStatus(p project.Project) gitStatus {
 	return gs
 }
 
-// sessionFolder labels a multi-session project header in the Sessions panel,
-// mirroring projectFolder: a folder glyph (open when expanded) plus the project
-// name. The per-session attention/agent state rides on the child rows, so the
-// header itself stays an uncolored grouping node.
+// sessionFolder labels a multi-session project header, mirroring projectFolder;
+// per-session state rides on the child rows.
 func (rowDeco) sessionFolder(name string, open bool) string {
 	glyph := folderGlyph
 	if open {
@@ -254,8 +226,6 @@ func (rowDeco) sessionFolder(name string, open bool) string {
 	return folderStyle.Render(glyph) + " " + name
 }
 
-// mainWorktree labels the main worktree row (repo name + branch), listed first
-// inside an expanded project folder.
 func (rowDeco) mainWorktree(p project.Project, live liveState) string {
 	return branchLabel(p.Name, p.Branch, live, projectGit(p))
 }

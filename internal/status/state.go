@@ -9,9 +9,8 @@ import (
 	"github.com/olli-io/kmux/internal/config"
 )
 
-// stateFile returns the path to kmux's persisted state file
-// (~/.config/kmux/state.json), creating the directory as needed. It shares
-// config.ConfigDir so state and config always live in the same ~/.config/kmux.
+// stateFile returns kmux's state file path (~/.config/kmux/state.json), creating the
+// dir as needed. It shares config.ConfigDir so state and config live together.
 func stateFile() (string, error) {
 	dir, err := config.ConfigDir()
 	if err != nil {
@@ -29,9 +28,8 @@ type persistedState struct {
 	Idle     map[string]IdleRecord `json:"idle,omitempty"` // session -> persisted idle clock
 }
 
-// LoadState reads the state persisted by a previous run: the set of detached
-// session names and the per-session idle clocks (see IdleRecord). A missing state
-// file yields empty, non-nil maps, not an error.
+// LoadState reads the state persisted by a previous run: detached session names and
+// per-session idle clocks. A missing file yields empty, non-nil maps, not an error.
 func LoadState() (detached map[string]bool, idle map[string]IdleRecord, err error) {
 	path, err := stateFile()
 	if err != nil {
@@ -58,9 +56,8 @@ func LoadState() (detached map[string]bool, idle map[string]IdleRecord, err erro
 	return detached, st.Idle, nil
 }
 
-// SaveState persists the detached-session set and the per-session idle clocks so
-// both survive a restart. Detached names are sorted for a stable, diff-friendly
-// file; the idle map is written verbatim.
+// SaveState persists the detached-session set and idle clocks. Detached names are
+// sorted for a stable, diff-friendly file; the idle map is written verbatim.
 func SaveState(detached map[string]bool, idle map[string]IdleRecord) error {
 	path, err := stateFile()
 	if err != nil {

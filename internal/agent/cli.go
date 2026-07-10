@@ -11,14 +11,9 @@ import (
 	"github.com/olli-io/kmux/internal/tmux"
 )
 
-// ParsedArgs is the routed kmux command line. Agent is "" for the default
-// dashboard mode and "claude"/"opencode" for the agent modes; PrintSession is set
-// by --session to print the resolved session name instead of launching it;
-// PrintProject is set by --project to print the project directory of the current
-// tmux session instead of launching anything; Splash is set by --splash to render
-// the launch-overlay animation instead of the dashboard (an internal mode the
-// dashboard spawns in its own kitty tab to hide the first reconcile's pane
-// churn); Path is the optional directory argument ("" means the current directory).
+// ParsedArgs is the routed kmux command line: Agent is "" for the dashboard mode,
+// the Print* flags print a value instead of launching, and Splash renders the
+// launch-overlay animation.
 type ParsedArgs struct {
 	Path         string
 	Agent        string
@@ -27,17 +22,8 @@ type ParsedArgs struct {
 	Splash       bool
 }
 
-// ParseArgs routes the kmux command line. With no agent flag it selects the
-// dashboard (the historical behaviour); --agent selects the agent launcher, and
-// --session prints the session name that --agent would create (for scripting)
-// and exits. --project prints the project directory of the tmux session the
-// caller is inside (for scripts bound to a tmux keybinding) and exits; it takes
-// no value and ignores any path. --splash selects the launch-overlay animation
-// (an internal mode the dashboard spawns in its own kitty tab) and takes no
-// value. The --agent/--session flags take a kind (claude or opencode) and accept
-// either `--flag claude` or `--flag=claude`. The path and the flag may appear in
-// either order, so `kmux PATH --agent claude` and `kmux --agent claude PATH`
-// parse the same.
+// ParseArgs routes the kmux command line. Flags accept either `--flag claude` or
+// `--flag=claude`, and the path and flag may appear in either order.
 func ParseArgs(args []string) (ParsedArgs, error) {
 	var pa ParsedArgs
 	for i := 0; i < len(args); i++ {
@@ -78,11 +64,9 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 	return pa, nil
 }
 
-// RunAgent creates (if needed) and attaches the current terminal to the tmux
-// session for the given agent kind in the project containing path. The session
-// name follows kmux's convention (ExpectedSession + SessionForKind), so the
-// session the dashboard would spawn and the one this launches are one and the
-// same — launching here, then opening the dashboard, focuses the same agent.
+// RunAgent attaches the current terminal to the agent session for path, creating
+// it if needed. The name follows kmux's convention, so launching here and opening
+// the dashboard focus the same agent.
 func RunAgent(path, kind string) error {
 	name, dir, err := sessionPlan(path, kind)
 	if err != nil {
@@ -91,27 +75,18 @@ func RunAgent(path, kind string) error {
 	return attachAgentSession(name, dir, AgentCommand(kind))
 }
 
-// SessionName returns the tmux session name kmux uses for the given agent kind
-// in the project/worktree containing path ("" = the current directory). It is
-// the exact name RunAgent would create, so other tools can target the same
-// session (e.g. `tmux send-keys -t "$(kmux --session claude)"`).
+// SessionName returns the exact name RunAgent would create for path, so other
+// tools can target the same session.
 func SessionName(path, kind string) (string, error) {
 	name, _, err := sessionPlan(path, kind)
 	return name, err
 }
 
-// CurrentProjectDir resolves the project (or worktree) directory of the kmux
-// agent session the caller is currently inside. It is meant for scripts bound to
-// tmux keybindings within an agent pane (e.g. "open this session's project in an
-// editor"): it reads the current tmux session, requires it to be a kmux agent
-// session (a [kmux][CC]/[kmux][OC] name), and prints the directory to launch tooling in.
-//
-// The directory is taken from the git worktree root of the pane's current path —
-// that is where the session was anchored and stays correct even if the agent has
-// cd'd into a subdirectory. A pane that is in no git repository (an orphaned
-// session) falls back to the project path encoded in the session name. The
-// session name is preferred only as a fallback because it is tmux-sanitized
-// (any '.' became '_'), so it may not be byte-identical to the real path.
+// CurrentProjectDir resolves the directory of the agent session the caller is
+// inside, for scripts bound to tmux keybindings. It takes the git worktree root of
+// the pane's path, which stays correct even after the agent cd's into a
+// subdirectory; an orphaned (no-repo) pane falls back to the sanitized path encoded
+// in the session name.
 func CurrentProjectDir() (string, error) {
 	name, paneDir, err := tmux.CurrentSession()
 	if err != nil {
@@ -131,10 +106,8 @@ func CurrentProjectDir() (string, error) {
 	return "", fmt.Errorf("could not resolve a project directory for session %q", name)
 }
 
-// sessionPlan resolves the session name and working directory for an agent kind
-// in the project/worktree containing path ("" = the current directory). A path
-// that lives in no git repository is not an error: it falls back to orphanPlan,
-// which anchors the session at the directory itself.
+// sessionPlan resolves the session name and directory for path. A path in no git
+// repository is not an error: it falls back to orphanPlan.
 func sessionPlan(path, kind string) (name, dir string, err error) {
 	if path == "" {
 		path = "."
@@ -147,13 +120,9 @@ func sessionPlan(path, kind string) (name, dir string, err error) {
 	return SessionForKind(ExpectedSession(proj.Path, wt), kind), dir, nil
 }
 
-// orphanPlan resolves the session name and working directory for a path that is
-// not inside any git repository. The directory's own absolute path stands in for
-// a project path, marked with a leading orphanMark (see OrphanSession) — it won't
-// bind to any ~/git project (MatchProject returns ok=false), and the dashboard
-// files it under "(ungrouped)". The path is resolved to an absolute, symlink-free
-// form so the name is stable regardless of how the directory was addressed (e.g.
-// "." vs its full path).
+// orphanPlan resolves the session for a path in no git repository. The path is
+// resolved to an absolute, symlink-free form so the name is stable regardless of
+// how the directory was addressed.
 func orphanPlan(path, kind string) (name, dir string, err error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -172,12 +141,9 @@ func orphanPlan(path, kind string) (name, dir string, err error) {
 	return SessionForKind(OrphanSession(abs), kind), abs, nil
 }
 
-// resolveWorktree locates which of a project's worktrees contains path, returning
-// that worktree's root directory and its session-name segment ("" for the main
-// worktree). ScanProject always anchors proj at the main worktree regardless of
-// which worktree path lives in, so the actual checkout is resolved separately
-// here from git's toplevel. A path that resolves to no known worktree (or an
-// unreadable toplevel) falls back to the main worktree.
+// resolveWorktree locates which of proj's worktrees contains path. ScanProject
+// always anchors proj at the main worktree, so the actual checkout is resolved
+// separately here from git's toplevel; an unknown worktree falls back to the main.
 func resolveWorktree(path string, proj *project.Project) (dir, wt string) {
 	top, err := gitToplevel(path)
 	if err != nil || top == "" || top == proj.Path {
@@ -191,7 +157,6 @@ func resolveWorktree(path string, proj *project.Project) (dir, wt string) {
 	return top, ""
 }
 
-// gitToplevel returns the root directory of the git worktree containing dir.
 func gitToplevel(dir string) (string, error) {
 	out, err := exec.Command("git", "-C", dir, "rev-parse", "--show-toplevel").Output()
 	if err != nil {
@@ -200,11 +165,9 @@ func gitToplevel(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// attachAgentSession attaches the current terminal to tmux session `name`,
-// creating it first (running agentCmd in dir) when it doesn't already exist.
-// `tmux new-session -A` does both: it attaches to an existing session, or
-// creates and attaches otherwise (in which case -c/the command take effect).
-// stdio is inherited so the agent runs in the foreground of the calling terminal.
+// attachAgentSession attaches to tmux session name, creating it (running agentCmd
+// in dir) if absent — `new-session -A` does both. stdio is inherited so the agent
+// runs in the foreground of the calling terminal.
 func attachAgentSession(name, dir, agentCmd string) error {
 	cmd := exec.Command("tmux", "new-session", "-A", "-s", name, "-c", dir, agentCmd)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
