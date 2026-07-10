@@ -1,22 +1,17 @@
 // Package idler implements kmux-idler, the one-shot launcher picker kmux uses for
 // its idle slots. It is shipped as a separate binary (cmd/kmux-idler).
 //
-// Crucially it is NOT a resting process: an idle slot is held by a tiny shell
-// loop (see internal/layout.placeholderCmd) that just draws a hint and blocks on a
-// single keypress, so an idle pane costs a shell, not a Go runtime. kmux-idler is
-// only spawned for the brief moment the user is actually choosing what to launch,
-// then exits. It takes an agent kind as its argument:
+// It is not a resting process: an idle slot is held by a tiny shell loop that just
+// draws a hint and blocks on a keypress, so kmux-idler is only spawned for the brief
+// moment the user is choosing what to launch. It takes an agent kind as its argument:
 //
 //	kmux-idler            ↵ path: pick a project, then pick the kind
 //	kmux-idler claude     pick a project, launch Claude in it
 //	kmux-idler opencode   pick a project, launch OpenCode in it
 //
-// On selection it launches the agent in place (see Start): it execs the session's
-// tmux client, replacing the idle slot's shell in the same kitty window, so the
-// agent appears in the very pane the user launched from. The running dashboard then
-// adopts that placeholder window as the session's managed pane on its next poll, so
-// kmux stays in sole control of the splits and the column layout matches kitty's
-// geometry.
+// On selection it launches the agent in place (see Start), execing the tmux client
+// into the same kitty window; the dashboard then adopts that window as the session's
+// managed pane on its next poll.
 package idler
 
 import (
@@ -40,20 +35,16 @@ import (
 	"github.com/olli-io/kmux/internal/tmux"
 )
 
-// Launch is the agent the picker chose: the resolved tmux session name, the
-// directory to start it in, and the agent command to run. main launches it in the
-// current idle pane (see Start).
+// Launch is the agent the picker chose, launched in the current idle pane (see Start).
 type Launch struct {
 	Session  string
 	Dir      string
 	AgentCmd string
 }
 
-// Run shows the launcher picker for the given agent kind and blocks until the
-// user picks something or cancels. kind is "" (ask for the kind after the
-// project), "claude", or "opencode"; any other value is an error. It returns the
-// chosen Launch, or nil when the user cancelled. AltScreen keeps the slot clean
-// (the shell's idle hint is restored when the picker exits).
+// Run shows the launcher picker and blocks until the user picks or cancels,
+// returning the chosen Launch or nil on cancel. kind is "", "claude", or
+// "opencode"; any other value is an error.
 func Run(kind string) (*Launch, error) {
 	switch kind {
 	case "", "claude", "opencode":
@@ -67,26 +58,12 @@ func Run(kind string) (*Launch, error) {
 	return fm.(model).launch, nil
 }
 
-// Start launches the chosen agent in place: it execs the session's tmux client in
-// the current process, replacing the idle slot's shell in the SAME kitty window so
-// the agent takes over the pane the user launched from. `tmux new-session -A`
-// creates-or-attaches atomically, so the session becomes visible to the dashboard
-// at the same instant its tmux client occupies the pane — there is no detached gap
-// in which a poll could open a second pane.
-//
-// Before exec it writes an adopt hint (this pane's KITTY_WINDOW_ID -> session), so
-// the dashboard adopts this exact placeholder window as the session's managed pane
-// instead of opening a second one. The hint is written up front, before the session
-// even exists, which makes adoption race-free: by the time the session appears in
-// `tmux ls` the hint is already on disk. (Discovering the launch from kitty's
-// foreground-process view instead is racy — kitty refreshes that view on a timer, so
-// it can still report the placeholder's old shell after the exec, and the dashboard
-// would open a duplicate pane.)
-//
-// On success syscall.Exec replaces this process and Start never returns. It only
-// returns on failure; if tmux is missing (or exec fails) it falls back to creating
-// the session detached, so the launch is not lost — the dashboard's poll then opens
-// a pane for it the old way.
+// Start launches the chosen agent in place: it execs the session's tmux client
+// into the same kitty window. `tmux new-session -A` creates-or-attaches atomically,
+// so the session appears to the dashboard the instant its client occupies the pane.
+// The adopt hint is written before exec — before the session even exists — so the
+// dashboard adopts this exact window rather than opening a second pane. On failure
+// Start falls back to a detached session so the launch is not lost.
 func Start(l *Launch) error {
 	tmuxPath, err := exec.LookPath("tmux")
 	if err != nil {
@@ -96,9 +73,7 @@ func Start(l *Launch) error {
 	if hasWID {
 		_ = writeAdoptHint(wid, l.Session)
 	}
-	// new-session -A: attach if the session exists, otherwise create it running
-	// agentCmd in dir. Running it in the foreground (no -d) makes this pane the
-	// session's client.
+	// new-session -A attaches or creates; foreground (no -d) makes this pane the client.
 	argv := []string{"tmux", "new-session", "-A", "-s", l.Session, "-c", l.Dir, l.AgentCmd}
 	if err := syscall.Exec(tmuxPath, argv, os.Environ()); err != nil {
 		if hasWID {
@@ -109,8 +84,6 @@ func Start(l *Launch) error {
 	return nil // unreachable: exec replaced the process
 }
 
-// kittyWindowID returns this pane's kitty window id from KITTY_WINDOW_ID, and
-// whether it was present and valid (false outside kitty).
 func kittyWindowID() (int, bool) {
 	id, err := strconv.Atoi(os.Getenv("KITTY_WINDOW_ID"))
 	if err != nil {
@@ -119,13 +92,10 @@ func kittyWindowID() (int, bool) {
 	return id, true
 }
 
-// adoptDir is the directory holding adopt hints: one file per kitty window that
-// launched an agent in place, named by window id, containing the session name.
-// It lives under kmux's config/state dir (config.ConfigDir), deliberately the same
-// path the dashboard computes: both processes resolve it from $XDG_CONFIG_HOME/$HOME
-// alone, so a hint the idler writes is always found by the dashboard — unlike
-// $XDG_RUNTIME_DIR, which `kitten @ launch` need not propagate to a new window. It
-// falls back to a uid-scoped temp dir only if the config dir can't be resolved.
+// adoptDir holds adopt hints, one file per kitty window named by window id. It uses
+// config.ConfigDir — resolved from $XDG_CONFIG_HOME/$HOME alone, unlike
+// $XDG_RUNTIME_DIR which `kitten @ launch` need not propagate — so a hint the idler
+// writes is always found by the dashboard.
 func adoptDir() string {
 	if dir, err := config.ConfigDir(); err == nil {
 		return filepath.Join(dir, "adopt")
@@ -133,8 +103,8 @@ func adoptDir() string {
 	return filepath.Join(os.TempDir(), fmt.Sprintf("kmux-%d", os.Getuid()), "adopt")
 }
 
-// writeAdoptHint records that kitty window windowID is launching agent session in
-// place, so the dashboard can adopt that window instead of opening a second pane.
+// writeAdoptHint records that a kitty window is launching a session, so the
+// dashboard adopts that window instead of opening a second pane.
 func writeAdoptHint(windowID int, session string) error {
 	dir := adoptDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -143,9 +113,8 @@ func writeAdoptHint(windowID int, session string) error {
 	return os.WriteFile(filepath.Join(dir, strconv.Itoa(windowID)), []byte(session), 0o600)
 }
 
-// ReadAdoptHints returns the current adopt hints as window id -> session name. A
-// missing directory yields an empty map, not an error. Unparseable entries are
-// skipped. The dashboard reads these each reconcile to adopt in-place launches.
+// ReadAdoptHints returns the adopt hints as window id -> session name; a missing
+// directory yields an empty map, not an error.
 func ReadAdoptHints() (map[int]string, error) {
 	entries, err := os.ReadDir(adoptDir())
 	if err != nil {
@@ -174,9 +143,7 @@ func ReadAdoptHints() (map[int]string, error) {
 	return out, nil
 }
 
-// RemoveAdoptHint deletes the adopt hint for a kitty window id (a no-op if absent).
-// The dashboard consumes a hint once it has adopted its window, and prunes hints
-// whose window has gone.
+// RemoveAdoptHint deletes a window's adopt hint (a no-op if absent).
 func RemoveAdoptHint(windowID int) error {
 	err := os.Remove(filepath.Join(adoptDir(), strconv.Itoa(windowID)))
 	if err != nil && !os.IsNotExist(err) {
@@ -185,17 +152,14 @@ func RemoveAdoptHint(windowID int) error {
 	return nil
 }
 
-// minLayoutPanes is the floor the idle slot's quit key protects: the dashboard
-// sidebar plus its fixed agent columns (layout.maxColumns). At or below it, `q` is
-// inert — those panes are the core layout, and closing a core placeholder would
-// just make the dashboard respawn it. Hardcoded rather than imported to keep idler
-// free of an import cycle with layout (layout already imports idler).
+// minLayoutPanes is the floor the idle slot's quit key protects: sidebar plus fixed
+// agent columns. Hardcoded rather than imported from layout to avoid an import cycle
+// (layout already imports idler).
 const minLayoutPanes = 4 // sidebar + 3 agent columns
 
-// spareWindow returns this idle pane's kitty window id and whether its tab holds
-// more panes than the core layout (minLayoutPanes) — i.e. there is a spare pane
-// `q` could close. spare is false (with no error) outside kitty. Shared by
-// QuitIfSpare and CanQuit so the quit action and its hint use one rule.
+// spareWindow returns this pane's kitty window id and whether its tab holds a spare
+// pane beyond the core layout. Shared by QuitIfSpare and CanQuit so the quit action
+// and its hint use one rule. spare is false (no error) outside kitty.
 func spareWindow() (id int, spare bool, err error) {
 	id, err = strconv.Atoi(os.Getenv("KITTY_WINDOW_ID"))
 	if err != nil {
@@ -208,11 +172,9 @@ func spareWindow() (id int, spare bool, err error) {
 	return id, n > minLayoutPanes, nil
 }
 
-// QuitIfSpare closes the idle pane this process runs in, but only when its kitty
-// tab holds more panes than the core layout (minLayoutPanes) — i.e. there is a
-// spare pane the user added. It backs the idle loop's `q` key, letting the user
-// dismiss an extra idle slot while never being able to quit away the dashboard and
-// its three columns. It is a no-op outside kitty or when no spare pane exists.
+// QuitIfSpare closes this idle pane, but only when its tab holds a spare pane beyond
+// the core layout, so the user can never quit away the dashboard's columns. Backs
+// the idle loop's `q` key.
 func QuitIfSpare() error {
 	id, spare, err := spareWindow()
 	if err != nil || !spare {
@@ -221,22 +183,17 @@ func QuitIfSpare() error {
 	return kitty.CloseWindow(id)
 }
 
-// CanQuit reports whether QuitIfSpare would actually close this pane — i.e. there
-// is a spare pane beyond the core layout. The idle loop calls it (via the
-// `--can-quit` flag) to show the `q` hint only when quitting would do something.
-// Returns false with no error outside kitty or when no spare pane exists.
+// CanQuit reports whether QuitIfSpare would close this pane. The idle loop calls it
+// (via --can-quit) to show the `q` hint only when quitting would do something.
 func CanQuit() (bool, error) {
 	_, spare, err := spareWindow()
 	return spare, err
 }
 
-// RunIdleLoop replaces the current process with the interactive idle-slot loop,
-// run via `sh -c`. It is the entry point for `kmux-idler --idle-loop`: kmux sends
-// it into a blank pane the user spawned so that pane behaves exactly like one of
-// the dashboard's managed idle slots (the same hint, the same launch-on-keypress).
-// The loop spawns this very binary for each launch, so it resolves its own path
-// (through any symlink, mirroring layout's idler discovery). Exec only returns on
-// failure.
+// RunIdleLoop execs the interactive idle-slot loop, the entry point for
+// `kmux-idler --idle-loop`: kmux sends it into a user-spawned blank pane so it
+// behaves like a managed idle slot. The loop spawns this binary for each launch, so
+// it resolves its own path through any symlink.
 func RunIdleLoop() error {
 	self, err := os.Executable()
 	if err != nil {
@@ -252,17 +209,11 @@ func RunIdleLoop() error {
 	return syscall.Exec(shPath, []string{"sh", "-c", IdleLoopScript(self)}, os.Environ())
 }
 
-// IdleLoopScript is the shell program that holds an interactive idle slot. It
-// loops: draw the hint, read one raw keypress, and spawn the kmux-idler picker for
-// the matching launch flow (c/o preselect a kind; Enter runs the kind-after-project
-// flow; q quits the slot if it is spare). Any other key is ignored and just redraws
-// the hint, so a stray keystroke never opens the picker. The `q` hint
-// is shown only when `kmux-idler --can-quit` reports a spare pane (see CanQuit), so
-// it never advertises an inert key. The raw single-byte read (stty + dd) matches
-// the pattern kmux already uses for hold-on-error prompts. The picker exits as soon
-// as it launches or is cancelled, returning the slot to this cheap loop. idlerPath
-// is interpolated as a shell-quoted absolute path. It backs both layout's
-// placeholder panes and `kmux-idler --idle-loop` (see RunIdleLoop).
+// IdleLoopScript is the shell program that holds an interactive idle slot: it draws
+// the hint, reads one raw keypress, and spawns the picker for the matching flow (c/o
+// preselect a kind, Enter asks for the kind after the project, q quits a spare slot).
+// The `q` hint shows only when --can-quit reports a spare pane. Backs both layout's
+// placeholder panes and `kmux-idler --idle-loop`.
 func IdleLoopScript(idlerPath string) string {
 	q := "'" + strings.ReplaceAll(idlerPath, "'", `'\''`) + "'"
 	return `idler=` + q + `
@@ -287,9 +238,8 @@ func newModel(kind string) model {
 	return model{mode: modeProject, pendingKind: kind}
 }
 
-// Styles mirror the dashboard's palette (see internal/tui/render.go) so the picker
-// reads as part of the same UI. They are intentionally redeclared here rather than
-// imported: the idler must not pull in the heavyweight tui package.
+// Styles mirror the dashboard's palette, redeclared here rather than imported so
+// the idler doesn't pull in the heavyweight tui package.
 var (
 	clStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))  // claude (blue)
 	ocStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("213")) // opencode (pink)
@@ -300,9 +250,9 @@ var (
 	borderStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")) // box border (grey)
 )
 
-// selOpenSeq is selStyle's background as a bare SGR open sequence, derived (not
-// hardcoded) so it tracks the color above. selectLine re-emits it after inner
-// ANSI resets so a highlighted row stays one solid color.
+// selOpenSeq is selStyle's background as a bare SGR open sequence, derived so it
+// tracks the color above. selectLine re-emits it after inner ANSI resets to keep a
+// highlighted row one solid color.
 var selOpenSeq = func() string {
 	const sentinel = "\x00"
 	if open, _, ok := strings.Cut(selStyle.Render(sentinel), sentinel); ok {
@@ -311,7 +261,6 @@ var selOpenSeq = func() string {
 	return ""
 }()
 
-// mode is the picker's current screen.
 type mode int
 
 const (
@@ -320,12 +269,8 @@ const (
 )
 
 // target is one project or linked worktree in the picker, mirroring a row of the
-// dashboard's [1]-Projects panel. session is its claude session name (the base
-// agent.SessionForKind rewrites for the chosen kind), so a session the idler
-// plants is byte-identical to one the dashboard would create. running records
-// which agent kinds already have a live session for this target, so the picker can
-// grey out and skip a kind (or the whole row) that would duplicate a running
-// session rather than launch a second one.
+// dashboard's Projects panel. Its session name matches what the dashboard would
+// create, so an idler-planted session is byte-identical.
 type target struct {
 	label   string          // display label: project name, or "project/worktree"
 	branch  string          // current branch, shown dim
@@ -334,11 +279,9 @@ type target struct {
 	running map[string]bool // agent kind -> its session is already live
 }
 
-// disabledFor reports whether this target is unlaunchable for the picker's kind —
-// i.e. selecting it would duplicate a running session. With a preselected kind
-// that is just that kind's session being live; on the ↵ path (kind == "") the row
-// is disabled only once every offered kind is running, since the kind picker still
-// lets the user launch any kind that is free.
+// disabledFor reports whether selecting this target would duplicate a running
+// session. On the ↵ path (kind == "") it is disabled only once every offered kind
+// is running, since the kind picker can still launch any free kind.
 func (t target) disabledFor(kind string) bool {
 	if kind != "" {
 		return t.running[kind]
@@ -351,7 +294,6 @@ func (t target) disabledFor(kind string) bool {
 	return true
 }
 
-// kindOption is one agent kind offered by the ↵-path kind picker.
 type kindOption struct {
 	kind, label string
 	style       lipgloss.Style
@@ -368,9 +310,8 @@ type model struct {
 	pcursor int // index into targets (project picker)
 	kcursor int // index into kindOptions (kind picker)
 
-	// pendingKind is the agent kind chosen before the project: "claude"/"opencode"
-	// when invoked for a specific kind (launch directly on select), "" when invoked
-	// for the ↵ path (ask for the kind after the project).
+	// pendingKind is the kind chosen before the project, or "" for the ↵ path that
+	// asks for the kind after.
 	pendingKind string
 	chosen      *target // project awaiting a kind on the ↵ path
 	launch      *Launch // set once the user confirms; the picker then quits
@@ -385,12 +326,9 @@ func (m model) Init() tea.Cmd {
 	return scanCmd()
 }
 
-// scanCmd scans projects off the UI goroutine. It reuses project.ScanProjects so
-// the idler's list matches the dashboard's Projects panel exactly, configured
-// extra folders included, and tags each target with the agent kinds already
-// running for it (see buildTargets) so the picker can grey them out. Both the scan
-// and the running-session listing fall back to empty on error rather than failing
-// the picker.
+// scanCmd reuses project.ScanProjects so the idler's list matches the dashboard's
+// Projects panel exactly. Both the scan and the running-session listing fall back
+// to empty on error rather than failing the picker.
 func scanCmd() tea.Cmd {
 	return func() tea.Msg {
 		ps, _ := project.ScanProjects()
@@ -399,15 +337,10 @@ func scanCmd() tea.Cmd {
 	}
 }
 
-// buildTargets flattens scanned projects into the picker's launch list: each
-// project's main worktree, then each of its linked worktrees, in scan order. Every
-// target records which agent kinds already have a live session (from
-// tmux.ListAgentSessions, which lists every live tmux session, so detached ones
-// count too). The picker greys out and skips a running target/kind rather than
-// dropping it, so the user still sees what is already active but cannot launch a
-// duplicate onto it. Targets with a running session are then hoisted to the top
-// (stably, preserving scan order within each group) so the active work is grouped
-// up front, above the launchable rows.
+// buildTargets flattens projects into the launch list: each main worktree then its
+// linked worktrees, in scan order. Running targets are greyed rather than dropped
+// (so the user sees active work but can't duplicate it) and hoisted stably to the
+// top.
 func buildTargets(ps []project.Project, running []string) []target {
 	live := make(map[string]bool, len(running))
 	for _, s := range running {
@@ -433,9 +366,6 @@ func buildTargets(ps []project.Project, running []string) []target {
 	return ts
 }
 
-// hasRunning reports whether any agent kind already has a live session for this
-// target — i.e. it represents active work. Used to sort running targets to the top
-// of the picker.
 func (t target) hasRunning() bool {
 	for _, o := range kindOptions {
 		if t.running[o.kind] {
@@ -445,10 +375,8 @@ func (t target) hasRunning() bool {
 	return false
 }
 
-// chooseLaunch records the chosen agent (resolved session/dir/command) and quits
-// the picker; main then launches it in place (see Start). The session name follows
-// kmux's naming convention (agent.SessionForKind on the target's claude session), so
-// the session the dashboard later adopts is exactly this one.
+// chooseLaunch records the chosen agent and quits the picker; the session name
+// follows kmux's naming convention so the dashboard later adopts exactly this one.
 func (m model) chooseLaunch(t target, kind string) (tea.Model, tea.Cmd) {
 	m.launch = &Launch{
 		Session:  agent.SessionForKind(t.session, kind),
@@ -484,10 +412,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.handleProject(msg)
 }
 
-// handleProject drives the project picker. esc/q (and ctrl+c) cancel the picker
-// entirely — the idle slot's shell loop redraws its hint. Cursor moves skip
-// disabled (already-running) rows. Selecting a project either launches directly (a
-// kind was preselected) or advances to the kind picker (the ↵ path).
+// handleProject drives the project picker. Cursor moves skip disabled rows;
+// selecting a project either launches directly (kind preselected) or advances to
+// the kind picker (the ↵ path).
 func (m model) handleProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc", "q", "h", "left":
@@ -512,15 +439,13 @@ func (m model) handleProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// selectable reports whether the project at index i can be launched for the
-// picker's pending kind — in range and not already running.
+// selectable reports whether target i is in range and launchable for the pending kind.
 func (m model) selectable(i int) bool {
 	return i >= 0 && i < len(m.targets) && !m.targets[i].disabledFor(m.pendingKind)
 }
 
-// nextSelectable returns the next launchable index scanning from just past `from`
-// in direction step (+1/-1), or `from` unchanged when none is found. Disabled
-// (running) rows are skipped so the cursor never rests on one.
+// nextSelectable returns the next launchable index from just past `from` in
+// direction step, or `from` when none is found (disabled rows skipped).
 func (m model) nextSelectable(from, step int) int {
 	for i := from + step; i >= 0 && i < len(m.targets); i += step {
 		if m.selectable(i) {
@@ -530,8 +455,8 @@ func (m model) nextSelectable(from, step int) int {
 	return from
 }
 
-// firstSelectable returns the first launchable project index, or 0 when every
-// target is disabled — the cursor then rests on a greyed row and enter is inert.
+// firstSelectable returns the first launchable index, or 0 when every target is
+// disabled (the cursor then rests on a greyed row and enter is inert).
 func (m model) firstSelectable() int {
 	for i := range m.targets {
 		if m.selectable(i) {
@@ -561,9 +486,7 @@ func (m model) handleKind(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// kindSelectable reports whether the kind option at index i can be launched for
-// the chosen project — in range, a project is chosen, and that kind is not already
-// running for it.
+// kindSelectable reports whether kind option i is launchable for the chosen project.
 func (m model) kindSelectable(i int) bool {
 	if i < 0 || i >= len(kindOptions) || m.chosen == nil {
 		return false
@@ -571,9 +494,8 @@ func (m model) kindSelectable(i int) bool {
 	return !m.chosen.running[kindOptions[i].kind]
 }
 
-// firstKind returns the first launchable kind index for the chosen project, or 0
-// when none is free. A project only reaches the kind picker with at least one free
-// kind (see disabledFor), so 0 is a fallback that should not arise there.
+// firstKind returns the first launchable kind index, or 0 when none is free (a
+// project only reaches the kind picker with a free kind, so 0 shouldn't arise).
 func (m model) firstKind() int {
 	for i := range kindOptions {
 		if m.kindSelectable(i) {
@@ -615,12 +537,10 @@ func (m model) View() string {
 	return m.center(m.projectBox())
 }
 
-// center places content in the middle of the pane.
 func (m model) center(content string) string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
 }
 
-// projectBox renders the project picker, sized to its content.
 func (m model) projectBox() string {
 	launchWord := "launch"
 	if m.pendingKind == "" {
@@ -643,9 +563,8 @@ func (m model) projectBox() string {
 	return box(title, body, inner+2)
 }
 
-// projectRows builds the (possibly windowed) project list, the selected row
-// highlighted full-width. The visible window is bounded by the pane height so the
-// box never grows past the slot.
+// projectRows builds the (windowed) project list, the selected row highlighted
+// full-width. The window is bounded by the pane height so the box never overgrows.
 func (m model) projectRows(inner int) []string {
 	if len(m.targets) == 0 {
 		return []string{dimStyle.Render("no projects found")}
@@ -659,8 +578,7 @@ func (m model) projectRows(inner int) []string {
 	rows := make([]string, 0, end-start)
 	for i := start; i < end; i++ {
 		disabled := m.targets[i].disabledFor(m.pendingKind)
-		// The cursor never rests on a disabled row, so only enabled rows get the
-		// marker and selection bar.
+		// The cursor never rests on a disabled row, so only enabled rows get selected.
 		selected := i == m.pcursor && !disabled
 		marker := "  "
 		if selected {
@@ -675,10 +593,8 @@ func (m model) projectRows(inner int) []string {
 	return rows
 }
 
-// targetLabel renders a target's label with its dim branch tail, plus a colored
-// "[CC]"/"[OC]" marker for each agent kind already running on it (see runningTags).
-// A disabled target (all its picker-relevant kinds live) is dimmed whole, so the
-// row reads as present-but-unlaunchable while its markers show what holds it.
+// targetLabel renders a target's label with its dim branch tail and a running-kind
+// marker for each live kind. A disabled target is dimmed whole.
 func targetLabel(t target, disabled bool) string {
 	tail := ""
 	if t.branch != "" {
@@ -694,8 +610,7 @@ func targetLabel(t target, disabled bool) string {
 	return head
 }
 
-// runningTags renders the "[CC]"/"[OC]" markers for every agent kind already live
-// for t, in kindOptions order and space-separated; empty when nothing runs.
+// runningTags renders the running-kind markers for t, in kindOptions order.
 func runningTags(t target) string {
 	var tags []string
 	for _, o := range kindOptions {
@@ -706,8 +621,7 @@ func runningTags(t target) string {
 	return strings.Join(tags, " ")
 }
 
-// kindTag renders a running-agent marker: grey brackets around the kind's short
-// code, colored per kind (claude "CC" blue, opencode "OC" red).
+// kindTag renders a running-agent marker: grey brackets around the kind's short code.
 func kindTag(kind string) string {
 	mark, style := "CC", clStyle
 	if kind == "opencode" {
@@ -716,9 +630,8 @@ func kindTag(kind string) string {
 	return dimStyle.Render("[") + style.Render(mark) + dimStyle.Render("]")
 }
 
-// kindOptionLabel renders one row of the kind picker: the kind's colored name, or —
-// when that kind is already running for the chosen project — its name dimmed with a
-// trailing running marker, matching the project list's greyed rows.
+// kindOptionLabel renders one kind-picker row: the colored name, or dimmed with a
+// running marker when that kind is already live for the chosen project.
 func (m model) kindOptionLabel(i int, o kindOption) string {
 	if m.kindSelectable(i) {
 		return o.style.Render(o.label)
@@ -726,8 +639,7 @@ func (m model) kindOptionLabel(i int, o kindOption) string {
 	return dimStyle.Render(o.label) + "  " + kindTag(o.kind)
 }
 
-// kindBox renders the claude/opencode picker shown after a project is chosen on
-// the ↵ path.
+// kindBox renders the kind picker shown after a project is chosen on the ↵ path.
 func (m model) kindBox() string {
 	title := "Launch agent"
 	if m.chosen != nil {
@@ -762,8 +674,7 @@ func (m model) kindBox() string {
 }
 
 // scrollWindow returns the [start,end) slice of n rows to show in height rows,
-// keeping cursor roughly centered and clamped to the ends. With room for every
-// row it returns the whole range.
+// keeping the cursor roughly centered and clamped to the ends.
 func scrollWindow(n, cursor, height int) (start, end int) {
 	if height >= n {
 		return 0, n
@@ -792,10 +703,8 @@ func clampInner(inner, width int) int {
 	return inner
 }
 
-// selectLine paints a composed row with the selection background, re-emitting the
-// background after each inner ANSI reset so it stays one solid bar, and sizing the
-// line to exactly width first (lipgloss .Width would wrap an over-long line).
-// Mirrors the dashboard's selectLine.
+// selectLine paints a row with the selection background, re-emitting it after each
+// inner ANSI reset so it stays one solid bar. Mirrors the dashboard's selectLine.
 func selectLine(line string, width int) string {
 	line = strings.ReplaceAll(line, "\x1b[0m", "\x1b[0m"+selOpenSeq)
 	return selStyle.Render(padCell(line, width))
@@ -806,9 +715,8 @@ func box(title string, body []string, width int) string {
 	return boxStyled(title, body, width, borderStyle)
 }
 
-// boxStyled draws a rounded, titled frame sized to width (border included),
-// padding or clipping each body line to the inner width, with border/title color
-// bs. A pared-down copy of the dashboard's box.
+// boxStyled draws a rounded, titled frame sized to width, padding or clipping each
+// body line to the inner width. A pared-down copy of the dashboard's box.
 func boxStyled(title string, body []string, width int, bs lipgloss.Style) string {
 	inner := width - 2
 	if inner < 1 {
