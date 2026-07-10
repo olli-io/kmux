@@ -10,12 +10,8 @@ import (
 	"strings"
 )
 
-// InKitty reports whether the current process is running inside the kitty
-// terminal. kitty exports KITTY_PID and KITTY_WINDOW_ID into every window's
-// environment (independent of whether remote control is enabled) and sets
-// TERM=xterm-kitty; any of these is a reliable signal that the host terminal is
-// kitty. Used to fail fast with a compatibility error in other terminals before
-// kmux tries to drive kitty over remote control.
+// InKitty reports whether the host terminal is kitty. kitty exports KITTY_PID and
+// KITTY_WINDOW_ID and sets TERM=xterm-kitty; any one is a reliable signal.
 func InKitty() bool {
 	return os.Getenv("KITTY_PID") != "" ||
 		os.Getenv("KITTY_WINDOW_ID") != "" ||
@@ -42,23 +38,17 @@ func kittenAt(args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// GotoLayoutSplits switches the current tab to the splits layout.
 func GotoLayoutSplits() error {
 	_, err := kittenAt("goto-layout", "splits")
 	return err
 }
 
-// Launch creates a new window by splitting nextToID along loc and running
-// `cmd...`. It returns the new window id. bias (0 disables) is the percentage of
-// the split given to the new window.
+// Launch splits nextToID along loc, runs `cmd...`, and returns the new window id.
+// bias (0 disables) is the percentage of the split given to the new window.
 //
-// --next-to picks the window to split relative to, but kitty *ignores* it unless
-// the matched window lives in the target tab — which defaults to the currently
-// active tab. Since kmux also opens unrelated kitty tabs (lazygit, agent attach,
-// project sessions, nvim), the active tab is often not the dashboard's, and a
-// reconcile firing then would drop the new pane into the wrong tab / under the
-// sidebar. So we pin the target tab to the one containing nextToID via
-// --match window_id:..., making --next-to reliable no matter which tab is focused.
+// kitty ignores --next-to unless the matched window is in the target tab, which
+// defaults to the active tab. kmux often has an unrelated tab focused, so we pin
+// the target tab via --match window_id: to keep --next-to reliable.
 func Launch(loc SplitLocation, nextToID, bias int, title string, cmd ...string) (int, error) {
 	args := []string{
 		"launch",
@@ -86,11 +76,8 @@ func Launch(loc SplitLocation, nextToID, bias int, title string, cmd ...string) 
 	return id, nil
 }
 
-// OpenTab launches a new kitty tab in the current OS window running a fresh kmux
-// scoped to dir, and focuses it. exe is the running kmux executable's path; the
-// new tab is an independent kmux session (own sidebar and panes) sharing the
-// same terminal. kitty populates KITTY_LISTEN_ON / KITTY_WINDOW_ID for the new
-// window, so the child kmux finds its socket and sidebar id.
+// OpenTab launches a kitty tab running a fresh kmux scoped to dir. exe is the
+// running kmux executable's path; the new tab is an independent kmux session.
 func OpenTab(exe, dir, title string) error {
 	_, err := kittenAt(
 		"launch",
@@ -101,13 +88,9 @@ func OpenTab(exe, dir, title string) error {
 	return err
 }
 
-// OpenLauncherTab opens a focused kitty tab in the current OS window running
-// `exe --splash` — the launch-overlay animation — and returns the new window id
-// so the dashboard can close it once its first reconcile settles. Unlike the
-// fire-and-forget tab launchers it must return the id (like Launch), so the
-// caller can dismiss it. It is opened focused (no --keep-focus): it covers the
-// screen while the dashboard builds its panes in the now-background tab, hiding
-// the first reconcile's pane churn. exe is the running kmux executable's path.
+// OpenLauncherTab opens a focused kitty tab running `exe --splash` and returns its
+// window id so the dashboard can close it once the first reconcile settles. Opened
+// focused so it covers the pane churn while the dashboard builds in the background.
 func OpenLauncherTab(exe string) (int, error) {
 	out, err := kittenAt(
 		"launch",
@@ -124,11 +107,9 @@ func OpenLauncherTab(exe string) (int, error) {
 	return id, nil
 }
 
-// OpenAgentTab attaches the tmux session `name` in a new kitty tab in the
-// current OS window and focuses it. Unlike a managed agent pane, this tab is
-// fire-and-forget: Manager/Reconcile/Rebalance never see it, so it stays out of
-// the splits layout. Closing the tab only detaches tmux; the session keeps
-// running.
+// OpenAgentTab attaches the tmux session `name` in a new kitty tab. Unlike a
+// managed pane it is fire-and-forget: the layout never sees it, and closing the
+// tab only detaches tmux.
 func OpenAgentTab(name, title string) error {
 	_, err := kittenAt(
 		"launch",
@@ -138,11 +119,9 @@ func OpenAgentTab(name, title string) error {
 	return err
 }
 
-// OpenCommandTab runs runline (via `sh -c`) in a new kitty tab in the current OS
-// window with its cwd set to dir, and focuses it. It backs the user-configurable
-// command keybindings (editor, lazygit, …). Like the other tab launchers it is
-// fire-and-forget: it is NOT a managed pane, so Manager/Reconcile/Rebalance never
-// see it; closing the tab closes the command.
+// OpenCommandTab runs runline (via `sh -c`) in a new kitty tab with cwd dir. It
+// backs the user-configurable command keybindings and is fire-and-forget, not a
+// managed pane.
 func OpenCommandTab(dir, title, runline string) error {
 	_, err := kittenAt(
 		"launch",
@@ -165,12 +144,9 @@ func OpenCommandWindow(dir, title, runline string) error {
 	return err
 }
 
-// RunInWindow types `command` followed by Enter into the window with the given
-// id via kitty's send-text, so the shell already running there executes it. kmux
-// uses it to turn a blank pane the user spawned into a kmux idle launcher (it
-// sends an `exec` of the idle-slot loop). The trailing carriage return is the byte
-// the Enter key produces, submitting the line. It is the only way to start a
-// process in an *existing* kitty window — `launch` always makes a new one.
+// RunInWindow types `command` plus Enter into window id via send-text, so the
+// shell already there runs it — the only way to start a process in an existing
+// kitty window, since `launch` always makes a new one.
 func RunInWindow(id int, command string) error {
 	_, err := kittenAt("send-text",
 		"--match", "id:"+strconv.Itoa(id),
@@ -178,10 +154,8 @@ func RunInWindow(id int, command string) error {
 	return err
 }
 
-// SetWindowTitle sets the title of the window with the given id, and pins it so
-// the running program can't overwrite it (--temporary would let the next title
-// escape from the shell win). kmux uses it to label its own sidebar window
-// "[kmux]dashboard", matching the [kmux]… naming its agent sessions carry.
+// SetWindowTitle sets window id's title and pins it so the running program can't
+// overwrite it (--temporary would let a later shell escape win).
 func SetWindowTitle(id int, title string) error {
 	_, err := kittenAt("set-window-title",
 		"--match", "id:"+strconv.Itoa(id),
@@ -189,16 +163,15 @@ func SetWindowTitle(id int, title string) error {
 	return err
 }
 
-// FocusWindow gives keyboard focus to the window with the given id, switching
-// the active tab and OS window as needed.
+// FocusWindow focuses window id, switching the active tab and OS window as needed.
 func FocusWindow(id int) error {
 	_, err := kittenAt("focus-window",
 		"--match", "id:"+strconv.Itoa(id))
 	return err
 }
 
-// CloseWindow closes the window with the given id. Closing a window running
-// `tmux attach` only detaches; the tmux session keeps running.
+// CloseWindow closes window id. Closing one running `tmux attach` only detaches;
+// the tmux session keeps running.
 func CloseWindow(id int) error {
 	_, err := kittenAt("close-window",
 		"--match", "id:"+strconv.Itoa(id),
@@ -206,8 +179,8 @@ func CloseWindow(id int) error {
 	return err
 }
 
-// ResizeWindowHoriz widens (positive) or narrows (negative) the window by
-// `increment` cells along the horizontal axis. A zero increment is a no-op.
+// ResizeWindowHoriz widens (positive) or narrows (negative) window id by increment
+// cells. A zero increment is a no-op.
 func ResizeWindowHoriz(id, increment int) error {
 	if increment == 0 {
 		return nil
@@ -228,12 +201,8 @@ type lsWindow struct {
 	Neighbors           Neighbors   `json:"neighbors"`
 }
 
-// Neighbors are the window ids directly adjacent to a window on each edge, as
-// reported by `kitten @ ls` (computed by kitty from the live splits tree). kmux
-// reads the vertical edges (Top/Bottom) to learn which panes share a column, so it
-// can recognize a pane the user stacked into an existing column with a manual
-// horizontal split rather than mistaking it for a separate new column. Any edge
-// may be absent (kitty omits empty edges), leaving that slice nil.
+// Neighbors are the window ids adjacent to a window on each edge, per `kitten @ ls`.
+// kmux reads Top/Bottom to tell which panes share a column. Any edge may be nil.
 type Neighbors struct {
 	Left   []int `json:"left"`
 	Top    []int `json:"top"`
@@ -241,16 +210,14 @@ type Neighbors struct {
 	Bottom []int `json:"bottom"`
 }
 
-// lsProcess is the subset of a window's foreground-process record we read: its
-// argv, used to recognize a pane sitting at a bare shell prompt (see isBareShell).
+// lsProcess is the subset of a foreground-process record we read: its argv, used
+// to recognize a bare shell prompt.
 type lsProcess struct {
 	Cmdline []string `json:"cmdline"`
 }
 
-// lsTabs runs `kitten @ ls` and returns every tab's window list, grouped by tab
-// (the structure kitty reports), across all OS windows. Callers that don't care
-// about tab boundaries flatten it (see lsWindows); callers that need to stay
-// inside one tab scan for the tab holding a known window id (see tabWindows).
+// lsTabs runs `kitten @ ls` and returns every tab's window list, grouped by tab,
+// across all OS windows.
 func lsTabs() ([][]lsWindow, error) {
 	out, err := kittenAt("ls")
 	if err != nil {
@@ -287,9 +254,8 @@ func lsWindows() ([]lsWindow, error) {
 	return windows, nil
 }
 
-// tabWindows returns the windows in the kitty tab that contains the window with
-// the given id (the id itself included), or nil if no tab holds it. kmux uses it
-// to confine tab-scoped scans to the dashboard's own tab.
+// tabWindows returns the windows in the tab containing id (id included), or nil if
+// no tab holds it. Confines tab-scoped scans to the dashboard's own tab.
 func tabWindows(id int) ([]lsWindow, error) {
 	tabs, err := lsTabs()
 	if err != nil {
@@ -319,18 +285,13 @@ func LiveWindowIDs() (map[int]bool, error) {
 	return ids, nil
 }
 
-// Snapshot runs a single `kitten @ ls` and derives from that one call both the
-// flat set of live window ids (across all tabs, for the manual-close prune) and
-// the bare-shell blank panes in the tab holding tabWindowID (the dashboard's own
-// tab). The poll's reconcile needs both every cycle, so folding them into one
-// snapshot spawns `kitten` once per poll instead of twice — the dominant
-// steady-state cost on macOS, where each kitten invocation is a ~30ms cold start.
+// Snapshot derives from a single `kitten @ ls` both the live window ids (all tabs,
+// for the manual-close prune) and the blank panes in the tab holding tabWindowID.
+// Folding them saves a second `kitten` spawn per poll — the dominant macOS cost.
 //
-// The blank-pane scan is confined to the tab holding tabWindowID (the dashboard's
-// sidebar window): kmux also opens unrelated tabs (lazygit, agent attach, project
-// sessions), and a blank shell in one of those is not the dashboard's to adopt. A
-// tab that doesn't hold tabWindowID yields no blanks (nil). The live-id set spans
-// every tab, since the manual-close prune must see all of kmux's managed windows.
+// Blanks are confined to the dashboard's tab: a blank shell in one of kmux's other
+// tabs (lazygit, agent attach) isn't the dashboard's to adopt. The live-id set
+// spans every tab so the prune sees all managed windows.
 func Snapshot(tabWindowID int) (live map[int]bool, blanks []BlankPane, err error) {
 	tabs, err := lsTabs()
 	if err != nil {
@@ -352,13 +313,9 @@ func Snapshot(tabWindowID int) (live map[int]bool, blanks []BlankPane, err error
 	return live, blanks, nil
 }
 
-// blankPanesIn returns the bare-shell blank panes among the windows of a single
-// tab, tagged with their StandaloneColumn classification. A bare shell is a pane
-// the user spawned outside kmux (kitty's own new-window keybinding) sitting at a
-// prompt running nothing; kmux's own panes never match (the sidebar runs kmux,
-// agent panes run a tmux client, idle slots run `sh -c <loop>` — a script,
-// excluded by the -c check). The StandaloneColumn flag (no vertical neighbor)
-// lets the caller adopt the pane without a second `ls`.
+// blankPanesIn returns the bare-shell blank panes among a tab's windows, tagged
+// with StandaloneColumn. A bare shell is a pane the user spawned outside kmux
+// sitting at a prompt; kmux's own panes run kmux, a tmux client, or `sh -c`.
 func blankPanesIn(windows []lsWindow) []BlankPane {
 	var panes []BlankPane
 	for _, w := range windows {
@@ -372,10 +329,8 @@ func blankPanesIn(windows []lsWindow) []BlankPane {
 	return panes
 }
 
-// WindowsInTab returns how many windows live in the kitty tab that contains the
-// window with the given id (the id itself included), or 0 if that window isn't
-// found. kmux uses it to gate the idle slot's quit key on there being a spare pane
-// beyond the dashboard and its fixed columns.
+// WindowsInTab returns the window count in the tab containing id (id included), or
+// 0 if not found. Gates the idle slot's quit key on there being a spare pane.
 func WindowsInTab(id int) (int, error) {
 	t, err := tabWindows(id)
 	if err != nil {
@@ -397,22 +352,17 @@ func WindowColumns() (map[int]int, error) {
 	return cols, nil
 }
 
-// BlankPane is a user-spawned bare-shell window the dashboard may adopt: its
-// window id, plus whether it stands alone as a full-height column (a manual
-// *vertical* split, with no vertical neighbors). The dashboard restacks a
-// standalone column under an existing one and turns any other blank pane into an
-// idle launcher in place — the StandaloneColumn flag is what decides which,
-// computed from the same `ls` snapshot the scan already read.
+// BlankPane is a user-spawned bare-shell window the dashboard may adopt: its window
+// id plus whether it stands alone as a full-height column. The dashboard restacks a
+// standalone column under an existing one; any other blank pane becomes an idle
+// launcher in place.
 type BlankPane struct {
 	ID               int
 	StandaloneColumn bool // no Top/Bottom neighbor: it's its own full-height column
 }
 
-
-// windowIsBareShell reports whether every one of a window's foreground processes
-// is a bare interactive shell (and there is at least one). A window running a
-// command (its foreground process is that command, not a shell) does not match, so
-// kmux never disturbs a pane the user is actively working in.
+// windowIsBareShell reports whether every foreground process is a bare shell (and
+// there is at least one), so kmux never disturbs a pane the user is working in.
 func windowIsBareShell(w lsWindow) bool {
 	if len(w.ForegroundProcesses) == 0 {
 		return false
@@ -431,9 +381,8 @@ var shellNames = map[string]bool{
 	"sh": true, "bash": true, "zsh": true, "fish": true, "dash": true, "ksh": true,
 }
 
-// isBareShell reports whether cmd is an interactive shell sitting at a prompt: its
-// program is a known shell and it carries no `-c` argument (which would mean it is
-// running a script — e.g. kmux's own `sh -c <idle loop>` placeholders).
+// isBareShell reports whether cmd is a known shell with no `-c` argument (which
+// would mean it's running a script, like kmux's own `sh -c <idle loop>`).
 func isBareShell(cmd []string) bool {
 	if len(cmd) == 0 {
 		return false
@@ -448,4 +397,3 @@ func isBareShell(cmd []string) bool {
 	}
 	return true
 }
-
