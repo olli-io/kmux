@@ -52,7 +52,10 @@ type Project struct {
 	Worktrees []Worktree
 }
 
-func projectsRoot() string {
+// Root is the directory scanned for git projects (~/git). It doubles as the
+// stand-in path for the dashboard tab title in unscoped mode (see
+// agent.DashTabTitle), where there is no single scoped project.
+func Root() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
@@ -63,7 +66,7 @@ func projectsRoot() string {
 // ScanProjects lists every git repo directly under ~/git, sorted by name, with
 // its linked worktrees. A missing ~/git yields an empty slice, not an error.
 func ScanProjects() ([]Project, error) {
-	root := projectsRoot()
+	root := Root()
 	if root == "" {
 		return nil, nil
 	}

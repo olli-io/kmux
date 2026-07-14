@@ -3,6 +3,7 @@ package tui
 import (
 	"testing"
 
+	"github.com/olli-io/kmux/internal/layout"
 	"github.com/olli-io/kmux/internal/status"
 )
 
@@ -65,9 +66,12 @@ func TestSpinnerGating(t *testing.T) {
 }
 
 // newTestModel builds a model with the maps the attentionMsg handler touches
-// initialized, so Update can run without a real manager or persisted state.
+// initialized, so Update can run without persisted state. It carries a bare
+// layout.Manager so the handler's tab-title re-title (which reads the sidebar id)
+// doesn't dereference a nil manager.
 func newTestModel() model {
 	return model{
+		mgr:        layout.NewManager(0),
 		attention:  map[string]status.AttentionState{},
 		detached:   map[string]bool{},
 		idle:       status.NewIdleTrackerFrom(0, nil), // timeout 0 disables reaping

@@ -204,3 +204,29 @@ func TestAgentCommand(t *testing.T) {
 		t.Errorf("opencode cmd = %q, want %q", got, "opencode --continue || opencode")
 	}
 }
+
+func TestDashTabTitle(t *testing.T) {
+	home := homeOrSkip(t)
+	kmux := filepath.Join(home, "git", "kmux")
+	// The unscoped default stands in the ~/git scan root for the empty path.
+	root := "[kmux][dash]~/git"
+	scoped := "[kmux][dash]~/git/kmux"
+	cases := []struct {
+		name      string
+		scopeDir  string
+		attention bool
+		want      string
+	}{
+		{"unscoped", "", false, root},
+		{"unscoped attention", "", true, "[!!]" + root},
+		{"scoped", kmux, false, scoped},
+		{"scoped attention", kmux, true, "[!!]" + scoped},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := DashTabTitle(c.scopeDir, c.attention); got != c.want {
+				t.Errorf("DashTabTitle(%q, %v) = %q, want %q", c.scopeDir, c.attention, got, c.want)
+			}
+		})
+	}
+}

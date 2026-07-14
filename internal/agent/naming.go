@@ -32,8 +32,30 @@ func DashboardTitle() string {
 	return sessionTag + "[dashboard]"
 }
 
-// ExpectedSession returns the claude session name for a project/worktree pair;
-// wt is "" for the main worktree.
+// DashTabTitle is the kitty *tab* title for the kmux dashboard tab. Unlike the
+// sidebar window title (DashboardTitle), it carries the scoped project path
+// (home-abbreviated) and abbreviates "dashboard" to "dash" to stay compact in the
+// tab bar: "[kmux][dash]<path>". scopeDir is the scoped project's main worktree,
+// or "" in unscoped mode, where the ~/git scan root (project.Root) stands in so
+// the path segment is never empty. When needsAttention is set — some session is
+// blocked on a prompt awaiting an answer — the title is prefixed with "[!!]" so
+// the tab bar surfaces it even when the tab isn't focused.
+func DashTabTitle(scopeDir string, needsAttention bool) string {
+	path := scopeDir
+	if path == "" {
+		path = project.Root()
+	}
+	title := sessionTag + "[dash]" + abbrevHome(path)
+	if needsAttention {
+		title = "[!!]" + title
+	}
+	return title
+}
+
+// ExpectedSession returns the claude session name for a project/worktree pair.
+// projPath is the project's main-worktree path; wt is "" for the main worktree.
+// It mirrors the naming convention parsed by MatchProject and
+// tmux.ListAgentSessions (a leading [kmux][CC]).
 func ExpectedSession(projPath, wt string) string {
 	name := agentPrefix("claude") + sessionPrefix(projPath)
 	if wt != "" {

@@ -58,9 +58,19 @@ type model struct {
 	scopeDir  string
 	scopeName string
 
-	// launcherID is the kitty window id of the splash tab the dashboard was spawned
-	// behind (0 when none). launched guards the one-shot dismissal; layoutReady and
-	// minHeld are the two gates the normal dismissal waits on.
+	// tabAttn is the last-applied [!!] attention state of the kitty tab title.
+	// The attentionMsg handler re-titles the tab only when this flips, so the
+	// dashboard doesn't spawn a `kitten @` on every poll. It starts false,
+	// matching the no-attention title Init sets at launch.
+	tabAttn bool
+
+	// launcherID is the kitty window id of the [kmux][launcher] splash tab the
+	// dashboard was spawned behind (0 when none — e.g. the splash failed to open).
+	// launched guards the one-shot dismissal: once the layout is ready and the
+	// minimum hold has elapsed (or the cap-timer fallback fires) the finished
+	// dashboard is focused and this tab closed, and launched is set so later
+	// reconciles don't try again. layoutReady/minHeld are the two gates the normal
+	// dismissal waits on (see dismissLauncherWhenReady).
 	launcherID  int
 	launched    bool
 	layoutReady bool // first reconcile settled: panes built and sized
@@ -187,8 +197,15 @@ func (m model) Init() tea.Cmd {
 	// rescan only active projects. The spinner ticker is armed later, only while a
 	// session is busy.
 	cmds := []tea.Cmd{pollCmd(), projectsCmd(m.scopeDir), tickCmd(), projectTickCmd()}
-	// When building behind a splash tab, arm a fallback cap so the splash can't
-	// linger if the first reconcile never completes.
+	// Label the dashboard's kitty tab immediately (no attention yet), so it's
+	// identifiable in the tab bar before any session exists — mirroring how
+	// main.go titles the sidebar window at launch. The attentionMsg handler takes
+	// over the [!!] marker from here as sessions change state.
+	cmds = append(cmds, setTabTitleCmd(m.mgr.SidebarID(), m.scopeDir, false))
+	// When the dashboard is building behind a launch-overlay splash tab, arm a
+	// fallback cap: if the first reconcile never completes (e.g. the tmux poll
+	// errored and short-circuited before reconcile), the cap timer still dismisses
+	// the splash so it can't linger over a stalled launch.
 	if m.launcherID != 0 {
 		cmds = append(cmds, launcherCapCmd(), launcherMinCmd())
 	}

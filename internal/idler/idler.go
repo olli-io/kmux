@@ -32,6 +32,7 @@ import (
 	"github.com/olli-io/kmux/internal/config"
 	"github.com/olli-io/kmux/internal/kitty"
 	"github.com/olli-io/kmux/internal/project"
+	"github.com/olli-io/kmux/internal/status"
 	"github.com/olli-io/kmux/internal/tmux"
 )
 
@@ -326,12 +327,26 @@ func (m model) Init() tea.Cmd {
 	return scanCmd()
 }
 
-// scanCmd reuses project.ScanProjects so the idler's list matches the dashboard's
-// Projects panel exactly. Both the scan and the running-session listing fall back
-// to empty on error rather than failing the picker.
+// scanCmd builds the picker's project list off the UI goroutine. The idler is a
+// one-shot process, so a live project.ScanProjects would re-spend dozens of serial
+// git calls (a worktree-list + status per repo under ~/git) on every launch — the
+// delay the user feels when picking a project. Instead it reads the list the
+// running dashboard cached to disk after its last full scan (status.LoadProjects),
+// which matches the dashboard's Projects panel exactly (config extras included) and
+// costs a single file read. Only when no cache exists yet (no dashboard has run) or
+// it is empty does it fall back to a live scan, so a first launch still works.
+//
+// The list mirrors the dashboard's last scan, so its dirty/ahead/behind flags may
+// lag until the dashboard next writes the cache; the running-session tagging, which
+// decides what the picker greys out, is always live (tmux.ListAgentSessions, one
+// cheap call). Both the load and the session listing fall back to empty on error
+// rather than failing the picker.
 func scanCmd() tea.Cmd {
 	return func() tea.Msg {
-		ps, _ := project.ScanProjects()
+		ps, ok, _ := status.LoadProjects()
+		if !ok {
+			ps, _ = project.ScanProjects()
+		}
 		running, _ := tmux.ListAgentSessions()
 		return projectsMsg{targets: buildTargets(ps, running)}
 	}

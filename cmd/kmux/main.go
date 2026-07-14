@@ -43,6 +43,16 @@ func main() {
 		fmt.Println(dir)
 		return
 	}
+	if pa.Attn {
+		// Attention-marker hook mode: invoked by a Claude Code hook (event JSON on
+		// stdin) or an OpenCode plugin (event as flags) when a session changes
+		// attention state. Best-effort — a hook must never fail an agent turn — so we
+		// log any error and exit 0.
+		if err := agent.RunAttnHook(pa, os.Stdin); err != nil {
+			fmt.Fprintf(os.Stderr, "kmux --attn: %v\n", err)
+		}
+		return
+	}
 	if pa.Agent != "" {
 		if err := agent.RunAgent(pa.Path, pa.Agent); err != nil {
 			fmt.Fprintf(os.Stderr, "kmux: %v\n", err)

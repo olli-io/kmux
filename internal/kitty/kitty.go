@@ -163,7 +163,18 @@ func SetWindowTitle(id int, title string) error {
 	return err
 }
 
-// FocusWindow focuses window id, switching the active tab and OS window as needed.
+// SetTabTitle sets the title of the kitty tab that contains the window with the
+// given id. kmux matches on its sidebar window id to title its own dashboard tab
+// ("[kmux][dash]…"), independent of which pane inside the tab is focused.
+func SetTabTitle(windowID int, title string) error {
+	_, err := kittenAt("set-tab-title",
+		"--match", "id:"+strconv.Itoa(windowID),
+		title)
+	return err
+}
+
+// FocusWindow gives keyboard focus to the window with the given id, switching
+// the active tab and OS window as needed.
 func FocusWindow(id int) error {
 	_, err := kittenAt("focus-window",
 		"--match", "id:"+strconv.Itoa(id))

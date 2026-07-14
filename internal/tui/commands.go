@@ -179,14 +179,85 @@ func attentionCmd(sessions []string) tea.Cmd {
 			states[s] = status.ClassifyAttention(agent.AgentKind(s), text)
 			hashes[s] = status.HashPane(text)
 		}
+		// Overlay the agent-reported attention markers (written by the Claude Code
+		// hook / OpenCode plugin via `kmux --attn`): they are authoritative for the
+		// permission and waiting states, which pane text no longer detects. Busy stays
+		// pane-text-owned — it's the fresh, sub-second signal the spinner needs, and a
+		// lingering waiting marker must not mask a session that just resumed
+		// generating. Permission markers get a pane-text clearing guard (see
+		// applyAttnMarkers): Claude fires no hook when a prompt is dismissed with Esc,
+		// so its marker would strand ! / [!!] until the 30-min TTL otherwise.
+		if markers, err := status.LoadAttnMarkers(time.Now()); err == nil {
+			applyAttnMarkers(states, texts, markers, func(s string) { _ = status.RemoveAttnMarker(s) })
+		}
 		return attentionMsg{states: states, hashes: hashes}
 	}
 }
 
-// convertBlankPaneCmd adopts a user-spawned blank pane. A pane that is its own
-// full-height column is a manual vertical split, which the fixed layout has no
-// room for, so it is restacked under an existing column; any other blank pane
-// becomes an idle launcher in place.
+// applyAttnMarkers folds hook-reported markers (LoadAttnMarkers) into the pane-
+// derived states, in place. It carries a pane-text CLEARING GUARD on permission
+// markers: Claude Code fires no hook when a permission prompt is dismissed with Esc,
+// so a "permission" marker would otherwise strand the ! glyph / [!!] tab flag until
+// the 30-min TTL sweep. A permission marker is applied only while the pane still
+// corroborates it (status.PromptVisible) or capture failed; once the pane is
+// positively back to busy or a plain idle box, the marker is stale — it is dropped
+// and removed via remove so it can't re-assert next poll. The waiting marker needs
+// no guard: it never lights [!!] (see anyNeedsAttention) and a lingering ✓ is
+// harmless, so it is applied unguarded as before.
+//
+// remove is injected (status.RemoveAttnMarker in production) so the guard is
+// testable without touching the filesystem. Calling it from the read-side poll is
+// consistent with LoadAttnMarkers, which already removes TTL-swept files.
+func applyAttnMarkers(
+	states map[string]status.AttentionState,
+	texts map[string]string,
+	markers map[string]status.AttentionState,
+	remove func(session string),
+) {
+	for s, st := range markers {
+		cur, ok := states[s]
+		if !ok {
+			// Session isn't in this poll's list (e.g. killed/dead). Its marker never
+			// lights [!!] and the TTL reaps the file; actively removing here would race
+			// a just-launched session not yet listed, so leave it to the TTL.
+			continue
+		}
+		if cur == status.AttnBusy {
+			// Pane says generating: a prompt can't be up. A stale permission marker
+			// here is what strands [!!] — drop and clear it. Busy itself is untouched.
+			if st == status.AttnPermission {
+				remove(s)
+			}
+			continue
+		}
+		if st == status.AttnPermission {
+			switch {
+			case cur == status.AttnUnknown:
+				states[s] = st // capture failed: unsure, keep the marker
+			case status.PromptVisible(agent.AgentKind(s), texts[s]):
+				states[s] = st // prompt still on screen: genuine, keep it
+			default:
+				// Pane is back to a non-prompt state (a plain idle box): the prompt was
+				// dismissed with no hook. Stale — remove the file, leave cur (waiting).
+				remove(s)
+			}
+			continue
+		}
+		// Waiting marker (and any future non-permission state): apply unguarded.
+		states[s] = st
+	}
+}
+
+// convertBlankPaneCmd handles a newly appeared user-spawned blank pane off the UI
+// goroutine. A pane that is its own full-height column is a manual *vertical* split
+// — a fourth column the fixed sidebar+maxColumns layout has no room for — so it is
+// restacked under an existing column (layout.ReorgVerticalPane). Any other blank
+// pane (already stacked, i.e. a horizontal split) is turned into a kmux idle
+// launcher in place: an `exec` of `kmux-idler --idle-loop` makes it show the idle
+// hint and launch the picker on a keypress, exactly like a managed placeholder
+// slot. The standalone-column classification rides along on the pane from the scan
+// (see kitty.BlankPane), so no second `ls` is needed here. idlerPath is the
+// absolute path to the helper (from layout.IdlerPath).
 func convertBlankPaneCmd(mgr *layout.Manager, pane kitty.BlankPane, idlerPath string) tea.Cmd {
 	return func() tea.Msg {
 		if pane.StandaloneColumn {
@@ -252,9 +323,23 @@ func focusCmd(id int) tea.Cmd {
 	}
 }
 
-// dismissLauncherCmd focuses the finished dashboard before closing the splash tab,
-// so the user never sees a bare tab in between. Close ignores a missing match, so
-// a splash the user closed by hand can't error the launch.
+// setTabTitleCmd retitles the dashboard's kitty tab off the UI goroutine, matching
+// on the sidebar window id (windowID). It is best-effort and returns no message: a
+// title failure must not disrupt the dashboard, and the title carries no state the
+// model needs to hear back about.
+func setTabTitleCmd(windowID int, scopeDir string, needsAttention bool) tea.Cmd {
+	return func() tea.Msg {
+		_ = kitty.SetTabTitle(windowID, agent.DashTabTitle(scopeDir, needsAttention))
+		return nil
+	}
+}
+
+// dismissLauncherCmd tears down the launch-overlay splash tab off the UI
+// goroutine: it focuses the finished dashboard (sidebarID) first, so the reveal
+// switches to the settled layout, then closes the splash tab (launcherID). Doing
+// it in that order means the user never sees a bare tab between the splash
+// closing and the dashboard appearing. Best-effort — close ignores a missing
+// match — so a splash the user closed by hand can't error the launch.
 func dismissLauncherCmd(sidebarID, launcherID int) tea.Cmd {
 	return func() tea.Msg {
 		if err := kitty.FocusWindow(sidebarID); err != nil {
@@ -290,7 +375,23 @@ func reattachSessionCmd(mgr *layout.Manager, name string) tea.Cmd {
 	}
 }
 
-// saveStateCmd snapshots both maps before writing so a later mutation can't race.
+// saveProjectsCmd persists the full scanned project list off the UI goroutine so
+// a freshly-spawned idler can paint its picker from disk instead of re-scanning
+// every repo under ~/git. It snapshots the slice header so a later m.projects
+// replacement can't race the write; the underlying Project values are only read.
+// The result is discarded (a fresh tea.Msg the model ignores) — a write error is
+// non-fatal, the idler just falls back to a live scan.
+func saveProjectsCmd(projects []project.Project) tea.Cmd {
+	snapshot := append([]project.Project(nil), projects...)
+	return func() tea.Msg {
+		_ = status.SaveProjects(snapshot)
+		return nil
+	}
+}
+
+// saveStateCmd persists the detached-session set and the idle clocks off the UI
+// goroutine. It snapshots both maps first so a later mutation can't race the
+// write. (idle.snapshot already returns a fresh copy.)
 func (m model) saveStateCmd() tea.Cmd {
 	detached := make(map[string]bool, len(m.detached))
 	for k, on := range m.detached {

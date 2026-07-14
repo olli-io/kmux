@@ -85,10 +85,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// projects with no running session keep their status; a full sweep replaces.
 		if msg.partial {
 			m.projects = mergeProjects(m.projects, msg.projects)
-		} else {
-			m.projects = msg.projects
+			return m, nil
 		}
-		return m, nil
+		m.projects = msg.projects
+		// A full, unscoped sweep is the only time m.projects holds the complete
+		// ~/git set; persist it so a freshly-spawned idler can paint from the cache
+		// instead of re-scanning every repo. Scoped mode holds a single project and
+		// must not clobber the full cache.
+		if m.scopeDir != "" {
+			return m, nil
+		}
+		return m, saveProjectsCmd(m.projects)
 
 	case reconciledMsg:
 		if len(msg.errs) > 0 {
@@ -145,6 +152,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.spinning && anyBusy(m.attention) {
 			m.spinning = true
 			cmds = append(cmds, spinnerCmd())
+		}
+		// Re-title the kitty tab only when the [!!] attention flag flips, so the
+		// dashboard doesn't spawn a `kitten @` (a ~30ms cold start) every poll.
+		if attn := anyNeedsAttention(m.attention); attn != m.tabAttn {
+			m.tabAttn = attn
+			cmds = append(cmds, setTabTitleCmd(m.mgr.SidebarID(), m.scopeDir, attn))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -409,8 +422,22 @@ func anyBusy(states map[string]status.AttentionState) bool {
 	return false
 }
 
-// actionSession returns the session name a focus/open action targets for row r,
-// or "" for a non-session row.
+// anyNeedsAttention reports whether any session is blocked on a prompt awaiting a
+// yes/no answer (AttnPermission) — the condition that lights the tab-title [!!]
+// marker. A merely idle/finished session (AttnWaiting) does not qualify: the
+// marker means "a session is asking you something", not "a session is idle".
+func anyNeedsAttention(states map[string]status.AttentionState) bool {
+	for _, st := range states {
+		if st == status.AttnPermission {
+			return true
+		}
+	}
+	return false
+}
+
+// actionSession returns the agent session name a focus/open action targets for row
+// r: a session leaf carries it in its session field. It returns "" for any other
+// row.
 func actionSession(r *row) string {
 	if isSessionLeaf(r) {
 		return r.session
