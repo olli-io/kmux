@@ -137,7 +137,8 @@ func runDashboard(pathArg string) {
 
 	mgr := layout.NewManager(sidebarID)
 	// AltScreen gives a clean, full-pane dashboard (clears on launch, restores on exit).
-	p := tea.NewProgram(tui.NewModel(mgr, scopeDir, launcherID), tea.WithAltScreen())
+	// ReportFocus lets the model trigger a full git rescan when kmux's tab is refocused.
+	p := tea.NewProgram(tui.NewModel(mgr, scopeDir, launcherID), tea.WithAltScreen(), tea.WithReportFocus())
 	_, runErr := p.Run()
 	// Close the splash tab unconditionally on exit; a quit or crash before the model
 	// dismisses it would otherwise orphan it. CloseWindow ignores a missing match.

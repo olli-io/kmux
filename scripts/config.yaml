@@ -45,4 +45,5 @@ customCommands:
 #   createOrFocusClaude:    c       # launch/focus Claude for the project
 #   createOrFocusOpencode:  o       # launch/focus OpenCode for the project
 #   launchKmuxInProject:    t       # open the project in a new kmux tab
+#   refreshProjects:        r       # force a full git-status rescan of all projects
 #   quit:                   q       # quit kmux

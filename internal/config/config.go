@@ -101,6 +101,7 @@ const (
 	ActionCreateOrFocusClaude   = "createOrFocusClaude"
 	ActionCreateOrFocusOpencode = "createOrFocusOpencode"
 	ActionLaunchKmuxInProject   = "launchKmuxInProject"
+	ActionRefreshProjects       = "refreshProjects"
 	ActionQuit                  = "quit"
 )
 
@@ -117,6 +118,7 @@ func KeyActions() []string {
 		ActionDetachAgent, ActionKillAgent, ActionFullscreenAgent,
 		ActionCreateOrFocusClaude, ActionCreateOrFocusOpencode,
 		ActionLaunchKmuxInProject,
+		ActionRefreshProjects,
 		ActionQuit,
 	}
 }
@@ -140,6 +142,7 @@ func DefaultKeybindings() map[string]string {
 		ActionCreateOrFocusClaude:   "c",
 		ActionCreateOrFocusOpencode: "o",
 		ActionLaunchKmuxInProject:   "t",
+		ActionRefreshProjects:       "r",
 		ActionQuit:                  "q",
 	}
 }

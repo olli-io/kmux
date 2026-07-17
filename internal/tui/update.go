@@ -45,6 +45,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, cmd
 
+	case tea.FocusMsg:
+		// kmux's tab was refocused. Projects with no running session are otherwise
+		// only scanned at startup, so their git status goes stale while the tab sits
+		// in the background. Trigger a full rescan so the dashboard is fresh the
+		// moment the user looks at it.
+		cmd := m.refreshProjectsCmd()
+		return m, cmd
+
 	case spinnerMsg:
 		m.spinnerFrame++
 		// Stop the ticker when nothing is busy to avoid a re-render every interval for
@@ -323,6 +331,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, openTabCmd(dir)
 		}
 
+	case config.ActionRefreshProjects:
+		// Force a full git rescan of every project on demand, the same sweep a tab
+		// refocus triggers. Useful when status changed from outside kmux (a commit,
+		// push, or checkout in another terminal) and the user wants it reflected now.
+		cmd := m.refreshProjectsCmd()
+		return m, cmd
+
 	case config.ActionFullscreenAgent:
 		// Open the selected agent in its own kitty tab instead of a managed pane.
 		// Works in both panels: a session leaf attaches; a project row launches.
@@ -353,6 +368,19 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// refreshProjectsCmd kicks off a full git rescan of every project (all of ~/git
+// plus config folders, or the single scoped project), replacing m.projects
+// wholesale so idle projects get fresh status too. Guarded by m.scanning so a
+// refresh can't stack a second sweep on top of an in-flight one; returns nil in
+// that case, coalescing into the running scan.
+func (m *model) refreshProjectsCmd() tea.Cmd {
+	if m.scanning {
+		return nil
+	}
+	m.scanning = true
+	return projectsCmd(m.scopeDir)
 }
 
 // focusPanel moves the cursor to the start of the previous or next panel. It's

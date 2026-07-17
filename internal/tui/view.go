@@ -66,6 +66,7 @@ func (m model) helpHints(focused section) []keyHint {
 			{pair(config.ActionCreateOrFocusClaude, config.ActionCreateOrFocusOpencode), "Launch claude/opencode"},
 			{kb(config.ActionFullscreenAgent), "Fullscreen agent"},
 			{kb(config.ActionLaunchKmuxInProject), "Kmux project in tab"},
+			{kb(config.ActionRefreshProjects), "Refresh git status"},
 			{kb(config.ActionKillAgent), "Kill session"},
 		}
 	}
