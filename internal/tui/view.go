@@ -44,8 +44,8 @@ func (m model) helpHints(focused section) []keyHint {
 	kb := func(action string) string { return keyLabel(m.keys[action]) }
 	pair := func(a, b string) string { return kb(a) + "/" + kb(b) }
 
-	move := keyHint{pair(config.ActionNextItem, config.ActionPrevItem), "Move"}
-	switchPanel := keyHint{pair(config.ActionPrevPanel, config.ActionNextPanel), "Switch panel"}
+	move := keyHint{pair(config.ActionNextItem, config.ActionPrevItem), "move"}
+	switchPanel := keyHint{pair(config.ActionPrevPanel, config.ActionNextPanel), "switch panel"}
 
 	var hints []keyHint
 	switch focused {
@@ -53,21 +53,21 @@ func (m model) helpHints(focused section) []keyHint {
 		hints = []keyHint{
 			move,
 			switchPanel,
-			{kb(config.ActionCreateOrAttachAgent), "Focus pane"},
-			{kb(config.ActionFullscreenAgent), "Fullscreen agent"},
-			{kb(config.ActionDetachAgent), "Detach"},
-			{kb(config.ActionKillAgent), "Kill session"},
+			{kb(config.ActionCreateOrAttachAgent), "focus pane"},
+			{kb(config.ActionFullscreenAgent), "fullscreen agent"},
+			{kb(config.ActionDetachAgent), "detach"},
+			{kb(config.ActionKillAgent), "kill session"},
 		}
 	default:
 		hints = []keyHint{
 			move,
 			switchPanel,
-			{kb(config.ActionCreateOrAttachAgent), "Launch agent"},
-			{pair(config.ActionCreateOrFocusClaude, config.ActionCreateOrFocusOpencode), "Launch claude/opencode"},
-			{kb(config.ActionFullscreenAgent), "Fullscreen agent"},
-			{kb(config.ActionLaunchKmuxInProject), "Kmux project in tab"},
-			{kb(config.ActionRefreshProjects), "Refresh git status"},
-			{kb(config.ActionKillAgent), "Kill session"},
+			{kb(config.ActionCreateOrAttachAgent), "launch agent"},
+			{pair(config.ActionCreateOrFocusClaude, config.ActionCreateOrFocusOpencode), "launch claude/opencode"},
+			{kb(config.ActionFullscreenAgent), "fullscreen agent"},
+			{kb(config.ActionLaunchKmuxInProject), "kmux project in tab"},
+			{kb(config.ActionRefreshProjects), "refresh git status"},
+			{kb(config.ActionKillAgent), "kill session"},
 		}
 	}
 	panel := panelName(focused)
@@ -79,9 +79,9 @@ func (m model) helpHints(focused section) []keyHint {
 		if label == "" {
 			label = c.Cmd
 		}
-		hints = append(hints, keyHint{keyLabel(c.Key), label})
+		hints = append(hints, keyHint{keyLabel(c.Key), strings.ToLower(label)})
 	}
-	return append(hints, keyHint{kb(config.ActionQuit), "Quit"})
+	return append(hints, keyHint{kb(config.ActionQuit), "quit"})
 }
 
 // conflictLines renders the keybinding-conflict report as error-styled body lines,

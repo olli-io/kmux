@@ -25,6 +25,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
 		os.Exit(1)
 	}
+	if pa.Help {
+		fmt.Print(helpText)
+		return
+	}
 	if pa.PrintSession {
 		name, err := agent.SessionName(pa.Path, pa.Agent)
 		if err != nil {

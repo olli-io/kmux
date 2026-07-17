@@ -20,6 +20,7 @@ type ParsedArgs struct {
 	PrintSession bool
 	PrintProject bool
 	Splash       bool
+	Help         bool
 
 	// Attn selects the attention-marker hook mode (--attn): kmux reads an agent
 	// lifecycle event and writes/removes a marker the dashboard reads (see
@@ -39,6 +40,8 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
+		case a == "--help", a == "-help", a == "-h":
+			pa.Help = true
 		case a == "--agent", a == "-agent":
 			if i+1 >= len(args) {
 				return pa, fmt.Errorf("--agent requires a value (claude or opencode)")
@@ -93,6 +96,9 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 			}
 			pa.Path = a
 		}
+	}
+	if pa.Help {
+		return pa, nil // --help wins over any other flag or validation error
 	}
 	if pa.Agent != "" && pa.Agent != "claude" && pa.Agent != "opencode" {
 		return pa, fmt.Errorf("agent must be 'claude' or 'opencode', got %q", pa.Agent)
