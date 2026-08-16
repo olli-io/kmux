@@ -205,6 +205,63 @@ func TestAgentCommand(t *testing.T) {
 	}
 }
 
+func TestAttnSession(t *testing.T) {
+	const canon = ccPre + "~/git/kmux"
+	marked := "[!!]" + canon
+	cases := []struct {
+		in        string
+		attention bool
+		want      string
+	}{
+		{canon, true, marked},  // mark a canonical name
+		{canon, false, canon},  // no-op on an unmarked name
+		{marked, false, canon}, // clear a marked name
+		{marked, true, marked}, // re-marking must not double the prefix
+	}
+	for _, c := range cases {
+		if got := AttnSession(c.in, c.attention); got != c.want {
+			t.Errorf("AttnSession(%q, %v) = %q, want %q", c.in, c.attention, got, c.want)
+		}
+	}
+}
+
+func TestCanonicalSessionAndHasAttn(t *testing.T) {
+	const canon = ocPre + "~/git/proj@feat"
+	marked := "[!!]" + canon
+	if got := CanonicalSession(marked); got != canon {
+		t.Errorf("CanonicalSession(%q) = %q, want %q", marked, got, canon)
+	}
+	if got := CanonicalSession(canon); got != canon {
+		t.Errorf("CanonicalSession(%q) = %q, want unchanged", canon, got)
+	}
+	if !HasAttn(marked) || HasAttn(canon) {
+		t.Errorf("HasAttn: marked=%v canon=%v, want true/false", HasAttn(marked), HasAttn(canon))
+	}
+}
+
+// TestParsersTolerateAttnMark asserts the identity parsers ignore a leading "[!!]", so a
+// blocked session still resolves to the same kind/path/project as its canonical form.
+func TestParsersTolerateAttnMark(t *testing.T) {
+	home := homeOrSkip(t)
+	proj := filepath.Join(home, "git", "kmux")
+	canon := ccPre + "~/git/kmux@feat"
+	marked := "[!!]" + canon
+
+	if AgentKind(marked) != "claude" {
+		t.Errorf("AgentKind(%q) = %q, want claude", marked, AgentKind(marked))
+	}
+	if got := ProjectPath(marked); got != proj {
+		t.Errorf("ProjectPath(%q) = %q, want %q", marked, got, proj)
+	}
+	if got := WorktreeName(marked); got != "feat" {
+		t.Errorf("WorktreeName(%q) = %q, want feat", marked, got)
+	}
+	p, wt, ok := MatchProject(marked, []string{proj})
+	if !ok || p != proj || wt != "feat" {
+		t.Errorf("MatchProject(%q) = (%q, %q, %v), want (%q, feat, true)", marked, p, wt, ok, proj)
+	}
+}
+
 func TestDashTabTitle(t *testing.T) {
 	home := homeOrSkip(t)
 	kmux := filepath.Join(home, "git", "kmux")

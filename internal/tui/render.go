@@ -93,7 +93,9 @@ func agentBadge(name string, attached, detached bool) string {
 }
 
 // attentionGlyph returns the styled status glyph for an attention state. Busy
-// returns the spinner frame at frame, animating across ticks.
+// returns the spinner frame at frame, animating across ticks. AttnPermission (blocked
+// on a prompt awaiting an answer) is the urgent red "!"; AttnWaiting (turn finished,
+// nothing pending) is a calm green "✓".
 func attentionGlyph(st status.AttentionState, frame int) string {
 	switch st {
 	case status.AttnPermission:

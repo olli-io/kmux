@@ -64,6 +64,12 @@ type model struct {
 	// matching the no-attention title Init sets at launch.
 	tabAttn bool
 
+	// sessAttn tracks, per canonical session name, whether its tmux session currently
+	// carries the [!!] marker. The attentionMsg handler renames a session only when its
+	// permission state flips, so it doesn't shell out to `tmux rename-session` every
+	// poll. Sessions absent from the map have an unmarked (canonical) name.
+	sessAttn map[string]bool
+
 	// launcherID is the kitty window id of the [kmux][launcher] splash tab the
 	// dashboard was spawned behind (0 when none — e.g. the splash failed to open).
 	// launched guards the one-shot dismissal: once the layout is ready and the
@@ -127,6 +133,7 @@ func NewModel(mgr *layout.Manager, scopeDir string, launcherID int) tea.Model {
 		orphanStrikes: map[string]int{},
 		detached:      detached,
 		attention:     map[string]status.AttentionState{},
+		sessAttn:      map[string]bool{},
 		idle:          status.NewIdleTrackerFrom(cfg.IdleDuration(), idle),
 		commands:      effectiveCommands(cfg.CustomCommands, reserved),
 		keys:          keys,

@@ -357,7 +357,9 @@ func (m *Manager) add(session string) error {
 	}
 
 	loc, matchID, bias, col := m.placement()
-	id, err := launchWindow(loc, matchID, bias, session, "tmux", "attach", "-t", session)
+	// session is the canonical name (window title / map key); tmux must attach by the
+	// live name, which carries a "[!!]" marker when the session is blocked.
+	id, err := launchWindow(loc, matchID, bias, session, "tmux", "attach", "-t", tmux.LiveName(session))
 	if err != nil {
 		return err
 	}
@@ -374,7 +376,7 @@ func (m *Manager) add(session string) error {
 // column absorbs the whole slot at fixed width instead of half-splitting a real column.
 func (m *Manager) addInPlaceholderSlot(session string) error {
 	ph := m.placeholders[0]
-	id, err := launchWindow(kitty.VSplit, ph, 0, session, "tmux", "attach", "-t", session)
+	id, err := launchWindow(kitty.VSplit, ph, 0, session, "tmux", "attach", "-t", tmux.LiveName(session))
 	if err != nil {
 		return err
 	}

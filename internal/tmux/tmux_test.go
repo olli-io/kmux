@@ -54,6 +54,21 @@ func TestParseSessionList(t *testing.T) {
 	}
 }
 
+func TestParseSessionListStripsAttnMark(t *testing.T) {
+	// A blocked session's live name carries a leading "[!!]"; parseSessionList strips it
+	// so Name is the canonical identity every downstream map keys on.
+	out := "[!!][kmux][CC]~/git/a\t/home/u/git/a\n" +
+		"[kmux][OC]~/git/b\t/home/u/git/b\n"
+	got := parseSessionList(out)
+	want := []AgentSession{
+		{Name: "[kmux][CC]~/git/a", Dir: "/home/u/git/a"},
+		{Name: "[kmux][OC]~/git/b", Dir: "/home/u/git/b"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v", got, want)
+	}
+}
+
 func TestParseSessionListEmptyDir(t *testing.T) {
 	// tmux may report an empty session_path; the trailing tab still parses, leaving
 	// an empty Dir (the caller treats that as "present", never orphaned).
@@ -65,8 +80,10 @@ func TestParseSessionListEmptyDir(t *testing.T) {
 }
 
 func TestAgentSessionRegex(t *testing.T) {
-	match := []string{"[kmux][CC]~/git/a", "[kmux][OC]~/git/a@b", "[kmux][cc]/x/y/z"}
-	noMatch := []string{"scratch", "CC", "kmux[CC]~/git/a", "~/git/a[kmux][CC]", "oc_thing"}
+	match := []string{"[kmux][CC]~/git/a", "[kmux][OC]~/git/a@b", "[kmux][cc]/x/y/z",
+		"[!!][kmux][CC]~/git/a", "[!!][kmux][oc]/x/y"} // a blocked session carries a leading [!!]
+	noMatch := []string{"scratch", "CC", "kmux[CC]~/git/a", "~/git/a[kmux][CC]", "oc_thing",
+		"[!!]scratch", "[!!]~/git/a"} // [!!] alone doesn't make a non-agent session match
 	for _, s := range match {
 		if !agentSession.MatchString(s) {
 			t.Errorf("expected %q to match", s)

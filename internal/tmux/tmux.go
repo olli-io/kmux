@@ -10,8 +10,18 @@ import (
 )
 
 // agentSession matches the kmux agent prefix [kmux][CC] (claude) or [kmux][OC]
-// (opencode), case-insensitively.
-var agentSession = regexp.MustCompile(`(?i)^\[kmux\]\[(cc|oc)\]`)
+// (opencode), case-insensitively, allowing an optional leading "[!!]" attention marker
+// that a blocked session carries in its live name.
+var agentSession = regexp.MustCompile(`(?i)^(?:\[!!\])?\[kmux\]\[(cc|oc)\]`)
+
+// attnMarkStr is the leading marker a blocked session's live tmux name carries. It is
+// duplicated from agent.attnMark (the agent package imports tmux, so tmux can't import
+// it back) and must stay in sync.
+const attnMarkStr = "[!!]"
+
+// stripAttnMark removes a leading "[!!]" so a live session name collapses to its
+// canonical identity. Idempotent on an already-canonical name.
+func stripAttnMark(name string) string { return strings.TrimPrefix(name, attnMarkStr) }
 
 // AgentSession is a live agent session with its anchor directory. Dir is the tmux
 // session_path (the `-c` dir), which unlike a pane's path doesn't drift when a shell
@@ -66,7 +76,10 @@ func parseSessionList(out string) []AgentSession {
 		}
 		name = strings.TrimSpace(name)
 		if name != "" && agentSession.MatchString(name) {
-			sessions = append(sessions, AgentSession{Name: name, Dir: dir})
+			// A blocked session's live name carries a leading "[!!]" marker; strip it so
+			// Name is the canonical identity every downstream map/parser keys on. The
+			// live name is re-derived by LiveName only when a tmux command must address it.
+			sessions = append(sessions, AgentSession{Name: stripAttnMark(name), Dir: dir})
 		}
 	}
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].Name < sessions[j].Name })
@@ -96,7 +109,7 @@ func CurrentSession() (name, paneDir string, err error) {
 // scrollback). A missing session or dead server yields empty text, not an error, so
 // attention polling never fails the whole cycle over one gone session.
 func CapturePane(session string) (string, error) {
-	out, err := exec.Command("tmux", "capture-pane", "-t", session, "-p").Output()
+	out, err := exec.Command("tmux", "capture-pane", "-t", LiveName(session), "-p").Output()
 	if err != nil {
 		if _, ok := err.(*exec.ExitError); ok {
 			return "", nil // no such session / no server: treat as empty
@@ -119,6 +132,10 @@ func CapturePanes(sessions []string) (map[string]string, error) {
 	if len(sessions) == 0 {
 		return map[string]string{}, nil
 	}
+	// A blocked session's live name carries "[!!]"; tmux only addresses it by that live
+	// name, so resolve canonical -> live once (one list-sessions) and target the live
+	// names. Results stay keyed by the canonical input via parseCapturePanes.
+	live := liveNames(sessions)
 	// The sentinel precedes each capture so stdout splits into ordered sections. The
 	// bare ";" args are tmux command separators (no shell). Targeting display-message
 	// at the session avoids needing an attached client, since kmux runs outside tmux.
@@ -127,8 +144,8 @@ func CapturePanes(sessions []string) (map[string]string, error) {
 		if i > 0 {
 			args = append(args, ";")
 		}
-		args = append(args, "display-message", "-p", "-t", s, captureSentinel,
-			";", "capture-pane", "-t", s, "-p")
+		args = append(args, "display-message", "-p", "-t", live[s], captureSentinel,
+			";", "capture-pane", "-t", live[s], "-p")
 	}
 	out, err := exec.Command("tmux", args...).Output()
 	if err != nil {
@@ -155,7 +172,7 @@ func parseCapturePanes(out string, sessions []string) (map[string]string, error)
 // KillSession kills the named tmux session outright. A missing session is treated
 // as success (already gone).
 func KillSession(name string) error {
-	cmd := exec.Command("tmux", "kill-session", "-t", name)
+	cmd := exec.Command("tmux", "kill-session", "-t", LiveName(name))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if strings.Contains(string(out), "can't find session") {
@@ -176,6 +193,68 @@ func NewDetachedSession(name, dir, agentCmd string) error {
 			return nil // already exists; caller attaches
 		}
 		return fmt.Errorf("tmux new-session %s: %w: %s", name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// LiveName resolves a canonical session name to the actual name tmux currently holds,
+// which differs when the session is blocked and carries a leading "[!!]" marker. tmux
+// can only address a renamed session by its live name, so every command that targets a
+// session (capture, kill, attach, rename) routes its canonical name through here first.
+// One list-sessions call; on any error or no match it returns canonical unchanged, so a
+// steady, unmarked session pays no penalty in practice (callers pass live names when
+// known).
+func LiveName(canonical string) string {
+	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return canonical
+	}
+	for _, name := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if stripAttnMark(name) == canonical {
+			return name
+		}
+	}
+	return canonical
+}
+
+// liveNames resolves many canonical names to live names in one list-sessions call,
+// returning a map keyed by every input canonical (defaulting to itself when tmux has no
+// matching session). Used by batched capture so a marked "[!!]" session is still
+// addressable without one list-sessions per session.
+func liveNames(canonicals []string) map[string]string {
+	m := make(map[string]string, len(canonicals))
+	for _, c := range canonicals {
+		m[c] = c // default: unmarked, live == canonical
+	}
+	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil {
+		return m
+	}
+	for _, name := range strings.Split(strings.TrimRight(string(out), "\n"), "\n") {
+		if canon := stripAttnMark(name); canon != name {
+			if _, ok := m[canon]; ok {
+				m[canon] = name // marked session: target the live "[!!]" name
+			}
+		}
+	}
+	return m
+}
+
+// RenameSession renames a session from its current (live) name to newName. It is the
+// primitive behind the "[!!]" attention marker: kmux renames a blocked session to
+// "[!!]<name>" and back. A missing session (killed mid-poll) is not an error. Renaming
+// to the name it already has is a tmux no-op error we also swallow.
+func RenameSession(from, to string) error {
+	if from == to {
+		return nil
+	}
+	cmd := exec.Command("tmux", "rename-session", "-t", from, to)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "can't find") {
+			return nil // session gone; nothing to rename
+		}
+		return fmt.Errorf("tmux rename-session %s -> %s: %w: %s", from, to, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

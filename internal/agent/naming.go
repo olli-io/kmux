@@ -13,17 +13,50 @@ import (
 // worktree path with $HOME abbreviated to "~". The full path (not the basename)
 // keeps two projects that share a basename distinct. A no-repo session is
 // "orphaned": an orphanMark sits right after the marker and it never carries an
-// "@<worktree>" segment.
+// "@<worktree>" segment. A session blocked on a prompt is renamed to carry an
+// optional leading attnMark ("[!!]<...>"); it is transient UI state, so every parser
+// strips it (via CanonicalSession/stripAgent) and it never reaches the identity/map key.
 const (
 	sessionTag  = "[kmux]" // literal leading tag on every kmux-managed session
 	worktreeSep = "@"
 	orphanMark  = "[∅]" // ∅ is U+2205 EMPTY SET; marks a no-repo session (after the marker)
+	attnMark    = "[!!]" // optional leading marker on a session blocked on a prompt
 )
 
 var agentMarkers = map[string]string{"claude": "[CC]", "opencode": "[OC]"}
 
 func agentPrefix(kind string) string {
 	return sessionTag + agentMarkers[kind]
+}
+
+// stripAttn removes a leading attnMark ("[!!]") so the rest of the grammar sees the
+// canonical name. A live session blocked on a prompt is renamed to "[!!]<name>"; every
+// parser routes through here (or CanonicalSession) so the marker never reaches the
+// identity/map key.
+func stripAttn(name string) string {
+	return strings.TrimPrefix(name, attnMark)
+}
+
+// HasAttn reports whether a live session name carries the leading "[!!]" marker.
+func HasAttn(name string) bool {
+	return strings.HasPrefix(name, attnMark)
+}
+
+// CanonicalSession strips a leading "[!!]" attention marker, yielding the stable name
+// kmux uses as its identity and map key. It is idempotent on an already-canonical name.
+func CanonicalSession(name string) string {
+	return stripAttn(name)
+}
+
+// AttnSession returns the live session name for a canonical session given its attention
+// state: "[!!]<session>" when blocked, the plain session otherwise. The input is first
+// canonicalized so re-marking an already-marked name can't double the prefix.
+func AttnSession(session string, needsAttention bool) string {
+	session = CanonicalSession(session)
+	if needsAttention {
+		return attnMark + session
+	}
+	return session
 }
 
 // DashboardTitle carries the same sessionTag as the agent sessions, so the whole
@@ -47,7 +80,7 @@ func DashTabTitle(scopeDir string, needsAttention bool) string {
 	}
 	title := sessionTag + "[dash]" + abbrevHome(path)
 	if needsAttention {
-		title = "[!!]" + title
+		title = attnMark + title
 	}
 	return title
 }
@@ -108,7 +141,7 @@ func SessionForKind(claudeSession, kind string) string {
 // AgentKind returns "claude", "opencode", or "" for a session name; the prefix is
 // matched case-insensitively.
 func AgentKind(name string) string {
-	lower := strings.ToLower(name)
+	lower := strings.ToLower(stripAttn(name))
 	for kind := range agentMarkers {
 		if strings.HasPrefix(lower, strings.ToLower(agentPrefix(kind))) {
 			return kind
@@ -154,6 +187,7 @@ func WorktreeName(session string) string {
 // stripAgent removes the leading agent prefix (case-insensitive), leaving
 // "[∅]<projectPath>[@<worktree>]".
 func stripAgent(session string) string {
+	session = stripAttn(session)
 	lower := strings.ToLower(session)
 	for kind := range agentMarkers {
 		if p := agentPrefix(kind); strings.HasPrefix(lower, strings.ToLower(p)) {

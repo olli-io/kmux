@@ -167,6 +167,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tabAttn = attn
 			cmds = append(cmds, setTabTitleCmd(m.mgr.SidebarID(), m.scopeDir, attn))
 		}
+		// Mirror the [!!] marker onto each session's own tmux session name, so it shows
+		// in tmux's status bar / choose-tree too — but only on a per-session flip, so a
+		// `tmux rename-session` doesn't run every poll. A permission session gets the
+		// marker; any other state (including a session that left the poll) clears it.
+		cmds = append(cmds, m.sessionAttnCmds(msg.states)...)
 		return m, tea.Batch(cmds...)
 
 	case idleConvertedMsg:
@@ -452,8 +457,9 @@ func anyBusy(states map[string]status.AttentionState) bool {
 
 // anyNeedsAttention reports whether any session is blocked on a prompt awaiting a
 // yes/no answer (AttnPermission) — the condition that lights the tab-title [!!]
-// marker. A merely idle/finished session (AttnWaiting) does not qualify: the
-// marker means "a session is asking you something", not "a session is idle".
+// marker, matching the per-session red "!" glyph (see attentionGlyph). A merely
+// finished/waiting session (AttnWaiting) shows a green "✓" in the panel but does not
+// flag the tab: the marker means "a session is asking you something", not "idle".
 func anyNeedsAttention(states map[string]status.AttentionState) bool {
 	for _, st := range states {
 		if st == status.AttnPermission {
@@ -461,6 +467,36 @@ func anyNeedsAttention(states map[string]status.AttentionState) bool {
 		}
 	}
 	return false
+}
+
+// sessionAttnCmds returns the tmux session renames needed to bring each session's [!!]
+// marker in sync with states, updating m.sessAttn in place. It emits a rename only when
+// a session's marked/unmarked status changed since the last poll, so a steady state
+// shells out nothing. A session that was marked but is absent from this poll
+// (killed/detached out of the list) is cleared from the tracking map without a rename —
+// it's gone or will re-sync when it reappears.
+func (m *model) sessionAttnCmds(states map[string]status.AttentionState) []tea.Cmd {
+	var cmds []tea.Cmd
+	for s, st := range states {
+		want := st == status.AttnPermission
+		if want == m.sessAttn[s] {
+			continue // no change for this session
+		}
+		if want {
+			m.sessAttn[s] = true
+		} else {
+			delete(m.sessAttn, s)
+		}
+		cmds = append(cmds, setSessionAttnCmd(s, want))
+	}
+	// Drop tracking for sessions that vanished from the poll so the map can't grow
+	// unbounded; they're gone, so no rename is needed.
+	for s := range m.sessAttn {
+		if _, ok := states[s]; !ok {
+			delete(m.sessAttn, s)
+		}
+	}
+	return cmds
 }
 
 // actionSession returns the agent session name a focus/open action targets for row

@@ -115,85 +115,70 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Wire the agent attention hooks.
-# kmux shows which sessions need you (the Sessions-panel glyph and the kitty tab
-# title's [!!] marker) from each agent's own lifecycle events, not by scraping the
-# pane. Claude Code delivers these via JSON hooks in ~/.claude/settings.json;
-# OpenCode via a plugin in ~/.config/opencode/plugin/. Both invoke `kmux --attn`,
-# which records the state under ~/.config/kmux/attention/. Installed idempotently,
-# using the binary's absolute path (hooks/plugins get no login-shell PATH).
+# Deprecate the agent attention hooks.
+# kmux now detects which sessions need you (the Sessions-panel glyph and the kitty
+# tab / tmux window "[!!]" marker) purely from each session's pane text — no agent-
+# side hooks or plugins are required. Earlier versions installed a Claude Code hook
+# (in ~/.claude/settings.json) and an OpenCode plugin that invoked `kmux --attn`;
+# that flag no longer exists. This section REMOVES any previously-installed hook /
+# plugin idempotently so upgrades clean themselves up.
 # ---------------------------------------------------------------------------
-# Absolute path to the installed binary for hook/plugin commands.
-case "$DEST" in
-  /*) KMUX_BIN="$DEST/$BIN_NAME" ;;
-  *)  KMUX_BIN="$(CDPATH= cd -- "$DEST" && pwd)/$BIN_NAME" ;;
-esac
 
-# --- Claude Code: merge hooks into ~/.claude/settings.json (needs jq) -----------
+# --- Claude Code: strip any `kmux --attn` hook from ~/.claude/settings.json ------
 CLAUDE_SETTINGS="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json"
-install_claude_hooks() {
+remove_claude_hooks() {
+  [ -f "$CLAUDE_SETTINGS" ] || return 0
   if ! have jq; then
-    warn "jq not found — skipping automatic Claude Code hook install."
-    printf '  To enable the kmux attention marker in Claude Code, add these hooks to\n  %s (command: "%s --attn"):\n' "$CLAUDE_SETTINGS" "$KMUX_BIN"
-    printf '    Notification (matcher "permission_prompt|idle_prompt"), UserPromptSubmit, Stop\n'
-    return
+    if grep -q -- '--attn' "$CLAUDE_SETTINGS" 2>/dev/null; then
+      warn "jq not found — please remove the kmux '--attn' hooks from $CLAUDE_SETTINGS manually (Notification/UserPromptSubmit/Stop)."
+    fi
+    return 0
   fi
-  mkdir -p "$(dirname "$CLAUDE_SETTINGS")" 2>/dev/null || true
-  [ -f "$CLAUDE_SETTINGS" ] || printf '{}\n' > "$CLAUDE_SETTINGS"
-
-  # Skip if a kmux --attn hook is already wired (idempotent re-runs): true when any
-  # hook command string contains "--attn".
-  if jq -e '[.hooks // {} | .. | .command? // empty] | any(contains("--attn"))' \
+  # Nothing to do if no --attn hook is present (idempotent re-runs).
+  if ! jq -e '[.hooks // {} | .. | .command? // empty] | any(contains("--attn"))' \
         "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
-    info "Claude Code attention hooks already present in $CLAUDE_SETTINGS."
-    return
+    return 0
   fi
-
   cp "$CLAUDE_SETTINGS" "$CLAUDE_SETTINGS.kmux-bak" 2>/dev/null || true
   TMP_JSON="$(mktemp)"
-  if jq --arg cmd "$KMUX_BIN --attn" '
-        .hooks = (.hooks // {})
-        | .hooks.Notification = ((.hooks.Notification // []) + [{"matcher":"permission_prompt|idle_prompt","hooks":[{"type":"command","command":$cmd}]}])
-        | .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) + [{"hooks":[{"type":"command","command":$cmd}]}])
-        | .hooks.Stop = ((.hooks.Stop // []) + [{"hooks":[{"type":"command","command":$cmd}]}])
+  # Drop hook entries whose command contains "--attn" from the three event arrays,
+  # then delete any arrays/keys left empty, and remove .hooks if it ends up empty.
+  if jq '
+        def strip: map(select((.hooks // [] | map(.command // "" | contains("--attn")) | any) | not));
+        if .hooks then
+          .hooks.Notification    = ((.hooks.Notification    // []) | strip)
+          | .hooks.UserPromptSubmit = ((.hooks.UserPromptSubmit // []) | strip)
+          | .hooks.Stop          = ((.hooks.Stop          // []) | strip)
+          | .hooks |= with_entries(select(.value | length > 0))
+          | if (.hooks | length) == 0 then del(.hooks) else . end
+        else . end
       ' "$CLAUDE_SETTINGS" > "$TMP_JSON" 2>/dev/null && [ -s "$TMP_JSON" ]; then
     mv "$TMP_JSON" "$CLAUDE_SETTINGS"
-    info "Installed Claude Code attention hooks into $CLAUDE_SETTINGS (backup: $CLAUDE_SETTINGS.kmux-bak)."
+    info "Removed kmux attention hooks from $CLAUDE_SETTINGS (backup: $CLAUDE_SETTINGS.kmux-bak)."
   else
     rm -f "$TMP_JSON"
     warn "could not update $CLAUDE_SETTINGS with jq; left it unchanged."
   fi
 }
-install_claude_hooks
+remove_claude_hooks
 
-# --- OpenCode: drop a plugin into ~/.config/opencode/plugin/ ---------------------
-OPENCODE_PLUGIN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugin"
-OPENCODE_PLUGIN="$OPENCODE_PLUGIN_DIR/kmux-attn.js"
-install_opencode_plugin() {
-  mkdir -p "$OPENCODE_PLUGIN_DIR" 2>/dev/null || true
-  # The plugin forwards permission/idle events to `kmux --attn`. directory is the
-  # plugin's project cwd; kmux maps it to the [kmux][OC] session name.
-  cat > "$OPENCODE_PLUGIN.tmp" <<EOF
-// Installed by kmux (install.sh). Forwards OpenCode lifecycle events to kmux so the
-// dashboard can show which sessions need attention. Safe to delete to opt out.
-export const KmuxAttn = async ({ \$, directory }) => ({
-  event: async ({ event }) => {
-    const t = event.type
-    if (t === "permission.updated" || t === "permission.replied" || t === "session.idle") {
-      await \$\`$KMUX_BIN --attn --kind opencode --event \${t} --cwd \${directory}\`.quiet().nothrow()
-    }
-  },
-})
-EOF
-  if [ -f "$OPENCODE_PLUGIN" ] && cmp -s "$OPENCODE_PLUGIN.tmp" "$OPENCODE_PLUGIN"; then
-    rm -f "$OPENCODE_PLUGIN.tmp"
-    info "OpenCode attention plugin already up to date at $OPENCODE_PLUGIN."
-  else
-    mv "$OPENCODE_PLUGIN.tmp" "$OPENCODE_PLUGIN"
-    info "Installed OpenCode attention plugin to $OPENCODE_PLUGIN."
+# --- OpenCode: remove the kmux plugin --------------------------------------------
+OPENCODE_PLUGIN="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugin/kmux-attn.js"
+remove_opencode_plugin() {
+  # Only remove our own file (identified by its install header), never a user file
+  # that happens to share the name.
+  if [ -f "$OPENCODE_PLUGIN" ] && grep -q "Installed by kmux" "$OPENCODE_PLUGIN" 2>/dev/null; then
+    rm -f "$OPENCODE_PLUGIN"
+    info "Removed OpenCode attention plugin $OPENCODE_PLUGIN."
   fi
 }
-install_opencode_plugin
+remove_opencode_plugin
+
+# --- Drop the now-unused attention marker directory ------------------------------
+ATTN_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/kmux/attention"
+[ -d "$ATTN_DIR" ] && rm -rf "$ATTN_DIR" && info "Removed stale attention markers ($ATTN_DIR)."
+
+info "Attention is now detected from pane text — no agent hooks or plugins needed."
 
 # ---------------------------------------------------------------------------
 # PATH check

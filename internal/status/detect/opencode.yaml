@@ -1,0 +1,47 @@
+# OpenCode detection rules (herdr-style). See internal/status/detect for the engine.
+# Same model as claude.yaml: bottom-region matching, working => AttnBusy,
+# blocked => AttnPermission, idle / no rule matched => AttnWaiting. Blocked outranks
+# working. Substrings are case-insensitive; write them lower-case.
+agent: opencode
+rules:
+  # --- BUSY: "esc interrupt" / "esc to interrupt"; "esc int" is the truncation-robust
+  # prefix at narrow widths.
+  - id: opencode-working
+    state: working
+    priority: 50
+    region: bottom_non_empty_lines(10)
+    any:
+      - contains: ["esc int"]
+      - contains: ["esc to int"]
+
+  # --- BLOCKED: explicit permission banner.
+  - id: opencode-blocked-permission-required
+    state: blocked
+    priority: 100
+    region: bottom_non_empty_lines(10)
+    contains: ["permission required"]
+
+  # --- BLOCKED: permission action row.
+  - id: opencode-blocked-allow
+    state: blocked
+    priority: 100
+    region: bottom_non_empty_lines(10)
+    any:
+      - contains: ["allow once"]
+      - contains: ["allow always"]
+
+  # --- BLOCKED: live select / confirm box footer (herdr opencode form): "esc dismiss"
+  # + a confirm/submit/toggle hint + a select/navigate hint.
+  - id: opencode-blocked-select-box
+    state: blocked
+    priority: 100
+    region: bottom_non_empty_lines(10)
+    all:
+      - contains: ["esc dismiss"]
+      - any:
+          - contains: ["enter confirm"]
+          - contains: ["enter submit"]
+          - contains: ["enter toggle"]
+      - any:
+          - contains: ["select"]
+          - contains: ["tab"]

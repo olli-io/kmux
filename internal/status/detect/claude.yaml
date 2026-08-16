@@ -1,0 +1,56 @@
+# Claude Code detection rules (herdr-style). See internal/status/detect for the engine.
+# kmux sees only pane BODY text (tmux capture-pane -p) — no OSC title — so every rule
+# matches the pane's bottom region (bottom_non_empty_lines), which also keeps scrollback
+# from spoofing the live status. States map onto kmux's AttentionState in
+# status.ClassifyAttention:
+#   working => AttnBusy (spinner), blocked => AttnPermission (red "!"),
+#   idle / no rule matched => AttnWaiting (green "✓").
+# Substrings are case-insensitive; write them lower-case. Blocked outranks working so a
+# permission/question box can never be mistaken for generation.
+agent: claude
+rules:
+  # --- BUSY -----------------------------------------------------------------------
+  # The reliable busy signal is the spinner line, e.g. "✽ Processing… (5m 44s · ↓ 15k
+  # tokens)": a verb followed by "… (<elapsed> · …)". This is present at ANY pane width,
+  # unlike the "esc to interrupt" footer hint, which truncates off at normal widths
+  # (empirically the captured footer read only "⏵⏵ auto mode on (shift+tab to cycle)").
+  # "esc to int" is kept as a width-tolerant fallback for when the hint IS visible.
+  - id: claude-working
+    state: working
+    priority: 50
+    region: bottom_non_empty_lines(10)
+    any:
+      - regex: ['… \([0-9]+[smh]']
+      - contains: ["esc to int"]
+
+  # --- BLOCKED: AskUserQuestion / select box --------------------------------------
+  # A live select box (incl. AskUserQuestion) has a footer with "esc to cancel" plus a
+  # confirm or select hint. This is the case Claude's Stop hook could never distinguish
+  # from a plain finished turn.
+  - id: claude-blocked-select-box
+    state: blocked
+    priority: 100
+    region: bottom_non_empty_lines(10)
+    all:
+      - contains: ["esc to cancel"]
+      - any:
+          - contains: ["enter to confirm"]
+          - contains: ["enter to select"]
+
+  # --- BLOCKED: bash / generic permission prompt ----------------------------------
+  # "do you want to proceed?" on its own, or a "do you want…"/"would you like…" prompt
+  # paired with a numbered yes option or a ❯ selector. The ❯ must co-occur with the
+  # prompt phrase so a bare idle "❯" prompt line can't trip this.
+  - id: claude-blocked-permission
+    state: blocked
+    priority: 100
+    region: bottom_non_empty_lines(10)
+    any:
+      - contains: ["do you want to proceed"]
+      - all:
+          - any:
+              - contains: ["do you want"]
+              - contains: ["would you like"]
+          - any:
+              - contains: ["1. yes"]
+              - contains: ["❯"]

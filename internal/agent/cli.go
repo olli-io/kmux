@@ -21,16 +21,6 @@ type ParsedArgs struct {
 	PrintProject bool
 	Splash       bool
 	Help         bool
-
-	// Attn selects the attention-marker hook mode (--attn): kmux reads an agent
-	// lifecycle event and writes/removes a marker the dashboard reads (see
-	// RunAttnHook). AttnEvent/AttnCwd/AttnKind carry the event when the caller is
-	// the OpenCode plugin (which passes them as flags); the Claude Code hook leaves
-	// them empty and RunAttnHook reads the event JSON from stdin instead.
-	Attn      bool
-	AttnEvent string
-	AttnCwd   string
-	AttnKind  string
 }
 
 // ParseArgs routes the kmux command line. Flags accept either `--flag claude` or
@@ -62,32 +52,6 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 			pa.PrintProject = true
 		case a == "--splash", a == "-splash":
 			pa.Splash = true
-		case a == "--attn", a == "-attn":
-			pa.Attn = true
-		case a == "--event", a == "-event":
-			if i+1 >= len(args) {
-				return pa, fmt.Errorf("--event requires a value")
-			}
-			i++
-			pa.AttnEvent = args[i]
-		case strings.HasPrefix(a, "--event="):
-			pa.AttnEvent = strings.TrimPrefix(a, "--event=")
-		case a == "--cwd", a == "-cwd":
-			if i+1 >= len(args) {
-				return pa, fmt.Errorf("--cwd requires a value")
-			}
-			i++
-			pa.AttnCwd = args[i]
-		case strings.HasPrefix(a, "--cwd="):
-			pa.AttnCwd = strings.TrimPrefix(a, "--cwd=")
-		case a == "--kind", a == "-kind":
-			if i+1 >= len(args) {
-				return pa, fmt.Errorf("--kind requires a value")
-			}
-			i++
-			pa.AttnKind = args[i]
-		case strings.HasPrefix(a, "--kind="):
-			pa.AttnKind = strings.TrimPrefix(a, "--kind=")
 		case strings.HasPrefix(a, "-"):
 			return pa, fmt.Errorf("unknown flag: %s", a)
 		default:

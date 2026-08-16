@@ -179,72 +179,7 @@ func attentionCmd(sessions []string) tea.Cmd {
 			states[s] = status.ClassifyAttention(agent.AgentKind(s), text)
 			hashes[s] = status.HashPane(text)
 		}
-		// Overlay the agent-reported attention markers (written by the Claude Code
-		// hook / OpenCode plugin via `kmux --attn`): they are authoritative for the
-		// permission and waiting states, which pane text no longer detects. Busy stays
-		// pane-text-owned — it's the fresh, sub-second signal the spinner needs, and a
-		// lingering waiting marker must not mask a session that just resumed
-		// generating. Permission markers get a pane-text clearing guard (see
-		// applyAttnMarkers): Claude fires no hook when a prompt is dismissed with Esc,
-		// so its marker would strand ! / [!!] until the 30-min TTL otherwise.
-		if markers, err := status.LoadAttnMarkers(time.Now()); err == nil {
-			applyAttnMarkers(states, texts, markers, func(s string) { _ = status.RemoveAttnMarker(s) })
-		}
 		return attentionMsg{states: states, hashes: hashes}
-	}
-}
-
-// applyAttnMarkers folds hook-reported markers (LoadAttnMarkers) into the pane-
-// derived states, in place. It carries a pane-text CLEARING GUARD on permission
-// markers: Claude Code fires no hook when a permission prompt is dismissed with Esc,
-// so a "permission" marker would otherwise strand the ! glyph / [!!] tab flag until
-// the 30-min TTL sweep. A permission marker is applied only while the pane still
-// corroborates it (status.PromptVisible) or capture failed; once the pane is
-// positively back to busy or a plain idle box, the marker is stale — it is dropped
-// and removed via remove so it can't re-assert next poll. The waiting marker needs
-// no guard: it never lights [!!] (see anyNeedsAttention) and a lingering ✓ is
-// harmless, so it is applied unguarded as before.
-//
-// remove is injected (status.RemoveAttnMarker in production) so the guard is
-// testable without touching the filesystem. Calling it from the read-side poll is
-// consistent with LoadAttnMarkers, which already removes TTL-swept files.
-func applyAttnMarkers(
-	states map[string]status.AttentionState,
-	texts map[string]string,
-	markers map[string]status.AttentionState,
-	remove func(session string),
-) {
-	for s, st := range markers {
-		cur, ok := states[s]
-		if !ok {
-			// Session isn't in this poll's list (e.g. killed/dead). Its marker never
-			// lights [!!] and the TTL reaps the file; actively removing here would race
-			// a just-launched session not yet listed, so leave it to the TTL.
-			continue
-		}
-		if cur == status.AttnBusy {
-			// Pane says generating: a prompt can't be up. A stale permission marker
-			// here is what strands [!!] — drop and clear it. Busy itself is untouched.
-			if st == status.AttnPermission {
-				remove(s)
-			}
-			continue
-		}
-		if st == status.AttnPermission {
-			switch {
-			case cur == status.AttnUnknown:
-				states[s] = st // capture failed: unsure, keep the marker
-			case status.PromptVisible(agent.AgentKind(s), texts[s]):
-				states[s] = st // prompt still on screen: genuine, keep it
-			default:
-				// Pane is back to a non-prompt state (a plain idle box): the prompt was
-				// dismissed with no hook. Stale — remove the file, leave cur (waiting).
-				remove(s)
-			}
-			continue
-		}
-		// Waiting marker (and any future non-permission state): apply unguarded.
-		states[s] = st
 	}
 }
 
@@ -330,6 +265,21 @@ func focusCmd(id int) tea.Cmd {
 func setTabTitleCmd(windowID int, scopeDir string, needsAttention bool) tea.Cmd {
 	return func() tea.Msg {
 		_ = kitty.SetTabTitle(windowID, agent.DashTabTitle(scopeDir, needsAttention))
+		return nil
+	}
+}
+
+// setSessionAttnCmd renames session (a canonical name) to surface or clear the "[!!]"
+// attention marker on the tmux SESSION itself, off the UI goroutine. It renames from the
+// session's current live name (resolved via LiveName) to AttnSession(canonical, want), so
+// the marker shows in tmux's status bar and choose-tree. parseSessionList strips the
+// marker back off on the next poll, so kmux's identity/map keys stay canonical.
+// Best-effort and message-less, matching setTabTitleCmd: a rename failure must not
+// disrupt the dashboard. The attentionMsg handler only calls this on a permission-state
+// flip, so it doesn't shell out every poll.
+func setSessionAttnCmd(session string, needsAttention bool) tea.Cmd {
+	return func() tea.Msg {
+		_ = tmux.RenameSession(tmux.LiveName(session), agent.AttnSession(session, needsAttention))
 		return nil
 	}
 }
@@ -513,7 +463,9 @@ func openAgentTabCmd(name, dir, agentCmd string) tea.Cmd {
 				return focusedMsg{err: err}
 			}
 		}
-		return focusedMsg{err: kitty.OpenAgentTab(name, name)}
+		// Attach by the live name (a blocked session carries "[!!]"); keep the canonical
+		// name as the tab title.
+		return focusedMsg{err: kitty.OpenAgentTab(tmux.LiveName(name), name)}
 	}
 }
 
