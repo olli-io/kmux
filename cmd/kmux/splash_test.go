@@ -82,24 +82,15 @@ func TestSplashTickAdvancesReveal(t *testing.T) {
 	}
 }
 
-// TestSplashTickLoops checks that once the reveal passes the full width (the held
-// frame), the next tick restarts the wipe from the first column.
-func TestSplashTickLoops(t *testing.T) {
-	// Reaching splashWidth+1 holds the full frame for the loop pause.
+// TestSplashTickHolds checks that once the reveal reaches the full width the
+// animation stops: the frame is held and the ticker disarms.
+func TestSplashTickHolds(t *testing.T) {
 	held, cmd := splashModel{reveal: splashWidth}.Update(splashTickMsg{})
-	if got := held.(splashModel).reveal; got != splashWidth+1 {
-		t.Fatalf("reveal at end of wipe = %d, want %d (held frame)", got, splashWidth+1)
+	if got := held.(splashModel).reveal; got != splashWidth {
+		t.Fatalf("reveal at end of wipe = %d, want %d (held frame)", got, splashWidth)
 	}
-	if cmd == nil {
-		t.Error("held frame returned nil cmd, want the pause tick scheduled")
-	}
-	// The next tick restarts.
-	restarted, cmd := held.Update(splashTickMsg{})
-	if got := restarted.(splashModel).reveal; got != 1 {
-		t.Errorf("reveal after loop = %d, want 1", got)
-	}
-	if cmd == nil {
-		t.Error("loop tick returned nil cmd")
+	if cmd != nil {
+		t.Error("held frame scheduled another tick, want the ticker disarmed")
 	}
 }
 
