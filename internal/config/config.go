@@ -203,7 +203,7 @@ func (c Config) KeybindingConflicts() []string {
 // keyDisplay renders a key name for conflict messages, spelling out the space key
 // and quoting the rest.
 func keyDisplay(key string) string {
-	if key == " " {
+	if key == "space" {
 		return "space"
 	}
 	return "'" + key + "'"

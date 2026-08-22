@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 )
 
 // userCommandCmd surfaces a launcher failure as a commandErrMsg (carrying the
@@ -41,7 +41,7 @@ func TestCommandErrFloatLifecycle(t *testing.T) {
 	}
 
 	// While the float is up, an arbitrary key just dismisses it (no other action).
-	updated, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("j")})
+	updated, _ = m.handleKey(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	m = updated.(model)
 	if m.cmdErr != nil {
 		t.Errorf("cmdErr should be cleared after a keypress, got %+v", m.cmdErr)

@@ -3,7 +3,7 @@ package tui
 import (
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	"charm.land/lipgloss/v2"
 	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/project"
 	"github.com/olli-io/kmux/internal/status"

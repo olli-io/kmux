@@ -24,8 +24,8 @@ import (
 	"strings"
 	"syscall"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 
 	"github.com/olli-io/kmux/internal/agent"
@@ -52,7 +52,7 @@ func Run(kind string) (*Launch, error) {
 	default:
 		return nil, fmt.Errorf("unknown agent kind %q (want claude or opencode)", kind)
 	}
-	fm, err := tea.NewProgram(newModel(kind), tea.WithAltScreen()).Run()
+	fm, err := tea.NewProgram(newModel(kind)).Run()
 	if err != nil {
 		return nil, err
 	}
@@ -414,13 +414,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	}
 	return m, nil
 }
 
-func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if m.mode == modeKind {
 		return m.handleKind(msg)
 	}
@@ -430,7 +430,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // handleProject drives the project picker. Cursor moves skip disabled rows;
 // selecting a project either launches directly (kind preselected) or advances to
 // the kind picker (the ↵ path).
-func (m model) handleProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleProject(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c", "esc", "q", "h", "left":
 		return m, tea.Quit
@@ -438,7 +438,7 @@ func (m model) handleProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pcursor = m.nextSelectable(m.pcursor, 1)
 	case "k", "up":
 		m.pcursor = m.nextSelectable(m.pcursor, -1)
-	case "enter", " ", "l", "right":
+	case "enter", "space", "l", "right":
 		if !m.selectable(m.pcursor) {
 			return m, nil // empty list or a greyed-out running row
 		}
@@ -481,7 +481,7 @@ func (m model) firstSelectable() int {
 	return 0
 }
 
-func (m model) handleKind(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleKind(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
@@ -493,7 +493,7 @@ func (m model) handleKind(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.kcursor = m.nextKind(m.kcursor, -1)
 	case "tab":
 		m.kcursor = m.nextKindWrap(m.kcursor)
-	case "enter", " ", "l", "right":
+	case "enter", "space", "l", "right":
 		if m.chosen != nil && m.kindSelectable(m.kcursor) {
 			return m.chooseLaunch(*m.chosen, kindOptions[m.kcursor].kind)
 		}
@@ -542,7 +542,15 @@ func (m model) nextKindWrap(from int) int {
 	return from
 }
 
-func (m model) View() string {
+// View wraps the rendered frame; AltScreen keeps the picker on its own screen
+// so the pane's prior contents are restored when it exits.
+func (m model) View() tea.View {
+	v := tea.NewView(m.render())
+	v.AltScreen = true
+	return v
+}
+
+func (m model) render() string {
 	if m.width <= 0 || m.height <= 0 {
 		return ""
 	}
@@ -721,7 +729,7 @@ func clampInner(inner, width int) int {
 // selectLine paints a row with the selection background, re-emitting it after each
 // inner ANSI reset so it stays one solid bar. Mirrors the dashboard's selectLine.
 func selectLine(line string, width int) string {
-	line = strings.ReplaceAll(line, "\x1b[0m", "\x1b[0m"+selOpenSeq)
+	line = strings.ReplaceAll(line, ansi.ResetStyle, ansi.ResetStyle+selOpenSeq)
 	return selStyle.Render(padCell(line, width))
 }
 

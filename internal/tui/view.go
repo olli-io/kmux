@@ -4,7 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/olli-io/kmux/internal/config"
 )
@@ -15,8 +16,8 @@ type keyHint struct{ key, desc string }
 // so a badly broken config can't grow the footer without bound.
 const maxConflictLines = 6
 
-// keyLabel swaps key names that don't read well literally (enter, arrows, space)
-// for glyphs. An empty key renders empty.
+// keyLabel swaps key names that don't read well literally (enter, arrows) for
+// glyphs. An empty key renders empty.
 func keyLabel(key string) string {
 	switch key {
 	case "":
@@ -31,8 +32,6 @@ func keyLabel(key string) string {
 		return "←"
 	case "right":
 		return "→"
-	case " ":
-		return "space"
 	}
 	return key
 }
@@ -186,7 +185,18 @@ func (m model) renderHelp(focused section) []string {
 	return lines
 }
 
-func (m model) View() string {
+// View wraps the rendered frame with the terminal state the dashboard needs.
+// AltScreen gives a clean, full-pane dashboard (clears on launch, restores on
+// exit). ReportFocus lets the model trigger a full git rescan when kmux's tab is
+// refocused.
+func (m model) View() tea.View {
+	v := tea.NewView(m.render())
+	v.AltScreen = true
+	v.ReportFocus = true
+	return v
+}
+
+func (m model) render() string {
 	if m.width <= 0 || m.height <= 0 {
 		return ""
 	}
@@ -374,7 +384,7 @@ func overlayLine(base, over string, x int) string {
 		left += strings.Repeat(" ", x-w)
 	}
 	right := ansi.TruncateLeft(base, x+lipgloss.Width(over), "")
-	return left + "\x1b[0m" + over + "\x1b[0m" + right
+	return left + ansi.ResetStyle + over + ansi.ResetStyle + right
 }
 
 // renderRow renders a tree row: indent, chevron, optional mark/badge, label.
@@ -416,7 +426,7 @@ func renderRow(r row, selected bool, collapsed map[string]bool, width int) strin
 // truncated/padded to exactly width first, since lipgloss's .Width() would wrap an
 // over-long line onto extra rows and break the layout.
 func selectLine(line string, width int) string {
-	line = strings.ReplaceAll(line, "\x1b[0m", "\x1b[0m"+selectedOpenSeq)
+	line = strings.ReplaceAll(line, ansi.ResetStyle, ansi.ResetStyle+selectedOpenSeq)
 	return selectedStyle.Render(padCell(line, width))
 }
 

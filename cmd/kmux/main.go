@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/config"
@@ -130,9 +130,9 @@ func runDashboard(pathArg string) {
 	}
 
 	mgr := layout.NewManager(sidebarID)
-	// AltScreen gives a clean, full-pane dashboard (clears on launch, restores on exit).
-	// ReportFocus lets the model trigger a full git rescan when kmux's tab is refocused.
-	p := tea.NewProgram(tui.NewModel(mgr, scopeDir, launcherID), tea.WithAltScreen(), tea.WithReportFocus())
+	// The dashboard declares its own terminal state (alt screen, focus reporting)
+	// on the tea.View it returns, so the program needs no options here.
+	p := tea.NewProgram(tui.NewModel(mgr, scopeDir, launcherID))
 	_, runErr := p.Run()
 	// Close the splash tab unconditionally on exit; a quit or crash before the model
 	// dismisses it would otherwise orphan it. CloseWindow ignores a missing match.

@@ -5,7 +5,7 @@ import (
 	"slices"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/config"
 	"github.com/olli-io/kmux/internal/kitty"
@@ -19,7 +19,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
 
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 
 	case tickMsg:
@@ -249,7 +249,7 @@ func (m *model) dismissLauncherWhenReady() tea.Cmd {
 }
 
 // handleKey processes navigation and fold keys (arrows + vim).
-func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// A command-error float captures all input until dismissed.
 	if m.cmdErr != nil {
 		return m.handleErrKey(msg)
@@ -406,7 +406,7 @@ func (m *model) focusPanel(rows []row, next bool) {
 }
 
 // handleErrKey dismisses the command-error float on any keypress; ctrl+c quits.
-func (m model) handleErrKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handleErrKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
 		m.mgr.CloseAll()
 		return m, tea.Quit
@@ -417,7 +417,7 @@ func (m model) handleErrKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // handlePromptKey drives the agent picker: j/k move between agents, enter/space
 // launches the highlighted one, and esc/h cancels. ctrl+c still quits outright.
-func (m model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		m.mgr.CloseAll()
@@ -434,7 +434,7 @@ func (m model) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "tab":
 		m.prompt.cursor = (m.prompt.cursor + 1) % len(promptOptions)
-	case "enter", " ", "l", "right":
+	case "enter", "space", "l", "right":
 		return m, m.confirmPrompt()
 	}
 	return m, nil

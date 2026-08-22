@@ -4,7 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // blankCell is the empty braille pattern (no dots lit) — an all-blank render is
@@ -54,7 +55,9 @@ func TestSplashRenderReveal(t *testing.T) {
 // WindowSizeMsg arrives (width/height still 0), so the first frame is never blank
 // once anything is revealed.
 func TestSplashViewBeforeSize(t *testing.T) {
-	out := splashModel{reveal: splashWidth}.View()
+	// Compare with styling stripped: lipgloss opens and closes its SGR run on
+	// every line, so the raw matrix is not a contiguous substring of the frame.
+	out := ansi.Strip(splashModel{reveal: splashWidth}.View().Content)
 	if !strings.Contains(out, renderSplash(splashWidth)) {
 		t.Errorf("View() = %q, want it to contain the fully-revealed matrix", out)
 	}
@@ -64,7 +67,7 @@ func TestSplashViewBeforeSize(t *testing.T) {
 // a block matching the terminal dimensions (lipgloss.Place pads to width/height).
 func TestSplashViewCentered(t *testing.T) {
 	m, _ := splashModel{}.Update(tea.WindowSizeMsg{Width: 60, Height: 9})
-	lines := strings.Split(m.View(), "\n")
+	lines := strings.Split(m.View().Content, "\n")
 	if len(lines) != 9 {
 		t.Errorf("centered View() has %d lines, want 9 (the terminal height)", len(lines))
 	}
@@ -98,15 +101,15 @@ func TestSplashTickHolds(t *testing.T) {
 // standalone; any other key is ignored (the dashboard, not the user, dismisses
 // the real overlay by closing its tab).
 func TestSplashQuitKeys(t *testing.T) {
-	for _, key := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune{'q'}},
-		{Type: tea.KeyCtrlC},
+	for _, key := range []tea.KeyPressMsg{
+		{Code: 'q', Text: "q"},
+		{Code: 'c', Mod: tea.ModCtrl},
 	} {
 		if _, cmd := (splashModel{}).Update(key); cmd == nil {
 			t.Errorf("key %v returned nil cmd, want tea.Quit", key)
 		}
 	}
-	if _, cmd := (splashModel{}).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}}); cmd != nil {
+	if _, cmd := (splashModel{}).Update(tea.KeyPressMsg{Code: 'x', Text: "x"}); cmd != nil {
 		t.Error("key 'x' returned a non-nil cmd, want it ignored")
 	}
 }

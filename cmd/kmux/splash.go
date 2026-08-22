@@ -4,15 +4,15 @@ import (
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 // runSplash animates the launch overlay until the process is killed. It has no
 // exit logic of its own: the dashboard closes this tab once its layout settles.
 // Run standalone, q or ctrl+c quits it.
 func runSplash() error {
-	_, err := tea.NewProgram(splashModel{}, tea.WithAltScreen()).Run()
+	_, err := tea.NewProgram(splashModel{}).Run()
 	return err
 }
 
@@ -205,7 +205,7 @@ func (m splashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		return m, nil
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if s := msg.String(); s == "ctrl+c" || s == "q" {
 			return m, tea.Quit
 		}
@@ -221,7 +221,13 @@ func (m splashModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m splashModel) View() string {
+func (m splashModel) View() tea.View {
+	v := tea.NewView(m.render())
+	v.AltScreen = true
+	return v
+}
+
+func (m splashModel) render() string {
 	block := splashWordmark.Render(renderSplash(m.reveal))
 	if m.width == 0 || m.height == 0 {
 		return block // no size yet: draw unplaced rather than collapse to empty

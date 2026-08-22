@@ -4,26 +4,26 @@ import (
 	"strings"
 	"testing"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/project"
 )
 
-// key builds a tea.KeyMsg whose .String() is s, for the keys the idler dispatches
+// key builds a tea.KeyPressMsg whose .String() is s, for the keys the idler dispatches
 // on ("c", "enter", "j", "esc", …).
-func key(s string) tea.KeyMsg {
+func key(s string) tea.KeyPressMsg {
 	switch s {
 	case "enter":
-		return tea.KeyMsg{Type: tea.KeyEnter}
+		return tea.KeyPressMsg{Code: tea.KeyEnter}
 	case "esc":
-		return tea.KeyMsg{Type: tea.KeyEsc}
+		return tea.KeyPressMsg{Code: tea.KeyEscape}
 	case "up":
-		return tea.KeyMsg{Type: tea.KeyUp}
+		return tea.KeyPressMsg{Code: tea.KeyUp}
 	case "down":
-		return tea.KeyMsg{Type: tea.KeyDown}
+		return tea.KeyPressMsg{Code: tea.KeyDown}
 	default:
-		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+		return tea.KeyPressMsg{Code: []rune(s)[0], Text: s}
 	}
 }
 
@@ -65,7 +65,7 @@ func TestNewModel(t *testing.T) {
 }
 
 func TestProjectPickerRenders(t *testing.T) {
-	out := sized().View()
+	out := sized().View().Content
 	for _, want := range []string{"Select project", "alpha", "beta/feat"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("project picker missing %q\n%s", want, out)
@@ -119,7 +119,7 @@ func TestEnterPathPicksKindThenLaunches(t *testing.T) {
 	}
 
 	// The kind picker renders both kinds.
-	if out := m.View(); !strings.Contains(out, "Claude") || !strings.Contains(out, "OpenCode") {
+	if out := m.View().Content; !strings.Contains(out, "Claude") || !strings.Contains(out, "OpenCode") {
 		t.Errorf("kind picker missing a kind\n%s", out)
 	}
 
@@ -153,7 +153,7 @@ func TestDisabledRowsSkipped(t *testing.T) {
 	}
 
 	// The greyed row still renders (visible), tagged with its running kind "[CC]".
-	if out := m.View(); !strings.Contains(out, "busy") || !strings.Contains(out, "CC") {
+	if out := m.View().Content; !strings.Contains(out, "busy") || !strings.Contains(out, "CC") {
 		t.Errorf("disabled row should render with a [CC] running tag\n%s", out)
 	}
 
@@ -192,7 +192,7 @@ func TestKindPickerSkipsRunningKind(t *testing.T) {
 		t.Errorf("kcursor = %d, want 1 (claude is running, start on free kind)", m.kcursor)
 	}
 	// The greyed claude kind still shows, tagged with its "[CC]" marker.
-	if out := m.View(); !strings.Contains(out, "CC") {
+	if out := m.View().Content; !strings.Contains(out, "CC") {
 		t.Errorf("kind picker should tag the running kind with [CC]\n%s", out)
 	}
 	// Up would move to claude, but it's disabled → cursor stays on opencode.
