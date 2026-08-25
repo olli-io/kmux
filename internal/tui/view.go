@@ -433,12 +433,12 @@ func selectLine(line string, width int) string {
 // panel draws a rounded, titled box (lazygit-style: title in the top border, color
 // reflecting focus) sized to width x height. width and height include the border.
 func panel(title string, body []string, width, height int, focused bool) string {
-	// Focused panels use the default text color; idle panels are dimmed grey.
+	// Idle panels dim only their border; the title keeps the focused panel's
+	// default text color so the [n] jump hints stay readable.
 	bs := lipgloss.NewStyle()
 	ts := lipgloss.NewStyle().Bold(true)
 	if !focused {
 		bs = bs.Foreground(borderIdle)
-		ts = ts.Foreground(borderIdle)
 	}
 	return box(title, body, width, height, bs, ts)
 }
