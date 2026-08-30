@@ -46,6 +46,13 @@ type model struct {
 	// a tick while it's set, so a slow scan can't stack concurrent copies.
 	scanning bool
 
+	// focused tracks whether kmux's tab currently has terminal focus (toggled by
+	// tea.FocusMsg/tea.BlurMsg, which View enables via ReportFocus). The poll tick
+	// shells out to tmux only while focused, so a backgrounded dashboard doesn't
+	// burn list-sessions/capture-pane round-trips no one is looking at. It starts
+	// true so polling runs from launch until the terminal first reports a blur.
+	focused bool
+
 	// keys is the action→key map for the Keys footer; keyAction is its reverse
 	// (key→action), built so the first action listed wins a shared key. conflicts
 	// holds duplicate-key report lines, shown in place of the hints when non-empty.
@@ -142,6 +149,7 @@ func NewModel(mgr *layout.Manager, scopeDir string, launcherID int) tea.Model {
 		scopeDir:      scopeDir,
 		scopeName:     scopeName,
 		launcherID:    launcherID,
+		focused:       true, // poll from launch until the terminal reports a blur
 	}
 }
 

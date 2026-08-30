@@ -23,6 +23,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 
 	case tickMsg:
+		// Keep the tick alive but skip the tmux round-trips while kmux's tab is in
+		// the background: with no one watching the session list, polling it just
+		// burns list-sessions/capture-pane calls. FocusMsg resumes real polling.
+		if !m.focused {
+			return m, tickCmd()
+		}
 		return m, tea.Batch(pollCmd(), tickCmd())
 
 	case projectTickMsg:
@@ -51,7 +57,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// in the background. Trigger a full rescan so the dashboard is fresh the
 		// moment the user looks at it.
 		cmd := m.refreshProjectsCmd()
+		// Resume tmux polling (paused on blur) and poll once immediately so the
+		// session list and attention glyphs are current the instant the tab shows
+		// again, rather than waiting for the next tick.
+		if !m.focused {
+			m.focused = true
+			cmd = tea.Batch(cmd, pollCmd())
+		}
 		return m, cmd
+
+	case tea.BlurMsg:
+		// kmux's tab lost focus; pause tmux polling until it's refocused. The tick
+		// keeps firing but stops shelling out to tmux (see tickMsg).
+		m.focused = false
+		return m, nil
 
 	case spinnerMsg:
 		m.spinnerFrame++
