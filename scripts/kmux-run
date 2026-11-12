@@ -9,6 +9,7 @@
 #
 # Usage:
 #   kmux-run [-t <tmux-target>] [-k <kind>] [-C <dir>] [-n <lines>] [--] <command...>
+#     one <command> argument runs as a shell line; several run as an argv
 #     -t  tmux target to paste into (default: `kmux --session <kind> <dir>`)
 #     -k  agent kind for the default target (default: claude)
 #     -C  run the command in <dir> (default: current dir)
@@ -41,13 +42,20 @@ if [ -z "$target" ]; then
 fi
 tmux has-session -t "$target" 2>/dev/null || die "no tmux session '$target'"
 
-cmd=$*
+# One argument is a shell line; several are an argv, run as-is.
+if [ $# -eq 1 ]; then
+  cmd=$1
+  run() { bash -c "$cmd"; }
+else
+  cmd=$(printf '%q ' "$@"); cmd=${cmd% }
+  run() { "$@"; }
+fi
 mkdir -p /tmp/kmux-run
 log=$(mktemp /tmp/kmux-run/XXXXXXXX.log)
 
 echo "+ $cmd"
 trap ':' INT
-bash -c "$cmd" > >(trap '' INT; exec tee "$log") 2>&1
+run "$@" > >(trap '' INT; exec tee "$log") 2>&1
 rc=$?
 trap - INT
 wait
