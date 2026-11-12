@@ -8,6 +8,7 @@
 //	kmux-idler            ↵ path: pick a project, then pick the kind
 //	kmux-idler claude     pick a project, launch Claude in it
 //	kmux-idler opencode   pick a project, launch OpenCode in it
+//	kmux-idler pi         pick a project, launch Pi in it
 //
 // On selection it launches the agent in place (see Start), execing the tmux client
 // into the same kitty window; the dashboard then adopts that window as the session's
@@ -44,13 +45,11 @@ type Launch struct {
 }
 
 // Run shows the launcher picker and blocks until the user picks or cancels,
-// returning the chosen Launch or nil on cancel. kind is "", "claude", or
-// "opencode"; any other value is an error.
+// returning the chosen Launch or nil on cancel. kind is "" (ask after the project) or
+// any registered agent kind; any other value is an error.
 func Run(kind string) (*Launch, error) {
-	switch kind {
-	case "", "claude", "opencode":
-	default:
-		return nil, fmt.Errorf("unknown agent kind %q (want claude or opencode)", kind)
+	if kind != "" && !agent.ValidKind(kind) {
+		return nil, fmt.Errorf("unknown agent kind %q (want %s)", kind, agent.KindList())
 	}
 	fm, err := tea.NewProgram(newModel(kind)).Run()
 	if err != nil {
@@ -211,28 +210,43 @@ func RunIdleLoop() error {
 }
 
 // IdleLoopScript is the shell program that holds an interactive idle slot: it draws
-// the hint, reads one raw keypress, and spawns the picker for the matching flow (c/o
-// preselect a kind, Enter asks for the kind after the project, q quits a spare slot).
-// The `q` hint shows only when --can-quit reports a spare pane. Backs both layout's
-// placeholder panes and `kmux-idler --idle-loop`.
+// the hint, reads one raw keypress, and spawns the picker for the matching flow (a
+// kind's Key preselects it, Enter asks for the kind after the project, q quits a spare
+// slot). The per-kind hint lines and case arms are generated from the agent registry,
+// so a kind added there is launchable from an idle slot too. The `q` hint shows only
+// when --can-quit reports a spare pane. Backs both layout's placeholder panes and
+// `kmux-idler --idle-loop`.
 func IdleLoopScript(idlerPath string) string {
-	q := "'" + strings.ReplaceAll(idlerPath, "'", `'\''`) + "'"
+	q := shellQuote(idlerPath)
+	var hints, arms strings.Builder
+	for _, k := range agent.Kinds() {
+		if k.Key == "" {
+			continue // no idle-slot key: reachable through the ↵ picker only
+		}
+		hints.WriteString(`  \033[33m` + k.Key + `\033[0m \033[2m` + k.Name + `\033[0m\n`)
+		arms.WriteString("\n    " + strings.ToLower(k.Key) + "|" + strings.ToUpper(k.Key) +
+			") \"$idler\" " + k.Name + " ;;")
+	}
 	return `idler=` + q + `
 while :; do
   quit=''
   "$idler" --can-quit 2>/dev/null && quit='  \033[33mq\033[0m \033[2mquit\033[0m\n'
-  printf '\033[2J\033[H\n  \033[1;34mkmux\033[0m \033[2midle\033[0m\n\n  \033[33m↵\033[0m \033[2mlaunch agent\033[0m\n  \033[33mc\033[0m \033[2mclaude\033[0m\n  \033[33mo\033[0m \033[2mopencode\033[0m\n%b' "$quit"
+  printf '\033[2J\033[H\n  \033[1;34mkmux\033[0m \033[2midle\033[0m\n\n  \033[33m↵\033[0m \033[2mlaunch agent\033[0m\n` + hints.String() + `%b' "$quit"
   old=$(stty -g 2>/dev/null)
   stty -icanon -echo min 1 time 0 2>/dev/null
   key=$(dd bs=1 count=1 2>/dev/null)
   [ -n "$old" ] && stty "$old" 2>/dev/null
-  case "$key" in
-    c|C) "$idler" claude ;;
-    o|O) "$idler" opencode ;;
+  case "$key" in` + arms.String() + `
     q|Q) "$idler" --quit ;;
     '') "$idler" ;;
   esac
 done`
+}
+
+// shellQuote wraps s in single quotes for the generated script, escaping any embedded
+// single quote, so a path with spaces or quotes can't break out of the assignment.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func newModel(kind string) model {
@@ -245,6 +259,7 @@ var (
 	clStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))  // claude (blue)
 	ocStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("213")) // opencode (pink)
 	ocTagStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))   // running [OC] tag (red)
+	piStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // pi (orange)
 	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	keyStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("11")) // keybind hint (yellow)
 	selStyle    = lipgloss.NewStyle().Background(lipgloss.Color("238"))
@@ -300,9 +315,40 @@ type kindOption struct {
 	style       lipgloss.Style
 }
 
-var kindOptions = []kindOption{
-	{"claude", "Claude", clStyle},
-	{"opencode", "OpenCode", ocStyle},
+// kindOptions is the kind picker's list, built from the agent registry in display
+// order so a kind added there is offered here without further wiring.
+var kindOptions = func() []kindOption {
+	opts := make([]kindOption, len(agent.Kinds()))
+	for i, k := range agent.Kinds() {
+		opts[i] = kindOption{kind: k.Name, label: k.Label, style: kindStyle(k.Name)}
+	}
+	return opts
+}()
+
+// kindStyles colors each agent kind in the picker, and kindTagStyles colors its
+// running marker — opencode's marker is deliberately red rather than its picker pink,
+// so a taken row reads as unavailable. Both fall back to unstyled text for a kind that
+// has no color yet, so it renders plainly rather than not at all.
+var (
+	kindStyles = map[string]lipgloss.Style{
+		"claude":   clStyle,
+		"opencode": ocStyle,
+		"pi":       piStyle,
+	}
+	kindTagStyles = map[string]lipgloss.Style{
+		"claude":   clStyle,
+		"opencode": ocTagStyle,
+		"pi":       piStyle,
+	}
+)
+
+func kindStyle(kind string) lipgloss.Style { return lookupStyle(kindStyles, kind) }
+
+func lookupStyle(m map[string]lipgloss.Style, kind string) lipgloss.Style {
+	if st, ok := m[kind]; ok {
+		return st
+	}
+	return lipgloss.NewStyle()
 }
 
 type model struct {
@@ -396,7 +442,7 @@ func (m model) chooseLaunch(t target, kind string) (tea.Model, tea.Cmd) {
 	m.launch = &Launch{
 		Session:  agent.SessionForKind(t.session, kind),
 		Dir:      t.dir,
-		AgentCmd: agent.AgentCommand(kind),
+		AgentCmd: agent.AgentCommand(kind, t.dir),
 	}
 	return m, tea.Quit
 }
@@ -646,11 +692,11 @@ func runningTags(t target) string {
 
 // kindTag renders a running-agent marker: grey brackets around the kind's short code.
 func kindTag(kind string) string {
-	mark, style := "CC", clStyle
-	if kind == "opencode" {
-		mark, style = "OC", ocTagStyle
+	k, ok := agent.LookupKind(kind)
+	if !ok {
+		return ""
 	}
-	return dimStyle.Render("[") + style.Render(mark) + dimStyle.Render("]")
+	return dimStyle.Render("[") + lookupStyle(kindTagStyles, kind).Render(k.Badge) + dimStyle.Render("]")
 }
 
 // kindOptionLabel renders one kind-picker row: the colored name, or dimmed with a

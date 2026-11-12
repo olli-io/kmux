@@ -1,0 +1,50 @@
+# Pi detection rules (herdr-style). See internal/status/detect for the engine.
+# Same model as claude.yaml: bottom-region matching, working => AttnBusy,
+# blocked => AttnPermission, idle / no rule matched => AttnWaiting. Blocked outranks
+# working. Substrings are case-insensitive; write them lower-case; regexes match the
+# raw text, so they carry their own (?i).
+#
+# Pi's TUI draws a horizontal rule above its editor and hangs the status indicator in
+# it, so a live pane reads "── ⠧ Working ─────────". The braille spinner is the load-
+# bearing signal: it sits at the far left of the rule, so it survives at any pane width
+# (verified down to 40 columns), and every indicator kind (working, compacting,
+# summarizing, retrying, a running tool's bordered loader) animates one. The idle rule
+# is unbroken dashes, so a spinner in the bottom region means the agent is doing work.
+agent: pi
+rules:
+  # --- BUSY -----------------------------------------------------------------------
+  # \x{2801}-\x{28FF} is the braille block minus U+2800 (blank braille), which the
+  # spinner never uses but a padded layout might.
+  - id: pi-working
+    state: working
+    priority: 50
+    region: bottom_non_empty_lines(10)
+    any:
+      # Spinner inside the editor's top border rule: "── ⠧ Working ───────".
+      - line_regex: ['^\s*─+\s+[\x{2801}-\x{28FF}]']
+      # Spinner heading a free-standing status line, e.g. a compaction or retry
+      # indicator, which renders above the editor rather than inside its border.
+      - line_regex: ['^\s*[\x{2801}-\x{28FF}]\s+\S']
+      # Explicit hint, once the working message spells it out ("Working (escape to
+      # interrupt)"). Paired with "working" so the startup help's own key list, which
+      # names other "… to <verb>" bindings, can't trip it.
+      - all:
+          - contains: ["working"]
+          - contains: ["to interrupt"]
+
+  # --- BLOCKED: live select / confirm dialog --------------------------------------
+  # Pi's selectors (model, thinking, session, settings, trust, and any extension's
+  # ui.select) share one footer: a cancel hint plus a confirm hint, e.g.
+  # "Enter to select · Ctrl+S to set as default · Esc to cancel". Requiring both halves
+  # keeps a stray "esc to cancel" in transcript text from reading as a live dialog.
+  - id: pi-blocked-select-box
+    state: blocked
+    priority: 100
+    region: bottom_non_empty_lines(10)
+    all:
+      - contains: ["esc to cancel"]
+      - any:
+          - contains: ["enter to select"]
+          - contains: ["enter to submit"]
+          - contains: ["space to change"]
+          - contains: ["tab to view all"]

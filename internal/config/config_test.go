@@ -254,3 +254,35 @@ func TestKeybindingConflicts(t *testing.T) {
 		t.Fatalf("custom-on-fixed-key conflicts = %v, want exactly 1 line", got)
 	}
 }
+
+// TestSandboxConfig covers parsing the sandbox section and layering it field by
+// field, including turning a base-enabled runner off.
+func TestSandboxConfig(t *testing.T) {
+	home, _ := os.UserHomeDir()
+	cfg, err := parseConfig(strings.NewReader("sandbox:\n  command: srt\n  config_settings: ~/cfg.json\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Sandbox{Command: "srt", ConfigSettings: filepath.Join(home, "cfg.json")}
+	if cfg.Sandbox != want {
+		t.Fatalf("parsed sandbox = %+v, want %+v", cfg.Sandbox, want)
+	}
+	if !cfg.Sandbox.Enabled() {
+		t.Error("command srt: want enabled")
+	}
+	if (Sandbox{}).Enabled() || (Sandbox{Command: "off"}).Enabled() {
+		t.Error("empty or off command: want disabled")
+	}
+	if got := (Sandbox{}).ConfigSettingsPath(); got != filepath.Join(home, ".srt", "settings-config.json") {
+		t.Errorf("default config settings = %q", got)
+	}
+
+	merged := mergeConfig(cfg, Config{Sandbox: Sandbox{Command: "off", Settings: "/s.json"}})
+	want = Sandbox{Command: "off", Settings: "/s.json", ConfigSettings: filepath.Join(home, "cfg.json")}
+	if merged.Sandbox != want {
+		t.Errorf("merged sandbox = %+v, want %+v", merged.Sandbox, want)
+	}
+	if merged.Sandbox.Enabled() {
+		t.Error("over command off: want disabled")
+	}
+}

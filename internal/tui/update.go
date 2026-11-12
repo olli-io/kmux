@@ -64,6 +64,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focused = true
 			cmd = tea.Batch(cmd, pollCmd())
 		}
+		// Panes held back while unfocused would otherwise wait for the next tick, so
+		// retry at once. kitty reports focus per pane, so this fires only when the
+		// cursor lands on the sidebar itself; the gate is per tab, so landing in a
+		// sibling agent pane also opens it, and there the poll is the retry.
+		if m.launchDeferred {
+			cmd = tea.Batch(cmd, reconcileCmd(m.mgr, m.attachable()))
+		}
 		return m, cmd
 
 	case tea.BlurMsg:
@@ -131,6 +138,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// The first reconcile means the panes are built; mark the layout ready and drop
 		// the splash once the minimum hold has also elapsed. Later reconciles no-op.
 		m.layoutReady = true
+		m.launchDeferred = msg.deferred
 		cmd := m.dismissLauncherWhenReady()
 		// Adopt user-spawned blank panes off this reconcile's snapshot. Only a scanned
 		// reconcile (the poll) feeds the handler; the others never seed or convert.
@@ -383,6 +391,11 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if cmd := m.launchKindOn(rowAt(rows, m.cursor), "opencode"); cmd != nil {
 			return m, cmd
 		}
+	case config.ActionCreateOrFocusPi:
+		// Launch (or focus) Pi for the selected project, skipping the picker.
+		if cmd := m.launchKindOn(rowAt(rows, m.cursor), "pi"); cmd != nil {
+			return m, cmd
+		}
 
 	default:
 		// Any other key may be a user-configured command (e.g. editor, lazygit)
@@ -558,21 +571,13 @@ func (m *model) openSessionTab(r *row) tea.Cmd {
 }
 
 // launchProjectTab is the standalone-tab counterpart of launchProject: it opens the
-// row's agent in a kitty tab rather than a pane. One running kind attaches directly;
-// neither or both opens the picker in tab mode.
+// row's agent in a kitty tab rather than a pane. Exactly one running kind attaches
+// directly; none or several opens the picker in tab mode.
 func (m *model) launchProjectTab(r *row) (tea.Cmd, bool) {
 	if r == nil || r.section != sectionProjects || r.session == "" {
 		return nil, false
 	}
-	claude := r.session
-	opencode := agent.SessionForKind(r.session, "opencode")
-	var running []string
-	if m.hasSession(claude) {
-		running = append(running, claude)
-	}
-	if m.hasSession(opencode) {
-		running = append(running, opencode)
-	}
+	running := m.runningKinds(r.session)
 	if len(running) == 1 {
 		return openAgentTabCmd(running[0], "", ""), true
 	}
@@ -592,25 +597,41 @@ func (m *model) launchKindTab(session, dir, kind string) tea.Cmd {
 	if m.hasSession(name) {
 		return openAgentTabCmd(name, "", "")
 	}
-	return openAgentTabCmd(name, dir, agent.AgentCommand(kind))
+	return openAgentTabCmd(name, dir, agent.AgentCommand(kind, dir))
 }
 
-// launchProject activates a project/worktree leaf row: one running kind focuses it
-// directly, neither or both opens the picker. Returns (nil, false) for rows it
-// doesn't act on (folder headers, non-project rows) so callers fall through to fold.
+// launchKindActions maps an agent kind to the keybinding action that launches it
+// without going through the picker. The switch above dispatches the actions; this map
+// exists so the footer hint can list the keys in registry order (see launchKindHint).
+// A kind absent here simply has no dedicated key — the picker still reaches it.
+var launchKindActions = map[string]string{
+	"claude":   config.ActionCreateOrFocusClaude,
+	"opencode": config.ActionCreateOrFocusOpencode,
+	"pi":       config.ActionCreateOrFocusPi,
+}
+
+// runningKinds returns the live sessions among every agent kind of the project or
+// worktree that claudeName names, in registry order. The launch paths branch on its
+// length: exactly one running kind is focused directly, none or several opens the
+// picker.
+func (m *model) runningKinds(claudeName string) []string {
+	var running []string
+	for _, name := range kindSessions(claudeName) {
+		if m.hasSession(name) {
+			running = append(running, name)
+		}
+	}
+	return running
+}
+
+// launchProject activates a project/worktree leaf row: exactly one running kind
+// focuses it directly, none or several opens the picker. Returns (nil, false) for rows
+// it doesn't act on (folder headers, non-project rows) so callers fall through to fold.
 func (m *model) launchProject(r *row) (tea.Cmd, bool) {
 	if r.section != sectionProjects || r.session == "" {
 		return nil, false
 	}
-	claude := r.session
-	opencode := agent.SessionForKind(r.session, "opencode")
-	var running []string
-	if m.hasSession(claude) {
-		running = append(running, claude)
-	}
-	if m.hasSession(opencode) {
-		running = append(running, opencode)
-	}
+	running := m.runningKinds(r.session)
 	if len(running) == 1 {
 		return m.focusOrReattach(running[0]), true
 	}
@@ -642,7 +663,7 @@ func (m *model) launchKind(session, dir, kind string) tea.Cmd {
 	if id, ok := m.mgr.WindowID(name); ok {
 		return tea.Batch(focusCmd(id), save)
 	}
-	return openSessionCmd(m.mgr, name, dir, agent.AgentCommand(kind))
+	return openSessionCmd(m.mgr, name, dir, agent.AgentCommand(kind, dir))
 }
 
 // launchKindOn launches a specific agent kind for project leaf row r, returning

@@ -9,10 +9,19 @@ import (
 	"strings"
 )
 
-// agentSession matches the kmux agent prefix [kmux][CC] (claude) or [kmux][OC]
-// (opencode), case-insensitively, allowing an optional leading "[!!]" attention marker
-// that a blocked session carries in its live name.
-var agentSession = regexp.MustCompile(`(?i)^(?:\[!!\])?\[kmux\]\[(cc|oc)\]`)
+// agentSession matches the kmux agent prefix — [kmux] followed by an agent kind's
+// marker ([CC] claude, [OC] opencode, [PI] pi) — case-insensitively, allowing an
+// optional leading "[!!]" attention marker that a blocked session carries in its live
+// name. The alternation is duplicated from agent.kinds (the agent package imports
+// tmux, so tmux can't import it back) and must stay in sync; agent's naming tests
+// guard the pairing.
+var agentSession = regexp.MustCompile(`(?i)^(?:\[!!\])?\[kmux\]\[(cc|oc|pi)\]`)
+
+// IsAgentSession reports whether a tmux session name is a kmux-managed agent session,
+// i.e. carries a known agent marker. It is the grammar's one gate: parseSessionList
+// uses it to decide what the dashboard adopts, and TestAgentMarkersAreListed pins it
+// against agent.Kinds so a kind added to the registry can't be silently unlisted.
+func IsAgentSession(name string) bool { return agentSession.MatchString(name) }
 
 // attnMarkStr is the leading marker a blocked session's live tmux name carries. It is
 // duplicated from agent.attnMark (the agent package imports tmux, so tmux can't import
@@ -75,7 +84,7 @@ func parseSessionList(out string) []AgentSession {
 			continue
 		}
 		name = strings.TrimSpace(name)
-		if name != "" && agentSession.MatchString(name) {
+		if name != "" && IsAgentSession(name) {
 			// A blocked session's live name carries a leading "[!!]" marker; strip it so
 			// Name is the canonical identity every downstream map/parser keys on. The
 			// live name is re-derived by LiveName only when a tmux command must address it.

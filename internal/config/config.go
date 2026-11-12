@@ -38,6 +38,44 @@ type Config struct {
 	// DefaultKeybindings so a loaded Config is always fully bound. Conflicts are
 	// surfaced by KeybindingConflicts rather than rejected.
 	Keybindings map[string]string
+
+	// Sandbox wraps every agent kmux launches in a sandbox runner (srt).
+	Sandbox Sandbox
+}
+
+// DefaultConfigSettings is the srt settings file for config sessions: agents
+// launched in the user config dir (~/.config) run under it, so they may edit
+// ~/.config while every other session keeps the stricter default profile.
+const DefaultConfigSettings = "~/.srt/settings-config.json"
+
+// Sandbox configures the sandbox runner kmux wraps agents in. The runner is
+// invoked as `<Command> [-s <settings>] -c '<agent command>'`, the srt CLI.
+type Sandbox struct {
+	// Command is the runner, e.g. "srt". Empty, "off", or "none" disables it.
+	Command string `yaml:"command"`
+	// Settings is the settings file for normal sessions; empty leaves the
+	// runner's own default (~/.srt-settings.json for srt).
+	Settings string `yaml:"settings"`
+	// ConfigSettings is the settings file for config sessions (agents launched in
+	// ~/.config); empty means DefaultConfigSettings.
+	ConfigSettings string `yaml:"config_settings"`
+}
+
+// Enabled reports whether agents are wrapped in the sandbox runner.
+func (s Sandbox) Enabled() bool {
+	switch strings.ToLower(strings.TrimSpace(s.Command)) {
+	case "", "off", "none", "false":
+		return false
+	}
+	return true
+}
+
+// ConfigSettingsPath is the resolved settings file for config sessions.
+func (s Sandbox) ConfigSettingsPath() string {
+	if s.ConfigSettings != "" {
+		return s.ConfigSettings
+	}
+	return expandPath(DefaultConfigSettings)
 }
 
 // CustomCommand is one configurable keybinding: pressing Key in a matching panel
@@ -100,6 +138,7 @@ const (
 	ActionFullscreenAgent       = "fullscreenAgent"
 	ActionCreateOrFocusClaude   = "createOrFocusClaude"
 	ActionCreateOrFocusOpencode = "createOrFocusOpencode"
+	ActionCreateOrFocusPi       = "createOrFocusPi"
 	ActionLaunchKmuxInProject   = "launchKmuxInProject"
 	ActionRefreshProjects       = "refreshProjects"
 	ActionQuit                  = "quit"
@@ -116,7 +155,7 @@ func KeyActions() []string {
 		ActionPrevPanelAlt, ActionNextPanelAlt,
 		ActionCreateOrAttachAgent,
 		ActionDetachAgent, ActionKillAgent, ActionFullscreenAgent,
-		ActionCreateOrFocusClaude, ActionCreateOrFocusOpencode,
+		ActionCreateOrFocusClaude, ActionCreateOrFocusOpencode, ActionCreateOrFocusPi,
 		ActionLaunchKmuxInProject,
 		ActionRefreshProjects,
 		ActionQuit,
@@ -141,6 +180,7 @@ func DefaultKeybindings() map[string]string {
 		ActionFullscreenAgent:       "f",
 		ActionCreateOrFocusClaude:   "c",
 		ActionCreateOrFocusOpencode: "o",
+		ActionCreateOrFocusPi:       "p",
 		ActionLaunchKmuxInProject:   "t",
 		ActionRefreshProjects:       "r",
 		ActionQuit:                  "q",
@@ -222,15 +262,24 @@ func (c Config) IdleDuration() time.Duration {
 // $XDG_CONFIG_HOME. It deliberately avoids os.UserConfigDir, which on macOS
 // resolves to ~/Library/Application Support; kmux uses XDG everywhere.
 func ConfigDir() (string, error) {
-	base := os.Getenv("XDG_CONFIG_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
-		base = filepath.Join(home, ".config")
+	base, err := UserConfigBase()
+	if err != nil {
+		return "", err
 	}
 	return filepath.Join(base, "kmux"), nil
+}
+
+// UserConfigBase returns the user's config root, $XDG_CONFIG_HOME or ~/.config.
+// Agents launched in it (or below it) are config sessions.
+func UserConfigBase() (string, error) {
+	if base := os.Getenv("XDG_CONFIG_HOME"); base != "" {
+		return base, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".config"), nil
 }
 
 // configFile returns the user's config path. Unlike stateFile it does not create
@@ -297,6 +346,7 @@ type rawConfig struct {
 	IdleTimeout    yaml.Node         `yaml:"idle_timeout"`
 	CustomCommands []CustomCommand   `yaml:"customCommands"`
 	Keybindings    map[string]string `yaml:"keybindings"`
+	Sandbox        Sandbox           `yaml:"sandbox"`
 }
 
 // parseConfig decodes a config document; unknown keys and unparseable scalars are
@@ -343,7 +393,20 @@ func parseConfig(r io.Reader) (Config, error) {
 			}
 		}
 	}
+	cfg.Sandbox = Sandbox{
+		Command:        strings.TrimSpace(raw.Sandbox.Command),
+		Settings:       expandNonEmpty(raw.Sandbox.Settings),
+		ConfigSettings: expandNonEmpty(raw.Sandbox.ConfigSettings),
+	}
 	return cfg, nil
+}
+
+// expandNonEmpty trims p and expands ~ and $ENV, leaving an empty value empty.
+func expandNonEmpty(p string) string {
+	if p = strings.TrimSpace(p); p == "" {
+		return ""
+	}
+	return expandPath(p)
 }
 
 // applyIdle interprets an idle_timeout scalar: `0`, `off`, and `never` disable
@@ -370,6 +433,23 @@ func mergeConfig(base, over Config) Config {
 	}
 	out.CustomCommands = mergeCommands(base.CustomCommands, over.CustomCommands)
 	out.Keybindings = mergeKeybindings(DefaultKeybindings(), base.Keybindings, over.Keybindings)
+	out.Sandbox = mergeSandbox(base.Sandbox, over.Sandbox)
+	return out
+}
+
+// mergeSandbox overlays each non-empty field of over onto base, so the user config
+// can enable the sandbox (or turn it off with `command: off`) field by field.
+func mergeSandbox(base, over Sandbox) Sandbox {
+	out := base
+	if over.Command != "" {
+		out.Command = over.Command
+	}
+	if over.Settings != "" {
+		out.Settings = over.Settings
+	}
+	if over.ConfigSettings != "" {
+		out.ConfigSettings = over.ConfigSettings
+	}
 	return out
 }
 

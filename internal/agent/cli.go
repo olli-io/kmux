@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/olli-io/kmux/internal/config"
 	"github.com/olli-io/kmux/internal/project"
 	"github.com/olli-io/kmux/internal/tmux"
 )
@@ -21,10 +22,15 @@ type ParsedArgs struct {
 	PrintProject bool
 	Splash       bool
 	Help         bool
+	// Config launches a config session: the agent (claude by default) in the user
+	// config dir (~/.config), sandboxed with the config settings that let it write
+	// there.
+	Config bool
 }
 
 // ParseArgs routes the kmux command line. Flags accept either `--flag claude` or
-// `--flag=claude`, and the path and flag may appear in either order.
+// `--flag=claude`, and the path and flag may appear in either order. An agent kind is
+// validated against the registry (agent.Kinds), so a new kind needs no change here.
 func ParseArgs(args []string) (ParsedArgs, error) {
 	var pa ParsedArgs
 	for i := 0; i < len(args); i++ {
@@ -34,7 +40,7 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 			pa.Help = true
 		case a == "--agent", a == "-agent":
 			if i+1 >= len(args) {
-				return pa, fmt.Errorf("--agent requires a value (claude or opencode)")
+				return pa, fmt.Errorf("--agent requires a value (%s)", KindList())
 			}
 			i++
 			pa.Agent = args[i]
@@ -42,7 +48,7 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 			pa.Agent = strings.TrimPrefix(a, "--agent=")
 		case a == "--session", a == "-session":
 			if i+1 >= len(args) {
-				return pa, fmt.Errorf("--session requires a value (claude or opencode)")
+				return pa, fmt.Errorf("--session requires a value (%s)", KindList())
 			}
 			i++
 			pa.Agent, pa.PrintSession = args[i], true
@@ -52,6 +58,8 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 			pa.PrintProject = true
 		case a == "--splash", a == "-splash":
 			pa.Splash = true
+		case a == "--config", a == "-config":
+			pa.Config = true
 		case strings.HasPrefix(a, "-"):
 			return pa, fmt.Errorf("unknown flag: %s", a)
 		default:
@@ -64,8 +72,24 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 	if pa.Help {
 		return pa, nil // --help wins over any other flag or validation error
 	}
-	if pa.Agent != "" && pa.Agent != "claude" && pa.Agent != "opencode" {
-		return pa, fmt.Errorf("agent must be 'claude' or 'opencode', got %q", pa.Agent)
+	if pa.Config {
+		if pa.Path != "" {
+			return pa, fmt.Errorf("--config takes no path: it always opens %s", "~/.config")
+		}
+		if pa.PrintSession || pa.PrintProject {
+			return pa, fmt.Errorf("--config only combines with --agent")
+		}
+		base, err := config.UserConfigBase()
+		if err != nil {
+			return pa, err
+		}
+		pa.Path = base
+		if pa.Agent == "" {
+			pa.Agent = kinds[0].Name
+		}
+	}
+	if pa.Agent != "" && !ValidKind(pa.Agent) {
+		return pa, fmt.Errorf("agent must be %s, got %q", KindList(), pa.Agent)
 	}
 	return pa, nil
 }
@@ -78,7 +102,7 @@ func RunAgent(path, kind string) error {
 	if err != nil {
 		return err
 	}
-	return attachAgentSession(name, dir, AgentCommand(kind))
+	return attachAgentSession(name, dir, AgentCommand(kind, dir))
 }
 
 // SessionName returns the exact name RunAgent would create for path, so other

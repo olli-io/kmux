@@ -26,6 +26,9 @@ const (
 	HSplit SplitLocation = "hsplit" // stacked (top/bottom)
 )
 
+// runKitten is a seam over kittenAt so tests can feed `kitten @ ls` fixtures.
+var runKitten = kittenAt
+
 // kittenAt runs `kitten @ <args...>` and returns trimmed stdout.
 // KITTY_LISTEN_ON in the environment makes the socket implicit.
 func kittenAt(args ...string) (string, error) {
@@ -205,8 +208,12 @@ func ResizeWindowHoriz(id, increment int) error {
 
 // lsWindow is the subset of `kitten @ ls` window fields we care about.
 type lsWindow struct {
-	ID                  int         `json:"id"`
-	Title               string      `json:"title"`
+	ID    int    `json:"id"`
+	Title string `json:"title"`
+	// IsFocused is true for the one pane holding keyboard focus, across every tab
+	// and OS window kitty knows about. Distinct from a tab's active window, which
+	// each tab has whether or not the tab or its OS window is focused.
+	IsFocused           bool        `json:"is_focused"`
 	Columns             int         `json:"columns"` // text width in cells
 	ForegroundProcesses []lsProcess `json:"foreground_processes"`
 	Neighbors           Neighbors   `json:"neighbors"`
@@ -230,7 +237,7 @@ type lsProcess struct {
 // lsTabs runs `kitten @ ls` and returns every tab's window list, grouped by tab,
 // across all OS windows.
 func lsTabs() ([][]lsWindow, error) {
-	out, err := kittenAt("ls")
+	out, err := runKitten("ls")
 	if err != nil {
 		return nil, err
 	}
@@ -296,32 +303,45 @@ func LiveWindowIDs() (map[int]bool, error) {
 	return ids, nil
 }
 
-// Snapshot derives from a single `kitten @ ls` both the live window ids (all tabs,
-// for the manual-close prune) and the blank panes in the tab holding tabWindowID.
-// Folding them saves a second `kitten` spawn per poll — the dominant macOS cost.
+// Snapshot derives from a single `kitten @ ls` the live window ids (all tabs, for
+// the manual-close prune), the blank panes in the tab holding tabWindowID, and
+// whether that tab has keyboard focus. Folding them saves
+// extra `kitten` spawns per poll — the dominant macOS cost — and in particular
+// makes the focus check free.
 //
 // Blanks are confined to the dashboard's tab: a blank shell in one of kmux's other
 // tabs (lazygit, agent attach) isn't the dashboard's to adopt. The live-id set
 // spans every tab so the prune sees all managed windows.
-func Snapshot(tabWindowID int) (live map[int]bool, blanks []BlankPane, err error) {
+//
+// focused is about the tab holding tabWindowID, not that pane alone: it is true
+// whenever any pane in that tab holds keyboard focus. The dashboard and its agent
+// panes live in one tab, and opening a pane there costs the user nothing while they
+// are already in it — kitty is foreground and --keep-focus leaves the cursor where
+// it is. Anything outside that tab — another tab, another OS window, another app —
+// reads as unfocused, so a pass that would drag kitty to the front holds off instead.
+func Snapshot(tabWindowID int) (live map[int]bool, blanks []BlankPane, focused bool, err error) {
 	tabs, err := lsTabs()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	live = map[int]bool{}
 	for _, t := range tabs {
-		holdsTarget := false
+		holdsTarget, tabFocused := false, false
 		for _, w := range t {
 			live[w.ID] = true
 			if w.ID == tabWindowID {
 				holdsTarget = true
 			}
+			if w.IsFocused {
+				tabFocused = true
+			}
 		}
 		if holdsTarget {
 			blanks = blankPanesIn(t)
+			focused = tabFocused
 		}
 	}
-	return live, blanks, nil
+	return live, blanks, focused, nil
 }
 
 // blankPanesIn returns the bare-shell blank panes among a tab's windows, tagged

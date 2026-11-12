@@ -6,9 +6,16 @@
 > or particularly configurable.
 
 `kmux` is a barebones TUI for monitoring parallel AI coding agents (claude,
-opencode) that each run in their own tmux session. It runs as a left sidebar
+opencode, pi) that each run in their own tmux session. It runs as a left sidebar
 inside a kitty window and auto-attaches every matching tmux session into its own
 pane.
+
+Attaching a pane pulls kitty to the foreground and resizes the splits around it, so
+kmux only does it while the dashboard's own kitty tab holds the cursor — the sidebar
+or any agent pane in it counts, another tab or another app does not. A session that
+starts elsewhere — an editor plugin spawning an agent, say — is listed right away with
+a dim `P` badge and gets its pane on the next poll after you're back in that tab.
+Launching from kmux itself, and the initial build at startup, are never held back.
 
 ![kmux screenshot](docs/screenshot.png)
 
@@ -59,7 +66,8 @@ kmux ~/git/myproject   # or: cd into the repo and run `kmux .`
 The empty columns kmux pads the layout with aren't just filler — they're
 launchers. Focus an idle slot and:
 
-- **`c`** / **`o`** — pick a project, then launch Claude / OpenCode in it.
+- **`c`** / **`o`** / **`p`** — pick a project, then launch Claude / OpenCode /
+  Pi in it.
 - **`↵`** — pick a project, then pick the agent kind.
 
 The picker lists the same projects (and worktrees) as the `[1]─Projects` panel.
@@ -83,12 +91,12 @@ the current terminal. This needs only tmux — no kitty:
 ```sh
 kmux ~/git/myproject --agent claude     # path then flag
 kmux --agent opencode ~/git/myproject   # flag then path, equivalent
-kmux --agent claude                     # omit the path to use the current dir
+kmux --agent pi                         # omit the path to use the current dir
 ```
 
 The session name follows the same convention the dashboard uses
-(`[kmux][CC]<project-path>` for claude, `[kmux][OC]…` for opencode; worktrees
-become `[kmux][CC]<project-path>@<worktree>`, e.g.
+(`[kmux][CC]<project-path>` for claude, `[kmux][OC]…` for opencode, `[kmux][PI]…`
+for pi; worktrees become `[kmux][CC]<project-path>@<worktree>`, e.g.
 `[kmux][CC]~/git/myproject@feat`), so an agent launched this way is the very same
 session the dashboard manages — launch it here, then open `kmux`, and it focuses
 that running agent.
@@ -102,7 +110,7 @@ neither tmux nor kitty:
 
 ```sh
 kmux --session claude                   # e.g. [kmux][CC]~/git/myproject
-kmux --session opencode ~/git/myproject # name for a specific path
+kmux --session pi ~/git/myproject       # name for a specific path
 tmux send-keys -t "$(kmux --session claude)" 'hello' Enter
 ```
 

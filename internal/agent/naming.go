@@ -4,14 +4,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
+	"github.com/olli-io/kmux/internal/config"
 	"github.com/olli-io/kmux/internal/project"
 )
 
 // Session-name grammar: "[kmux]<marker><projectPath>[@<worktree>]", where
-// <marker> is "[CC]" (claude) or "[OC]" (opencode) and <projectPath> is the main
-// worktree path with $HOME abbreviated to "~". The full path (not the basename)
-// keeps two projects that share a basename distinct. A no-repo session is
+// <marker> is the agent kind's marker from the kinds registry below ("[CC]" claude,
+// "[OC]" opencode, "[PI]" pi) and <projectPath> is the main worktree path with $HOME
+// abbreviated to "~". The full path (not the basename) keeps two projects that share
+// a basename distinct. A no-repo session is
 // "orphaned": an orphanMark sits right after the marker and it never carries an
 // "@<worktree>" segment. A session blocked on a prompt is renamed to carry an
 // optional leading attnMark ("[!!]<...>"); it is transient UI state, so every parser
@@ -19,14 +22,102 @@ import (
 const (
 	sessionTag  = "[kmux]" // literal leading tag on every kmux-managed session
 	worktreeSep = "@"
-	orphanMark  = "[∅]" // ∅ is U+2205 EMPTY SET; marks a no-repo session (after the marker)
+	orphanMark  = "[∅]"  // ∅ is U+2205 EMPTY SET; marks a no-repo session (after the marker)
 	attnMark    = "[!!]" // optional leading marker on a session blocked on a prompt
 )
 
-var agentMarkers = map[string]string{"claude": "[CC]", "opencode": "[OC]"}
+// Kind describes one supported agent. kinds below is the single ordered source of
+// truth: the session-name marker, the binary kmux launches, and the labels the
+// pickers and badges show all come from here, so adding an agent is one entry plus a
+// detect manifest (internal/status/detect) and a UI color.
+//
+// Key is the idle slot's fixed launch key, separate from the dashboard's rebindable
+// createOrFocus* keybindings (config.DefaultKeybindings), because an idle slot is a
+// bare shell loop with no config to read. The two are kept equal so a user sees one
+// key per agent across the whole UI.
+type Kind struct {
+	Name   string // canonical name, as spelled on the CLI and used as a map key
+	Marker string // session-name marker, e.g. "[CC]"
+	Bin    string // executable kmux runs to start the agent (need not match Name)
+	Label  string // display name in the launcher pickers
+	Badge  string // two-letter code for the dashboard badge and the idler's running tag
+	Key    string // idle-slot hotkey that launches this kind straight from the shell loop
+
+	// SandboxBin replaces Bin when kmux wraps the agent in the sandbox runner, for a
+	// Bin that is itself a sandbox (pi-sandbox) and cannot nest inside srt. Empty
+	// means Bin.
+	SandboxBin string
+	// SandboxArgs are flags added only inside the sandbox runner: the runner is the
+	// security boundary there, so the agent's own permission prompts are skipped.
+	SandboxArgs string
+}
+
+// kinds is the agent registry in display order — the order the pickers list and the
+// order every kind-iterating loop in kmux observes. Markers must stay distinct: the
+// name grammar identifies a kind by its marker prefix alone.
+var kinds = []Kind{
+	{Name: "claude", Marker: "[CC]", Bin: "claude", Label: "Claude", Badge: "CC", Key: "c",
+		SandboxArgs: "--dangerously-skip-permissions"},
+	{Name: "opencode", Marker: "[OC]", Bin: "opencode", Label: "OpenCode", Badge: "OC", Key: "o",
+		SandboxArgs: "--auto"},
+	// Unsandboxed, pi launches through the pi-sandbox wrapper, which runs the agent in
+	// a rootless container that can see only the project repo. It takes pi's own
+	// flags verbatim, so AgentCommand's --continue still applies. Under the sandbox
+	// runner the container can't nest, so the runner replaces it and pi runs bare.
+	// pi has no permission prompts, so it needs no SandboxArgs.
+	{Name: "pi", Marker: "[PI]", Bin: "pi-sandbox", Label: "Pi", Badge: "PI", Key: "p",
+		SandboxBin: "pi"},
+}
+
+// kindByName indexes kinds for O(1) lookup; built once at init.
+var kindByName = func() map[string]Kind {
+	m := make(map[string]Kind, len(kinds))
+	for _, k := range kinds {
+		m[k.Name] = k
+	}
+	return m
+}()
+
+// Kinds returns the supported agent kinds in display order. The slice is a copy, so
+// callers can't mutate the registry.
+func Kinds() []Kind { return append([]Kind(nil), kinds...) }
+
+// KindNames returns just the kind names, in display order.
+func KindNames() []string {
+	names := make([]string, len(kinds))
+	for i, k := range kinds {
+		names[i] = k.Name
+	}
+	return names
+}
+
+// LookupKind returns the registry entry for a kind name.
+func LookupKind(name string) (Kind, bool) {
+	k, ok := kindByName[name]
+	return k, ok
+}
+
+// ValidKind reports whether name is a supported agent kind.
+func ValidKind(name string) bool {
+	_, ok := kindByName[name]
+	return ok
+}
+
+// KindList renders the kind names for a human-facing message, e.g.
+// "claude, opencode or pi".
+func KindList() string {
+	names := KindNames()
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
+}
 
 func agentPrefix(kind string) string {
-	return sessionTag + agentMarkers[kind]
+	return sessionTag + kindByName[kind].Marker
 }
 
 // stripAttn removes a leading attnMark ("[!!]") so the rest of the grammar sees the
@@ -118,33 +209,93 @@ func sessionPrefix(projPath string) string {
 	return tmuxSafe(abbrevHome(projPath))
 }
 
-// AgentCommand launches with --continue so a respawned session resumes the last
-// conversation, falling back to a plain launch (`<agent> --continue || <agent>`)
-// because --continue exits non-zero when there's no prior conversation.
-func AgentCommand(kind string) string {
-	bin := "claude"
-	if kind == "opencode" {
-		bin = "opencode"
+// AgentCommand is the shell command that starts kind's agent in dir, wrapped in
+// the configured sandbox runner (see BuildAgentCommand). The config is read once
+// per process.
+func AgentCommand(kind, dir string) string {
+	return BuildAgentCommand(kind, dir, sandboxConfig())
+}
+
+var sandboxConfig = sync.OnceValue(func() config.Sandbox {
+	cfg, _ := config.LoadConfig()
+	return cfg.Sandbox
+})
+
+// BuildAgentCommand launches with --continue so a respawned session resumes the
+// last conversation, falling back to a plain launch (`<agent> --continue ||
+// <agent>`) because --continue exits non-zero when there's no prior conversation.
+//
+// With the sandbox enabled the whole line runs inside the runner, as
+// `<runner> [-s <settings>] -c '<agent line>'`, and the agent gets its
+// SandboxBin and SandboxArgs. A config session (dir in ~/.config) uses the config
+// settings file, which lets the agent write ~/.config; when that file is missing
+// it falls back to the normal, stricter settings rather than to no sandbox.
+func BuildAgentCommand(kind, dir string, sb config.Sandbox) string {
+	k, ok := LookupKind(kind)
+	if !ok {
+		k = kinds[0] // unknown kind falls back to claude, as SessionForKind does
 	}
-	return bin + " --continue || " + bin
+	if !sb.Enabled() {
+		return k.Bin + " --continue || " + k.Bin
+	}
+	bin := k.Bin
+	if k.SandboxBin != "" {
+		bin = k.SandboxBin
+	}
+	if k.SandboxArgs != "" {
+		bin += " " + k.SandboxArgs
+	}
+	line := bin + " --continue || " + bin
+
+	settings := sb.Settings
+	if IsConfigSession(dir) {
+		if p := sb.ConfigSettingsPath(); fileExists(p) {
+			settings = p
+		}
+	}
+	cmd := strings.TrimSpace(sb.Command)
+	if settings != "" {
+		cmd += " -s " + shellQuote(settings)
+	}
+	return cmd + " -c " + shellQuote(line)
+}
+
+// IsConfigSession reports whether dir is the user config dir (~/.config) or below it.
+func IsConfigSession(dir string) bool {
+	base, err := config.UserConfigBase()
+	if err != nil || dir == "" {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(base), filepath.Clean(dir))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, "../")
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// shellQuote single-quotes s for sh.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // SessionForKind swaps a claude session name's leading marker for another kind's.
 // The [kmux][CC] prefix is invariant under tmuxSafe, so a plain prefix swap is safe.
 func SessionForKind(claudeSession, kind string) string {
-	if _, ok := agentMarkers[kind]; !ok || kind == "claude" {
+	if !ValidKind(kind) || kind == "claude" {
 		return claudeSession
 	}
 	return agentPrefix(kind) + strings.TrimPrefix(claudeSession, agentPrefix("claude"))
 }
 
-// AgentKind returns "claude", "opencode", or "" for a session name; the prefix is
-// matched case-insensitively.
+// AgentKind returns the session name's agent kind, or "" when it is not a kmux agent
+// session; the prefix is matched case-insensitively.
 func AgentKind(name string) string {
 	lower := strings.ToLower(stripAttn(name))
-	for kind := range agentMarkers {
-		if strings.HasPrefix(lower, strings.ToLower(agentPrefix(kind))) {
-			return kind
+	for _, k := range kinds {
+		if strings.HasPrefix(lower, strings.ToLower(sessionTag+k.Marker)) {
+			return k.Name
 		}
 	}
 	return ""
@@ -189,8 +340,8 @@ func WorktreeName(session string) string {
 func stripAgent(session string) string {
 	session = stripAttn(session)
 	lower := strings.ToLower(session)
-	for kind := range agentMarkers {
-		if p := agentPrefix(kind); strings.HasPrefix(lower, strings.ToLower(p)) {
+	for _, k := range kinds {
+		if p := sessionTag + k.Marker; strings.HasPrefix(lower, strings.ToLower(p)) {
 			return session[len(p):]
 		}
 	}

@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/config"
 )
 
@@ -62,7 +63,7 @@ func (m model) helpHints(focused section) []keyHint {
 			move,
 			switchPanel,
 			{kb(config.ActionCreateOrAttachAgent), "launch agent"},
-			{pair(config.ActionCreateOrFocusClaude, config.ActionCreateOrFocusOpencode), "launch claude/opencode"},
+			m.launchKindHint(kb),
 			{kb(config.ActionFullscreenAgent), "fullscreen agent"},
 			{kb(config.ActionLaunchKmuxInProject), "kmux project in tab"},
 			{kb(config.ActionRefreshProjects), "refresh git status"},
@@ -81,6 +82,27 @@ func (m model) helpHints(focused section) []keyHint {
 		hints = append(hints, keyHint{keyLabel(c.Key), strings.ToLower(label)})
 	}
 	return append(hints, keyHint{kb(config.ActionQuit), "quit"})
+}
+
+// launchKindHint renders the one-key-per-agent hint, e.g. "c/o/p  launch
+// claude/opencode/pi". It is built from the agent registry in display order so the
+// keys and the names it lists always line up, and a kind with no direct-launch action
+// bound is left out rather than shifting the pairing.
+func (m model) launchKindHint(kb func(string) string) keyHint {
+	var keys, names []string
+	for _, k := range agent.Kinds() {
+		action, ok := launchKindActions[k.Name]
+		if !ok {
+			continue
+		}
+		key := kb(action)
+		if key == "" {
+			continue // action explicitly unbound: drop it rather than render "c//p"
+		}
+		keys = append(keys, key)
+		names = append(names, k.Name)
+	}
+	return keyHint{strings.Join(keys, "/"), "launch " + strings.Join(names, "/")}
 }
 
 // conflictLines renders the keybinding-conflict report as error-styled body lines,

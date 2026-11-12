@@ -144,3 +144,55 @@ func TestForget(t *testing.T) {
 		t.Fatal("c~oc should be forgotten")
 	}
 }
+
+// TestLaunchPending covers the predicate the dashboard uses to decide whether to
+// pay for a frontmost-window capture before reconciling: it must be true for every
+// pass that opens a kitty window — a new session's pane, and the filler pane that
+// backfills the column a departing session frees — and false in steady state.
+func TestLaunchPending(t *testing.T) {
+	// Fully padded steady state: 3 columns, no placeholders wanted, no session churn.
+	full := func() *Manager {
+		m := NewManager(100)
+		m.columns = [][]int{{1}, {2}, {3}}
+		m.bySession = map[string]int{"a~cl": 1, "b~cl": 2, "c~cl": 3}
+		return m
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*Manager)
+		active []string
+		want   bool
+	}{
+		{"steady state", nil, []string{"a~cl", "b~cl", "c~cl"}, false},
+		{"new session", nil, []string{"a~cl", "b~cl", "c~cl", "d~cl"}, true},
+		{"session gone", nil, []string{"a~cl", "b~cl"}, true},
+		{"placeholder short", func(m *Manager) {
+			m.columns = [][]int{{1}} // wants 2 placeholders, holds 1
+			m.bySession = map[string]int{"a~cl": 1}
+			m.placeholders = []int{9}
+		}, []string{"a~cl"}, true},
+		{"placeholders satisfied", func(m *Manager) {
+			m.columns = [][]int{{1}}
+			m.bySession = map[string]int{"a~cl": 1}
+			m.placeholders = []int{9, 10}
+		}, []string{"a~cl"}, false},
+		{"no sessions, fully padded", func(m *Manager) {
+			m.columns = nil
+			m.bySession = map[string]int{}
+			m.placeholders = []int{9, 10, 11}
+		}, nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := full()
+			if tt.mutate != nil {
+				tt.mutate(m)
+			}
+			if got := m.launchPending(tt.active); got != tt.want {
+				t.Fatalf("launchPending(%v) = %v, want %v", tt.active, got, tt.want)
+			}
+		})
+	}
+}

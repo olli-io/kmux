@@ -24,6 +24,12 @@ customCommands:
 
 keybindings:
   killAgent: x         # remap an action's key (defaults live in the binary)
+
+# Run every agent inside srt (anthropic-ai/sandbox-runtime). Off by default.
+sandbox:
+  command: srt                                  # off / none / empty disables
+  settings: ~/.srt/settings.json                # empty = srt's own default
+  config_settings: ~/.srt/settings-config.json  # for config sessions (default)
 ```
 
 ## How layers combine
@@ -34,6 +40,24 @@ keybindings:
 | `idle_timeout`   | your value wins                                                    |
 | `customCommands` | merged by `key` — override, add, or remove with empty `cmd:`       |
 | `keybindings`    | override individual actions                                        |
+| `sandbox`        | each non-empty field of yours wins                                 |
+
+## sandbox
+
+With `sandbox.command` set, kmux launches each agent as
+`srt [-s <settings>] -c '<agent> --continue || <agent>'`. The tmux server stays
+outside the sandbox; only the agent runs inside it.
+
+- Agents skip their own permission prompts (claude `--dangerously-skip-permissions`,
+  opencode `--auto`), because srt is the security boundary. pi has no prompts.
+- pi runs as bare `pi` instead of `pi-sandbox`: its podman container cannot run
+  inside srt.
+- A **config session** is an agent launched in `~/.config` (or below it), for
+  example with `kmux --config --agent claude`. It uses `config_settings`, which
+  should allow writes to `~/.config`. If that file is missing, kmux uses the
+  normal `settings` instead.
+- If srt is not installed, the agent session exits at once. kmux never falls back
+  to an unsandboxed agent.
 
 ## customCommands
 
@@ -93,6 +117,7 @@ keybindings:
   fullscreenAgent:        f       # open the agent in its own kitty tab
   createOrFocusClaude:    c       # launch/focus Claude for the project
   createOrFocusOpencode:  o       # launch/focus OpenCode for the project
+  createOrFocusPi:        p       # launch/focus Pi for the project
   launchKmuxInProject:    t       # open the project in a new kmux tab
   refreshProjects:        r       # force a full git-status rescan of all projects
   quit:                   q       # quit kmux

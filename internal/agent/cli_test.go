@@ -52,6 +52,7 @@ func TestSessionPlanOrphanMissing(t *testing.T) {
 }
 
 func TestParseArgs(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "/h/.config")
 	cases := []struct {
 		name    string
 		args    []string
@@ -80,6 +81,11 @@ func TestParseArgs(t *testing.T) {
 		{"bad session kind", []string{"--session=vim"}, ParsedArgs{}, true},
 		{"unknown flag", []string{"--nope"}, ParsedArgs{}, true},
 		{"two paths", []string{"/a", "/b"}, ParsedArgs{}, true},
+		// --config opens a config session in the user config dir, claude by default.
+		{"config", []string{"--config"}, ParsedArgs{Path: "/h/.config", Agent: "claude", Config: true}, false},
+		{"config with agent", []string{"--config", "--agent", "pi"}, ParsedArgs{Path: "/h/.config", Agent: "pi", Config: true}, false},
+		{"config with path", []string{"--config", "/g/x"}, ParsedArgs{}, true},
+		{"config with session", []string{"--config", "--session", "claude"}, ParsedArgs{}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

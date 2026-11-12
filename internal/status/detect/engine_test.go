@@ -2,11 +2,11 @@ package detect
 
 import "testing"
 
-// TestEmbeddedManifestsLoad proves the embedded YAML parsed and compiled at init: both
-// agents are Known, and a busy footer is detected. A malformed manifest would panic at
-// init before this runs.
+// TestEmbeddedManifestsLoad proves the embedded YAML parsed and compiled at init:
+// every shipped agent is Known. A malformed manifest would panic at init before this
+// runs. kinds_test.go pins this list against the agent registry.
 func TestEmbeddedManifestsLoad(t *testing.T) {
-	for _, kind := range []string{"claude", "opencode"} {
+	for _, kind := range []string{"claude", "opencode", "pi"} {
 		if !Known(kind) {
 			t.Errorf("manifest for %q did not load", kind)
 		}
@@ -39,6 +39,20 @@ func TestMatchesReproducesMarkers(t *testing.T) {
 		{"opencode busy truncated", "opencode", "⬝⬝⬝■■■■■  esc int…   tab agents", StateWorking},
 		{"opencode permission", "opencode", "△ Permission required\n $ echo hi\n Allow once   Allow always   Reject", StateBlocked},
 		{"opencode waiting", "opencode", "Build · Big Pickle OpenCode Zen\n  8.4K (4%)  ctrl+p commands", StateUnknown},
+
+		// pi hangs its status indicator in the rule above the editor, so busy reads as a
+		// braille spinner inside a run of box-drawing dashes. Panes below are real
+		// captures (tmux capture-pane -p), trimmed in width.
+		{"pi busy", "pi", "  41\n  42\n── ⠼ Working ──────────────\n\n──────────────────────────\n/g/proj\n1.0%/262k (auto)", StateWorking},
+		{"pi busy narrow", "pi", "── ⠧ Working ────\n\n────────────────\n/g/proj\n1.0%/262k", StateWorking},
+		{"pi busy status line", "pi", " ⠹ Compacting context... (escape to cancel)\n\n─────────\n/g/proj\n1.0%/262k", StateWorking},
+		{"pi busy interrupt hint", "pi", "──────────\n Working (escape to interrupt)\n─────────\n/g/proj", StateWorking},
+		{"pi waiting", "pi", "──────────────────────────\n>\n──────────────────────────\n/g/proj\n0.0%/262k (auto)   kimi-k2.6 • high", StateUnknown},
+		{"pi startup banner not busy", "pi", " pi v0.85.0\n escape interrupt · ctrl+c/ctrl+d clear/exit · / commands · ! bash · ctrl+o more\n──────\n/g/proj", StateUnknown},
+		{"pi select dialog", "pi", "→ ✓ kimi-k2.6 [opencode-go] · default\n    minimax-m3 [opencode-go]\n  (1/27)\n  Enter to select · Ctrl+S to set as default · Esc to cancel\n──────\n/g/proj", StateBlocked},
+		{"pi select dialog while busy is blocked", "pi", "── ⠼ Working ────\n  Enter to select · Esc to cancel\n──────\n/g/proj", StateBlocked},
+		{"pi cancel hint alone not blocked", "pi", "the docs say esc to cancel a request\n──────\n>\n──────\n/g/proj", StateUnknown},
+		{"pi transcript word working not busy", "pi", "I am working on it now\n──────\n>\n──────\n/g/proj", StateUnknown},
 		{"unknown kind", "vim", "esc to interrupt", StateUnknown},
 
 		// Tail confinement: a marker only in scrollback (above the live bottom region)
@@ -47,6 +61,12 @@ func TestMatchesReproducesMarkers(t *testing.T) {
 			"claude busy in scrollback ignored",
 			"claude",
 			"we discussed esc to interrupt earlier\n\n\n\n\n\n\n\n\n\n\n\n\n│ > Try \"fix the bug\" │\n  ? for shortcuts",
+			StateUnknown,
+		},
+		{
+			"pi busy in scrollback ignored",
+			"pi",
+			"── ⠼ Working ──────────────\n\n\n\n\n\n\n\n\n\n\n\n\n──────────────────────────\n>\n──────────────────────────\n/g/proj",
 			StateUnknown,
 		},
 		{

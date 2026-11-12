@@ -4,13 +4,16 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/olli-io/kmux/internal/config"
 )
 
-// ccPre / ocPre are the claude / opencode agent prefixes spelled out for test
-// literals (the [kmux] tag plus the bracketed kind marker).
+// ccPre / ocPre / piPre are the claude / opencode / pi agent prefixes spelled out for
+// test literals (the [kmux] tag plus the bracketed kind marker).
 const (
 	ccPre = "[kmux][CC]"
 	ocPre = "[kmux][OC]"
+	piPre = "[kmux][PI]"
 )
 
 func homeOrSkip(t *testing.T) string {
@@ -197,11 +200,124 @@ func TestAgentCommand(t *testing.T) {
 	// --continue resumes a prior conversation; the `|| <agent>` fallback launches
 	// fresh when --continue exits non-zero (no conversation to continue), so an
 	// idle-launched pane never dies on a first launch.
-	if got := AgentCommand("claude"); got != "claude --continue || claude" {
-		t.Errorf("claude cmd = %q, want %q", got, "claude --continue || claude")
+	var off config.Sandbox
+	cases := map[string]string{
+		"claude":   "claude --continue || claude",
+		"opencode": "opencode --continue || opencode",
+		// pi runs through the pi-sandbox wrapper, so the command is not the kind's name.
+		"pi": "pi-sandbox --continue || pi-sandbox",
+		// An unregistered kind falls back to claude, matching SessionForKind: a bad kind
+		// yields a working claude pane rather than a session running a nonexistent binary.
+		"nope": "claude --continue || claude",
 	}
-	if got := AgentCommand("opencode"); got != "opencode --continue || opencode" {
-		t.Errorf("opencode cmd = %q, want %q", got, "opencode --continue || opencode")
+	for kind, want := range cases {
+		if got := BuildAgentCommand(kind, "/g/proj", off); got != want {
+			t.Errorf("%s cmd = %q, want %q", kind, got, want)
+		}
+	}
+	// "off" spells a disabled runner too.
+	if got := BuildAgentCommand("claude", "/g/proj", config.Sandbox{Command: "off"}); got != cases["claude"] {
+		t.Errorf("command off: cmd = %q, want %q", got, cases["claude"])
+	}
+}
+
+func TestAgentCommandSandboxed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfgSettings := filepath.Join(home, "cfg.json")
+	sb := config.Sandbox{Command: "srt", ConfigSettings: cfgSettings}
+
+	// The whole --continue line runs inside the runner, with the kind's sandbox
+	// flags; pi swaps its container wrapper for the bare binary.
+	cases := map[string]string{
+		"claude":   `srt -c 'claude --dangerously-skip-permissions --continue || claude --dangerously-skip-permissions'`,
+		"opencode": `srt -c 'opencode --auto --continue || opencode --auto'`,
+		"pi":       `srt -c 'pi --continue || pi'`,
+	}
+	for kind, want := range cases {
+		if got := BuildAgentCommand(kind, "/g/proj", sb); got != want {
+			t.Errorf("%s cmd = %q, want %q", kind, got, want)
+		}
+	}
+
+	// A config session whose settings file is missing keeps the normal profile:
+	// never a weaker one, never no sandbox.
+	dotcfg := filepath.Join(home, ".config", "hypr")
+	if got := BuildAgentCommand("pi", dotcfg, sb); got != cases["pi"] {
+		t.Errorf("config session, no settings file: cmd = %q, want %q", got, cases["pi"])
+	}
+
+	// With the file present, a config session (in or below ~/.config) uses it.
+	if err := os.WriteFile(cfgSettings, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := "srt -s '" + cfgSettings + "' -c 'pi --continue || pi'"
+	for _, dir := range []string{filepath.Join(home, ".config"), dotcfg} {
+		if got := BuildAgentCommand("pi", dir, sb); got != want {
+			t.Errorf("config session %s: cmd = %q, want %q", dir, got, want)
+		}
+	}
+
+	// A sibling dir that only shares the prefix is not a config session; an
+	// explicit normal settings file is passed with -s.
+	sb.Settings = "/s/normal.json"
+	want = "srt -s '/s/normal.json' -c 'pi --continue || pi'"
+	if got := BuildAgentCommand("pi", filepath.Join(home, ".config-old"), sb); got != want {
+		t.Errorf("prefix sibling: cmd = %q, want %q", got, want)
+	}
+}
+
+// TestKindRegistryRoundTrip exercises every registered kind through the naming
+// grammar generically, so an agent added to the registry is covered without adding a
+// case: its session must carry a distinct marker, report its own AgentKind, and keep
+// the project and worktree it was built from.
+func TestKindRegistryRoundTrip(t *testing.T) {
+	const proj = "/home/u/git/proj"
+	base := ExpectedSession(proj, "feat")
+	seen := map[string]string{}
+	for _, k := range Kinds() {
+		if k.Name == "" || k.Marker == "" || k.Bin == "" || k.Label == "" || k.Badge == "" {
+			t.Errorf("kind %+v has an empty field", k)
+		}
+		if prev, dup := seen[k.Marker]; dup {
+			t.Errorf("kinds %q and %q share the marker %q; session names would be ambiguous", prev, k.Name, k.Marker)
+		}
+		seen[k.Marker] = k.Name
+
+		name := SessionForKind(base, k.Name)
+		if got := AgentKind(name); got != k.Name {
+			t.Errorf("AgentKind(%q) = %q, want %q", name, got, k.Name)
+		}
+		if got := WorktreeName(name); got != "feat" {
+			t.Errorf("WorktreeName(%q) = %q, want %q", name, got, "feat")
+		}
+		if got, _, ok := MatchProject(name, []string{proj}); !ok || got != proj {
+			t.Errorf("MatchProject(%q) = %q, %v; want %q, true", name, got, ok, proj)
+		}
+		if !ValidKind(k.Name) {
+			t.Errorf("ValidKind(%q) = false, want true", k.Name)
+		}
+		if lk, ok := LookupKind(k.Name); !ok || lk != k {
+			t.Errorf("LookupKind(%q) = %+v, %v; want %+v, true", k.Name, lk, ok, k)
+		}
+	}
+	if ValidKind("nope") || ValidKind("") {
+		t.Error("ValidKind should reject unregistered kinds")
+	}
+}
+
+// TestPiSessionNaming pins pi's own marker, since the tmux listing regex spells it
+// out separately (see tmux.IsAgentSession).
+func TestPiSessionNaming(t *testing.T) {
+	// Route the expectation through sessionPrefix so the assertion holds whatever
+	// $HOME is (the path is home-abbreviated and tmux-sanitized on the way in).
+	const proj = "/home/u/git/proj"
+	base := ExpectedSession(proj, "")
+	if want := piPre + sessionPrefix(proj); SessionForKind(base, "pi") != want {
+		t.Errorf("pi session = %q, want %q", SessionForKind(base, "pi"), want)
+	}
+	if got := AgentKind("[kmux][pi]~/git/proj"); got != "pi" {
+		t.Errorf("AgentKind lower-case marker = %q, want pi", got)
 	}
 }
 

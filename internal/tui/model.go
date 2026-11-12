@@ -15,21 +15,24 @@ import (
 )
 
 type model struct {
-	mgr           *layout.Manager
-	sessions      []string
-	projects      []project.Project
-	collapsed     map[string]bool                  // collapse key -> collapsed
-	detached      map[string]bool                  // session name -> pane detached (tmux still running)
-	attention     map[string]status.AttentionState // session name -> latest detected attention state
-	idle          status.IdleTracker               // per-session pane-stability clock for idle-kill
-	cursor        int                              // index into rows()
-	spinnerFrame  int                              // animation frame for busy-session glyphs
-	spinning      bool                             // whether the spinner ticker is currently armed (only while a session is busy)
-	prompt        *agentPrompt                     // non-nil while the agent-picker overlay is open
-	commands      []config.CustomCommand           // user-configurable command keybindings (editor, lazygit, …)
-	cmdErr        *commandError                    // non-nil while a failed-command error float is shown
-	lastErr       string
-	width, height int
+	mgr       *layout.Manager
+	sessions  []string
+	projects  []project.Project
+	collapsed map[string]bool // collapse key -> collapsed
+	detached  map[string]bool // session name -> pane detached (tmux still running)
+	// launchDeferred is set when the last reconcile held panes back because the
+	// dashboard's tab was unfocused, so refocusing can retry them at once.
+	launchDeferred bool
+	attention      map[string]status.AttentionState // session name -> latest detected attention state
+	idle           status.IdleTracker               // per-session pane-stability clock for idle-kill
+	cursor         int                              // index into rows()
+	spinnerFrame   int                              // animation frame for busy-session glyphs
+	spinning       bool                             // whether the spinner ticker is currently armed (only while a session is busy)
+	prompt         *agentPrompt                     // non-nil while the agent-picker overlay is open
+	commands       []config.CustomCommand           // user-configurable command keybindings (editor, lazygit, …)
+	cmdErr         *commandError                    // non-nil while a failed-command error float is shown
+	lastErr        string
+	width, height  int
 
 	// idledPanes records blank panes already handled so each becomes an idle
 	// launcher at most once. blankSeeded holds conversion until the first snapshot,
@@ -105,14 +108,21 @@ type agentPrompt struct {
 	tab     bool   // launch the chosen agent in a standalone kitty tab, not a pane
 }
 
-// promptOptions are the agent kinds offered by the picker, in display order.
-var promptOptions = []struct {
+// promptOption is one row of the agent picker.
+type promptOption struct {
 	kind, label string
 	style       lipgloss.Style
-}{
-	{"claude", "Claude", clStyle},
-	{"opencode", "OpenCode", ocStyle},
 }
+
+// promptOptions are the agent kinds offered by the picker, in the agent registry's
+// display order, so a kind added there appears here without further wiring.
+var promptOptions = func() []promptOption {
+	opts := make([]promptOption, len(agent.Kinds()))
+	for i, k := range agent.Kinds() {
+		opts[i] = promptOption{kind: k.Name, label: k.Label, style: kindStyle(k.Name)}
+	}
+	return opts
+}()
 
 // NewModel builds the dashboard model. scopeDir scopes it to one project's main
 // worktree; launcherID is the splash tab it builds behind, closed once the first
@@ -358,12 +368,23 @@ func (m *model) trackOrphans(orphaned []string) []string {
 	return kill
 }
 
+// kindSessions returns the session name for every agent kind of the project or
+// worktree that claudeName names, in registry order. Callers scanning "is any agent
+// running for this row" iterate it so a new kind is never silently skipped.
+func kindSessions(claudeName string) []string {
+	names := make([]string, len(agent.Kinds()))
+	for i, k := range agent.Kinds() {
+		names[i] = agent.SessionForKind(claudeName, k.Name)
+	}
+	return names
+}
+
 // projectLive reports a project's aggregate live state for row coloring, across
-// both agent kinds: liveAttached if any session has a live pane, liveDetached if
+// every agent kind: liveAttached if any session has a live pane, liveDetached if
 // all running sessions are detached, liveNone if none is running.
 func (m model) projectLive(claudeName string) liveState {
 	live := liveNone
-	for _, name := range [2]string{claudeName, agent.SessionForKind(claudeName, "opencode")} {
+	for _, name := range kindSessions(claudeName) {
 		if !m.hasSession(name) {
 			continue
 		}

@@ -95,8 +95,8 @@ func TestDirectLaunchFromPicker(t *testing.T) {
 	if m.launch.Dir != "/g/beta.feat" {
 		t.Errorf("launch dir = %q, want /g/beta.feat", m.launch.Dir)
 	}
-	if m.launch.AgentCmd != agent.AgentCommand("claude") {
-		t.Errorf("launch cmd = %q, want %q", m.launch.AgentCmd, agent.AgentCommand("claude"))
+	if m.launch.AgentCmd != agent.AgentCommand("claude", "/g/beta.feat") {
+		t.Errorf("launch cmd = %q, want %q", m.launch.AgentCmd, agent.AgentCommand("claude", "/g/beta.feat"))
 	}
 }
 
@@ -322,13 +322,28 @@ func TestBuildTargetsMarksRunning(t *testing.T) {
 		t.Error("alpha should stay launchable on the ↵ path (opencode is free)")
 	}
 
-	// With both alpha kinds running, alpha is disabled on the ↵ path too.
+	// The ↵ path only closes once EVERY registered kind runs, so build that set from
+	// the registry rather than naming kinds — a new agent must not quietly weaken this.
+	var allKinds []string
+	for _, k := range agent.Kinds() {
+		allKinds = append(allKinds, agent.SessionForKind(alphaClaude, k.Name))
+	}
 	ts = buildTargets(projects, []string{alphaClaude, alphaOpencode})
-	if !ts[0].disabledFor("") {
-		t.Error("alpha should be disabled on the ↵ path once both kinds run")
+	if len(agent.Kinds()) > 2 && ts[0].disabledFor("") {
+		t.Error("alpha should stay launchable on the ↵ path while a kind is still free")
 	}
 	if !ts[0].disabledFor("opencode") {
 		t.Error("alpha should be disabled for opencode once its opencode session runs")
+	}
+
+	ts = buildTargets(projects, allKinds)
+	if !ts[0].disabledFor("") {
+		t.Error("alpha should be disabled on the ↵ path once every kind runs")
+	}
+	for _, k := range agent.Kinds() {
+		if !ts[0].disabledFor(k.Name) {
+			t.Errorf("alpha should be disabled for %s once its session runs", k.Name)
+		}
 	}
 }
 

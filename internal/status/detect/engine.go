@@ -1,6 +1,6 @@
 // Package detect is kmux's YAML-driven, herdr-style agent-state detector. Each
-// supported agent ships an embedded manifest (claude.yaml, opencode.yaml) holding a
-// list of prioritized rules; a rule is a matcher gate (contains/regex/line_regex plus
+// supported agent ships an embedded manifest (claude.yaml, opencode.yaml, pi.yaml)
+// holding a list of prioritized rules; a rule is a matcher gate (contains/regex/line_regex plus
 // nested any/all/not) evaluated against a named region of the captured pane text. The
 // modelled states are herdr's (working/blocked/idle/unknown); status.ClassifyAttention
 // maps them onto kmux's AttentionState (working=>busy, blocked=>permission,
@@ -88,6 +88,9 @@ var claudeYAML []byte
 //go:embed opencode.yaml
 var opencodeYAML []byte
 
+//go:embed pi.yaml
+var piYAML []byte
+
 // manifests is the compiled registry, keyed by agent kind (see agent.AgentKind).
 var manifests = map[string]compiledManifest{}
 
@@ -95,6 +98,7 @@ func init() {
 	for kind, raw := range map[string][]byte{
 		"claude":   claudeYAML,
 		"opencode": opencodeYAML,
+		"pi":       piYAML,
 	} {
 		m, err := loadManifest(raw)
 		if err != nil {

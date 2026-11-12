@@ -12,6 +12,7 @@ import (
 var (
 	clStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))  // claude
 	ocStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("213")) // opencode (pink)
+	piStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // pi (orange)
 	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 	errColor    = lipgloss.Color("9") // error red (border, glyphs, text)
 	errStyle    = lipgloss.NewStyle().Foreground(errColor)
@@ -72,24 +73,43 @@ func sessionLabel(name string) string {
 	return agent.ProjectName(name)
 }
 
-// agentBadge renders the styled agent-kind badge ("CC"/"OC") prefixed with its
-// attach state: green "A" attached, red "D" detached. ‧ (U+2027) is a cosmetic
-// separator. Returns "" for a non-agent name.
+// kindStyles colors each agent kind; kindStyle falls back to the default text style
+// for a kind added to the registry before it is given a color here, so an uncolored
+// kind renders plainly rather than not at all.
+var kindStyles = map[string]lipgloss.Style{
+	"claude":   clStyle,
+	"opencode": ocStyle,
+	"pi":       piStyle,
+}
+
+func kindStyle(kind string) lipgloss.Style {
+	if st, ok := kindStyles[kind]; ok {
+		return st
+	}
+	return lipgloss.NewStyle()
+}
+
+// agentBadge renders the styled agent-kind badge ("CC"/"OC"/"PI") prefixed with its
+// attach state: green "A" attached, red "D" detached, dim "P" pending. Pending is
+// everything else — the session runs but has no pane, which in steady state means
+// reconcile is holding its pane back until the dashboard has focus. Showing it
+// keeps that wait visible instead of looking like kmux simply missed the session.
+// ‧ (U+2027) is a cosmetic separator. Returns "" for a non-agent name.
 func agentBadge(name string, attached, detached bool) string {
+	kind, ok := agent.LookupKind(agent.AgentKind(name))
+	if !ok {
+		return ""
+	}
 	prefix := ""
 	switch {
 	case attached:
 		prefix = okStyle.Render("A") + dimStyle.Render("‧")
 	case detached:
 		prefix = errStyle.Render("D") + dimStyle.Render("‧")
+	default:
+		prefix = dimStyle.Render("P") + dimStyle.Render("‧")
 	}
-	switch agent.AgentKind(name) {
-	case "claude":
-		return prefix + clStyle.Render("CC")
-	case "opencode":
-		return prefix + ocStyle.Render("OC")
-	}
-	return ""
+	return prefix + kindStyle(kind.Name).Render(kind.Badge)
 }
 
 // attentionGlyph returns the styled status glyph for an attention state. Busy

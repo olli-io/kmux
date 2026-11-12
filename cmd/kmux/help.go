@@ -4,7 +4,7 @@ package main
 // dashboard keybindings, so a user can discover the full surface without
 // leaving the terminal. Keep the keybindings in sync with the Go defaults in
 // internal/config (DefaultKeybindings) and the footer hints in internal/tui.
-const helpText = `kmux — a TUI for monitoring parallel AI coding agents (claude, opencode).
+const helpText = `kmux — a TUI for monitoring parallel AI coding agents (claude, opencode, pi).
 
 Each agent runs in its own tmux session. kmux runs as a left sidebar inside a
 kitty window and auto-attaches every matching session into its own pane.
@@ -12,13 +12,14 @@ kitty window and auto-attaches every matching session into its own pane.
 USAGE
   kmux [path]                     Launch the dashboard (needs kitty + tmux).
   kmux --agent <kind> [path]      Launch/attach one agent in the terminal (tmux only).
+  kmux --config [--agent <kind>]  Launch/attach a config session in ~/.config.
   kmux --session <kind> [path]    Print the agent's tmux session name and exit.
   kmux --project                  Print the project dir of the current agent session.
   kmux --help                     Show this help.
 
-  <kind> is 'claude' or 'opencode'. [path] defaults to the current directory and
-  may be a repo, a linked worktree, or any subdirectory of one; it scopes kmux to
-  that single git project.
+  <kind> is 'claude', 'opencode' or 'pi'. [path] defaults to the current
+  directory and may be a repo, a linked worktree, or any subdirectory of one; it
+  scopes kmux to that single git project.
 
 MODES
   Dashboard (default)
@@ -45,6 +46,14 @@ MODES
       kmux --session claude                     # e.g. [kmux][CC]~/git/myproject
       tmux send-keys -t "$(kmux --session claude)" 'hi' Enter
 
+  Config session (--config)
+    Launch an agent (claude by default) in ~/.config. With the sandbox enabled
+    it runs under the config settings file, which lets it edit ~/.config.
+
+  Sandbox
+    With "sandbox: {command: srt}" in the config, every agent runs inside srt and
+    skips its own permission prompts. See docs/configuration.md.
+
   Print the current project dir (--project)
     From inside an agent's tmux session, print its git project directory — for
     scripts bound to tmux keybindings.
@@ -57,7 +66,7 @@ DASHBOARD KEYBINDINGS
 
   Projects panel
     enter                         Launch an agent (pick project, then kind)
-    c / o                         Launch claude / opencode
+    c / o / p                     Launch claude / opencode / pi
     t                             Open kmux for the project in a new kitty tab
     r                             Refresh git status
     f                             Fullscreen the focused agent
@@ -70,7 +79,7 @@ DASHBOARD KEYBINDINGS
     D                             Kill the session
 
   Idle slots (empty launcher columns)
-    c / o                         Pick a project, then launch claude / opencode
+    c / o / p                     Pick a project, then launch claude / opencode / pi
     enter                         Pick a project, then pick the agent kind
     q                             Close a spare idle slot
 

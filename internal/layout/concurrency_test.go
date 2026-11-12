@@ -23,6 +23,10 @@ type fakeKitty struct {
 	// snapshots counts how many times snapshot() ran, so a test can assert the
 	// reconcile spawns one `kitten @ ls` per pass rather than two.
 	snapshots int
+	// unfocused models the dashboard's tab not holding keyboard focus — the user is
+	// in another tab or another app — the state in which ReconcileAll holds new panes
+	// back. Zero value = focused, so every test that doesn't care keeps launching.
+	unfocused bool
 }
 
 func newFakeKitty() *fakeKitty {
@@ -65,12 +69,13 @@ func (f *fakeKitty) liveIDs() (map[int]bool, error) {
 // blank shells). It also counts its calls so a test can assert the reconcile
 // takes exactly one snapshot per pass. The manager calls it under its own lock,
 // so this mirrors the in-lock fetch liveIDs provided before the merge.
-func (f *fakeKitty) snapshot(_ int) (map[int]bool, []kitty.BlankPane, error) {
+func (f *fakeKitty) snapshot(_ int) (map[int]bool, []kitty.BlankPane, bool, error) {
 	f.mu.Lock()
 	f.snapshots++
+	focused := !f.unfocused
 	f.mu.Unlock()
 	live, err := f.liveIDs()
-	return live, nil, err
+	return live, nil, focused, err
 }
 
 // liveSet returns the live ids as a plain set for assertions.
@@ -113,6 +118,7 @@ func installFakeKitty(t *testing.T, f *fakeKitty) {
 	origLive, origCols, origResize := liveWindowIDs, windowColumns, resizeHoriz
 	origSnap := snapshot
 	origHints, origRemove, origTitle := adoptHints, removeAdoptHint, setWindowTitle
+	origCapture, origRestore := captureFocus, restoreFocus
 	launchWindow = f.launch
 	closeWindow = f.close
 	liveWindowIDs = f.liveIDs
@@ -122,11 +128,15 @@ func installFakeKitty(t *testing.T, f *fakeKitty) {
 	adoptHints = f.adoptHints
 	removeAdoptHint = f.removeAdoptHint
 	setWindowTitle = func(_ int, _ string) error { return nil }
+	// Never shell out to the real compositor from a test.
+	captureFocus = func() string { return "" }
+	restoreFocus = func(string) {}
 	t.Cleanup(func() {
 		launchWindow, closeWindow = origLaunch, origClose
 		liveWindowIDs, windowColumns, resizeHoriz = origLive, origCols, origResize
 		snapshot = origSnap
 		adoptHints, removeAdoptHint, setWindowTitle = origHints, origRemove, origTitle
+		captureFocus, restoreFocus = origCapture, origRestore
 	})
 }
 
@@ -153,7 +163,7 @@ func TestReconcileAllSingleSnapshot(t *testing.T) {
 	installFakeKitty(t, f)
 	m := NewManager(100)
 
-	if _, _, errs := m.ReconcileAll([]string{"a", "b"}); len(errs) > 0 {
+	if _, _, _, errs := m.ReconcileAll([]string{"a", "b"}); len(errs) > 0 {
 		t.Fatalf("reconcile errors: %v", errs)
 	}
 	if f.snapshots != 1 {
@@ -174,7 +184,7 @@ func TestReconcileAllConcurrent(t *testing.T) {
 	m := NewManager(100) // sidebar window id 100 (not launched via the fake)
 
 	// Seed three live agent columns, as a steady state would have.
-	if _, _, errs := m.ReconcileAll([]string{"a", "b", "c"}); len(errs) > 0 {
+	if _, _, _, errs := m.ReconcileAll([]string{"a", "b", "c"}); len(errs) > 0 {
 		t.Fatalf("seed reconcile errors: %v", errs)
 	}
 	if len(m.columns) != maxColumns || len(m.placeholders) != 0 {

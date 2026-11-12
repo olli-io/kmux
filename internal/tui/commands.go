@@ -71,9 +71,12 @@ type spinnerMsg struct{}
 // took. scanned marks the reconciles that looked for blanks, so an empty slice
 // means "none" rather than "didn't check".
 type reconciledMsg struct {
-	errs    []error
-	blanks  []kitty.BlankPane
-	scanned bool
+	errs   []error
+	blanks []kitty.BlankPane
+	// scanned reports that the pass got a live kitty snapshot; deferred that it had
+	// panes to open but held them back because the dashboard was unfocused.
+	scanned  bool
+	deferred bool
 }
 
 type launcherCapMsg struct{}
@@ -228,27 +231,16 @@ func activeProjectsCmd(paths []string) tea.Cmd {
 }
 
 // reconcileCmd attaches/detaches agent panes, then pads the layout with
-// placeholders so real agent panes keep a fixed width.
+// placeholders so real agent panes keep a fixed width. Opening a pane pulls kitty
+// to the foreground even with --keep-focus, so the Manager holds new panes back
+// while the dashboard's tab is unfocused; deferred says it did, and the ticker
+// retries every poll.
 func reconcileCmd(mgr *layout.Manager, active []string) tea.Cmd {
 	return func() tea.Msg {
-		// Adding a pane pulls kitty to the macOS foreground even with --keep-focus,
-		// stealing system focus. These spawns are automatic, so capture the frontmost
-		// app first and hand focus back afterwards. Only query when an add is pending;
-		// a stale Attached read at worst omits a restore.
-		var prevApp string
-		for _, s := range active {
-			if !mgr.Attached(s) {
-				prevApp = frontmostApp()
-				break
-			}
-		}
 		// Atomic inside the Manager, so overlapping reconciles serialize instead of
 		// racing the layout into extra slots.
-		changed, blanks, errs := mgr.ReconcileAll(active)
-		if changed && prevApp != "" {
-			restoreFrontmostApp(prevApp)
-		}
-		return reconciledMsg{errs: errs, blanks: blanks, scanned: true}
+		_, deferred, blanks, errs := mgr.ReconcileAll(active)
+		return reconciledMsg{errs: errs, blanks: blanks, scanned: true, deferred: deferred}
 	}
 }
 

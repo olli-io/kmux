@@ -7,6 +7,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/olli-io/kmux/internal/focus"
 	"github.com/olli-io/kmux/internal/idler"
 	"github.com/olli-io/kmux/internal/kitty"
 	"github.com/olli-io/kmux/internal/tmux"
@@ -14,15 +15,17 @@ import (
 
 // Indirection seams over the kitty package so tests can inject a fake backend.
 var (
-	launchWindow       = kitty.Launch
-	closeWindow        = kitty.CloseWindow
-	liveWindowIDs      = kitty.LiveWindowIDs
-	snapshot           = kitty.Snapshot
-	windowColumns      = kitty.WindowColumns
+	launchWindow    = kitty.Launch
+	closeWindow     = kitty.CloseWindow
+	liveWindowIDs   = kitty.LiveWindowIDs
+	snapshot        = kitty.Snapshot
+	windowColumns   = kitty.WindowColumns
 	resizeHoriz     = kitty.ResizeWindowHoriz
 	adoptHints      = idler.ReadAdoptHints
 	removeAdoptHint = idler.RemoveAdoptHint
 	setWindowTitle  = kitty.SetWindowTitle
+	captureFocus    = focus.Frontmost
+	restoreFocus    = focus.Restore
 )
 
 const (
@@ -85,6 +88,11 @@ type Manager struct {
 	columns      [][]int        // up to maxColumns; each is window ids top->bottom
 	placeholders []int          // filler panes padding the layout to maxColumns
 	bySession    map[string]int // session name -> window id
+	// built records that a reconcile pass has completed, which turns the focus gate
+	// on. The first pass is exempt: kmux was just started, and it builds behind a
+	// deliberately focused splash tab, so the dashboard's own tab never holds focus
+	// while the initial layout goes up.
+	built bool
 }
 
 func NewManager(sidebarID int) *Manager {
@@ -119,6 +127,31 @@ func (m *Manager) attached(session string) bool {
 	return ok
 }
 
+// launchPending reports whether reconciling to active will spawn a kitty window:
+// a session with no pane is an add, and a session that has vanished frees a column
+// syncPlaceholders immediately refills with a filler pane. It decides both whether
+// to hold the pass back while unfocused and whether the frontmost-window capture is
+// worth its subprocess. Deliberately approximate in the safe direction — a spurious
+// capture costs one subprocess, a missed one costs the user their focus. The caller
+// must hold mu.
+func (m *Manager) launchPending(active []string) bool {
+	for _, s := range active {
+		if !m.attached(s) {
+			return true
+		}
+	}
+	activeSet := make(map[string]bool, len(active))
+	for _, s := range active {
+		activeSet[s] = true
+	}
+	for s := range m.bySession {
+		if !activeSet[s] {
+			return true
+		}
+	}
+	return len(m.placeholders) < m.placeholderTarget()
+}
+
 // SidebarID returns the sidebar's kitty window id. Fixed at construction, so no
 // lock is needed.
 func (m *Manager) SidebarID() int {
@@ -135,14 +168,41 @@ func (m *Manager) WindowID(session string) (int, bool) {
 // ReconcileAll runs the full layout transaction atomically under the lock, so
 // overlapping passes serialize instead of racing the shared state. The live window
 // set is fetched in-lock so it stays consistent with the serialized manager state.
-func (m *Manager) ReconcileAll(active []string) (changed bool, blanks []kitty.BlankPane, errs []error) {
+// changed reports whether the pass opened or closed any kitty window — placeholder
+// churn included. deferred reports that the pass had windows to open but held them
+// back because the dashboard's tab did not hold keyboard focus; the next poll
+// retries, so focus returning is all it takes to let them through.
+func (m *Manager) ReconcileAll(active []string) (changed, deferred bool, blanks []kitty.BlankPane, errs []error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// One in-lock snapshot feeds both the live-id prune here and the blank-pane list
-	// returned to the caller, a single kitten invocation per poll instead of two.
-	live, blanks, err := snapshot(m.sidebarID)
+	// One in-lock snapshot feeds the live-id prune here, the blank-pane list returned
+	// to the caller, and the focus gate below: a single kitten invocation per poll.
+	live, blanks, focused, err := snapshot(m.sidebarID)
 	if err != nil {
 		live = nil // best-effort: skip the manual-close prune this round
+		// Assume focus rather than stall: a kitten hiccup must not wedge the dashboard
+		// into never attaching anything again.
+		focused = true
+	}
+
+	// Opening a pane pulls kitty to the foreground even with --keep-focus, and
+	// rearranges the splits around wherever the user is typing. So a pass that would
+	// launch while the dashboard's tab doesn't hold focus is held back entirely
+	// rather than interrupting them. The gate is per tab, not per pane: an agent pane
+	// beside the sidebar is a pane the user is already watching kmux from, and the new
+	// split lands in that same tab. Closing panes is not deferred — it steals nothing,
+	// and leaving dead panes up would be worse.
+	focused = focused || !m.built
+	m.built = true
+	pending := m.launchPending(active)
+	deferred = pending && !focused
+
+	// The gate leaves one hole: a pass can take a while (a kitten round trip per
+	// launch), so the user may leave mid-pass. Capture the frontmost window when a
+	// launch is actually coming, and hand focus back if one happened.
+	var prevFocus string
+	if pending && focused {
+		prevFocus = captureFocus()
 	}
 	hints, err := adoptHints()
 	if err != nil {
@@ -159,16 +219,20 @@ func (m *Manager) ReconcileAll(active []string) (changed bool, blanks []kitty.Bl
 		}
 	}
 	achanged := m.adoptInPlace(active, hints, live)
-	changed, errs = m.reconcile(active, live)
+	changed, errs = m.reconcile(active, live, focused)
 	changed = changed || achanged
 	cchanged, cerrs := m.compact()
 	errs = append(errs, cerrs...)
-	pchanged, perrs := m.syncPlaceholders(live)
+	pchanged, perrs := m.syncPlaceholders(live, focused)
 	errs = append(errs, perrs...)
-	if changed || cchanged || pchanged {
+	changed = changed || cchanged || pchanged
+	if changed {
 		errs = append(errs, m.rebalance()...)
 	}
-	return changed, blanks, errs
+	if changed && prevFocus != "" {
+		restoreFocus(prevFocus)
+	}
+	return changed, deferred, blanks, errs
 }
 
 // adoptInPlace binds sessions that launched their agent in place to the kitty window
@@ -232,7 +296,7 @@ func (m *Manager) removePlaceholder(id int) {
 // reconcile makes the live panes match the active session set: attach new sessions,
 // close vanished ones, and prune panes the user closed by hand. Best-effort; the
 // caller must hold mu.
-func (m *Manager) reconcile(active []string, live map[int]bool) (changed bool, errs []error) {
+func (m *Manager) reconcile(active []string, live map[int]bool, canLaunch bool) (changed bool, errs []error) {
 	// Prune panes the user closed by hand so our state stays truthful.
 	if live != nil {
 		for session, id := range m.bySession {
@@ -259,7 +323,12 @@ func (m *Manager) reconcile(active []string, live map[int]bool) (changed bool, e
 		}
 	}
 
-	// Add panes for new sessions (sorted for deterministic column assignment).
+	// Add panes for new sessions (sorted for deterministic column assignment). Held
+	// back wholesale while unfocused; the session stays listed and keeps running, it
+	// just doesn't get its pane until the user is looking at the dashboard's tab.
+	if !canLaunch {
+		return changed, errs
+	}
 	sort.Strings(active)
 	for _, session := range active {
 		if m.attached(session) {
@@ -297,7 +366,9 @@ func (m *Manager) ownsWindow(id int) bool {
 }
 
 // OpenAndSync opens a pane for a manually launched session, then pads and rebalances
-// under the lock so it serializes with reconcile passes.
+// under the lock so it serializes with reconcile passes. Never subject to the focus
+// gate ReconcileAll applies: the user pressed a key in the dashboard to get here, so
+// kitty already has focus and the pane is what they asked for.
 func (m *Manager) OpenAndSync(name, dir, agentCmd string) []error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -308,7 +379,7 @@ func (m *Manager) OpenAndSync(name, dir, agentCmd string) []error {
 	if err != nil {
 		live = nil // best-effort: skip the manual-close prune this round
 	}
-	_, errs := m.syncPlaceholders(live)
+	_, errs := m.syncPlaceholders(live, true)
 	return append(errs, m.rebalance()...)
 }
 
@@ -324,7 +395,7 @@ func (m *Manager) ReattachAndSync(name string) []error {
 	if err != nil {
 		live = nil // best-effort: skip the manual-close prune this round
 	}
-	_, errs := m.syncPlaceholders(live)
+	_, errs := m.syncPlaceholders(live, true)
 	return append(errs, m.rebalance()...)
 }
 
@@ -521,7 +592,7 @@ func (m *Manager) rightmostAnchor() int {
 // syncPlaceholders adds or removes filler panes to converge on placeholderTarget,
 // first pruning placeholders the user closed by hand. Best-effort; the caller must
 // hold mu, and live must be a snapshot taken under that same lock.
-func (m *Manager) syncPlaceholders(live map[int]bool) (changed bool, errs []error) {
+func (m *Manager) syncPlaceholders(live map[int]bool, canLaunch bool) (changed bool, errs []error) {
 	if live != nil {
 		kept := m.placeholders[:0]
 		for _, id := range m.placeholders {
@@ -547,8 +618,10 @@ func (m *Manager) syncPlaceholders(live map[int]bool) (changed bool, errs []erro
 		changed = true
 	}
 
-	// Open missing placeholders as new rightmost columns.
-	for len(m.placeholders) < want {
+	// Open missing placeholders as new rightmost columns. Deferred while unfocused
+	// for the same reason as agent panes: the layout is briefly narrower than usual,
+	// which is a far smaller cost than stealing the user's window.
+	for canLaunch && len(m.placeholders) < want {
 		id, err := launchWindow(kitty.VSplit, m.rightmostAnchor(), 0, placeholderTitle, placeholderCmd()...)
 		if err != nil {
 			errs = append(errs, err)
