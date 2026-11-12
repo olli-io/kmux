@@ -114,6 +114,11 @@ else
   warn "default config.yaml not installed (no local scripts/); editor/lazygit bindings need $DEST/config.yaml."
 fi
 
+if [ -f "$SCRIPT_DIR/scripts/kmux-run" ] && [ -n "$CONFIG_SRC" ]; then
+  info "Installing to $DEST/kmux-run ..."
+  $SUDO install -m 0755 "$SCRIPT_DIR/scripts/kmux-run" "$DEST/kmux-run"
+fi
+
 # ---------------------------------------------------------------------------
 # Deprecate the agent attention hooks.
 # kmux now detects which sessions need you (the Sessions-panel glyph and the kitty

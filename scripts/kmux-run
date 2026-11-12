@@ -1,0 +1,70 @@
+#!/bin/bash
+# kmux-run — run a command outside the agent sandbox, then paste its exit code
+# and output tail into the agent's tmux session.
+#
+# A sandboxed agent cannot reach docker, ssh or the tmux socket. It asks you to
+# paste a kmux-run line into an unsandboxed terminal; the result comes back to
+# the agent as a prompt message. The full log stays in /tmp/kmux-run/, which the
+# sandbox can read.
+#
+# Usage:
+#   kmux-run [-t <tmux-target>] [-k <kind>] [-C <dir>] [-n <lines>] [--] <command...>
+#     -t  tmux target to paste into (default: `kmux --session <kind> <dir>`)
+#     -k  agent kind for the default target (default: claude)
+#     -C  run the command in <dir> (default: current dir)
+#     -n  output lines to paste (default: 60)
+#
+# Ctrl-C stops the command but still pastes the result.
+
+set -u
+
+die() { echo "kmux-run: $*" >&2; exit 2; }
+
+target="" kind=claude dir=$PWD lines=60
+while getopts "t:k:C:n:h" opt; do
+  case $opt in
+    t) target=$OPTARG ;;
+    k) kind=$OPTARG ;;
+    C) dir=$OPTARG ;;
+    n) lines=$OPTARG ;;
+    h) sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;;
+    *) exit 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
+[ $# -gt 0 ] || die "no command"
+cd "$dir" || die "cannot cd to $dir"
+dir=$PWD
+
+if [ -z "$target" ]; then
+  target=$(kmux --session "$kind" "$dir") || die "cannot resolve the $kind session for $dir"
+fi
+tmux has-session -t "$target" 2>/dev/null || die "no tmux session '$target'"
+
+cmd=$*
+mkdir -p /tmp/kmux-run
+log=$(mktemp /tmp/kmux-run/XXXXXXXX.log)
+
+echo "+ $cmd"
+trap ':' INT
+bash -c "$cmd" > >(trap '' INT; exec tee "$log") 2>&1
+rc=$?
+trap - INT
+wait
+
+total=$(wc -l < "$log")
+# Drop ANSI escapes and keep only the last redraw of \r progress lines.
+tail_text=$(sed -e 's/\x1b\[[0-9;?]*[[:alpha:]]//g' -e 's/.*\r//' "$log" | tail -n "$lines")
+
+msg="kmux-run: \`$cmd\` in $dir exited $rc.
+Full log: $log ($total lines). Last $lines lines:
+\`\`\`
+$tail_text
+\`\`\`"
+
+printf '%s' "$msg" | tmux load-buffer -b kmux-run -
+tmux paste-buffer -p -d -b kmux-run -t "$target"
+sleep 0.3
+tmux send-keys -t "$target" Enter
+echo "kmux-run: exit $rc, pasted into $target"
+exit "$rc"
