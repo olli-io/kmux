@@ -2,6 +2,7 @@ package agent
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -218,8 +219,26 @@ func AgentCommand(kind, dir string) string {
 
 var sandboxConfig = sync.OnceValue(func() config.Sandbox {
 	cfg, _ := config.LoadConfig()
-	return cfg.Sandbox
+	sb := cfg.Sandbox
+	sb.Command = resolveRunner(sb.Command)
+	return sb
 })
+
+// resolveRunner makes a bare runner name absolute using kmux's own PATH. The tmux
+// server's PATH can lack the runner's directory (e.g. pnpm's bin, added only by
+// an interactive shell rc), and then the session would exit at once.
+func resolveRunner(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if !(config.Sandbox{Command: cmd}).Enabled() || strings.ContainsAny(cmd, " /") {
+		return cmd
+	}
+	if p, err := exec.LookPath(cmd); err == nil {
+		if abs, err := filepath.Abs(p); err == nil {
+			return abs
+		}
+	}
+	return cmd
+}
 
 // BuildAgentCommand launches with --continue so a respawned session resumes the
 // last conversation, falling back to a plain launch (`<agent> --continue ||
