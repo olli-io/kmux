@@ -7,12 +7,11 @@
 # the agent as a prompt message. The full log stays in /tmp/kmux-run/, which the
 # sandbox can read.
 #
-# Usage:
-#   kmux-run -t <tmux-target> [-C <dir>] [-n <lines>] [--] <command...>
-#     one <command> argument runs as a shell line; several run as an argv
-#     -t  tmux target to paste into (required)
-#     -C  run the command in <dir> (default: current dir)
-#     -n  output lines to paste (default: 60)
+# Usage: kmux-run <id> <command...>
+#   <id>  tmux session of the agent: 7, '$7' or any tmux target
+#   one <command> argument runs as a shell line; several run as an argv
+#   The command runs in the agent pane's current directory.
+#   KMUX_LINES sets how many output lines to paste (default 60).
 #
 # Ctrl-C stops the command but still pastes the result.
 
@@ -20,22 +19,14 @@ set -u
 
 die() { echo "kmux-run: $*" >&2; exit 2; }
 
-target="" dir=$PWD lines=60
-while getopts "t:C:n:h" opt; do
-  case $opt in
-    t) target=$OPTARG ;;
-    C) dir=$OPTARG ;;
-    n) lines=$OPTARG ;;
-    h) sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;;
-    *) exit 2 ;;
-  esac
-done
-shift $((OPTIND - 1))
-[ -n "$target" ] || die "no -t target"
-[ $# -gt 0 ] || die "no command"
-cd "$dir" || die "cannot cd to $dir"
-dir=$PWD
+[ "${1:-}" = -h ] && { sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 0; }
+[ $# -ge 2 ] || die "usage: kmux-run <id> <command...>"
+target=$1; shift
+[[ $target =~ ^[0-9]+$ ]] && target="\$$target"
+lines=${KMUX_LINES:-60}
 tmux has-session -t "$target" 2>/dev/null || die "no tmux session '$target'"
+dir=$(tmux display -p -t "$target" '#{pane_current_path}')
+cd "$dir" || die "cannot cd to $dir"
 
 # One argument is a shell line; several are an argv, run as-is.
 if [ $# -eq 1 ]; then

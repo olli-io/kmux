@@ -122,11 +122,11 @@ terminal, then pastes the exit code and the output tail into the agent's tmux
 session as a prompt message. The full log stays in `/tmp/kmux-run/`.
 
 ```sh
-kmux-run -t '$3' -C ~/git/myproject -- docker ps   # paste into tmux session $3
-kmux-run -t '$3' -n 100 -- ./build.sh              # 100 lines
+kmux-run 3 'docker ps'                    # run in the agent pane's dir, paste into tmux session $3
+KMUX_LINES=100 kmux-run 3 './build.sh'    # paste 100 lines (default 60)
 ```
 
-Ctrl-C stops the command and still pastes the result. `kmux-run -h` lists the flags.
+Ctrl-C stops the command and still pastes the result. `kmux-run -h` shows the usage.
 
 ## Config
 
