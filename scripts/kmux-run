@@ -8,10 +8,9 @@
 # sandbox can read.
 #
 # Usage:
-#   kmux-run [-t <tmux-target>] [-k <kind>] [-C <dir>] [-n <lines>] [--] <command...>
+#   kmux-run -t <tmux-target> [-C <dir>] [-n <lines>] [--] <command...>
 #     one <command> argument runs as a shell line; several run as an argv
-#     -t  tmux target to paste into (default: `kmux --session <kind> <dir>`)
-#     -k  agent kind for the default target (default: claude)
+#     -t  tmux target to paste into (required)
 #     -C  run the command in <dir> (default: current dir)
 #     -n  output lines to paste (default: 60)
 #
@@ -21,11 +20,10 @@ set -u
 
 die() { echo "kmux-run: $*" >&2; exit 2; }
 
-target="" kind=claude dir=$PWD lines=60
-while getopts "t:k:C:n:h" opt; do
+target="" dir=$PWD lines=60
+while getopts "t:C:n:h" opt; do
   case $opt in
     t) target=$OPTARG ;;
-    k) kind=$OPTARG ;;
     C) dir=$OPTARG ;;
     n) lines=$OPTARG ;;
     h) sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 0 ;;
@@ -33,13 +31,10 @@ while getopts "t:k:C:n:h" opt; do
   esac
 done
 shift $((OPTIND - 1))
+[ -n "$target" ] || die "no -t target"
 [ $# -gt 0 ] || die "no command"
 cd "$dir" || die "cannot cd to $dir"
 dir=$PWD
-
-if [ -z "$target" ]; then
-  target=$(kmux --session "$kind" "$dir") || die "cannot resolve the $kind session for $dir"
-fi
 tmux has-session -t "$target" 2>/dev/null || die "no tmux session '$target'"
 
 # One argument is a shell line; several are an argv, run as-is.
@@ -54,11 +49,10 @@ mkdir -p /tmp/kmux-run
 log=$(mktemp /tmp/kmux-run/XXXXXXXX.log)
 
 echo "+ $cmd"
-trap ':' INT
-run "$@" > >(trap '' INT; exec tee "$log") 2>&1
-rc=$?
+trap : INT
+run "$@" 2>&1 | tee -i "$log"
+rc=${PIPESTATUS[0]}
 trap - INT
-wait
 
 total=$(wc -l < "$log")
 # Drop ANSI escapes and keep only the last redraw of \r progress lines.
