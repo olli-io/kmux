@@ -60,8 +60,15 @@ total=$(wc -l < "$log")
 # Drop ANSI escapes and keep only the last redraw of \r progress lines.
 tail_text=$(sed -e 's/\x1b\[[0-9;?]*[[:alpha:]]//g' -e 's/.*\r//' "$log" | tail -n "$lines")
 
+if [ "$total" -gt "$lines" ]; then
+  head_text="Full log: $log ($total lines). Last $lines lines:"
+else
+  head_text="Output:"
+  rm -f -- "$log"
+fi
+
 msg="kmux-run: \`$cmd\` in $dir exited $rc.
-Full log: $log ($total lines). Last $lines lines:
+$head_text
 \`\`\`
 $tail_text
 \`\`\`"
