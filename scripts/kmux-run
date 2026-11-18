@@ -36,6 +36,17 @@ else
   cmd=$(printf '%q ' "$@"); cmd=${cmd% }
   run() { "$@"; }
 fi
+# Show any .sh/.py script the command names, then ask before running it.
+scripts=$(grep -oE "[^[:space:]'\"=;&|()<>]+\.(sh|py)\b" <<<"$cmd" | sort -u)
+if [ -n "$scripts" ]; then
+  while IFS= read -r f; do
+    f=${f/#\~/$HOME}
+    [ -f "$f" ] && { echo "=== $f ==="; cat -- "$f"; echo; }
+  done <<<"$scripts"
+  read -rp "Run \`$cmd\`? [y/N] " ans </dev/tty
+  [[ $ans =~ ^[yY]$ ]] || die "aborted"
+fi
+
 mkdir -p /tmp/kmux-run
 log=$(mktemp /tmp/kmux-run/XXXXXXXX.log)
 
