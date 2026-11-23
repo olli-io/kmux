@@ -9,8 +9,8 @@ import (
 func snapLine(f ...string) string { return strings.Join(f, "\t") + "\n" }
 
 func TestParseSnapshot(t *testing.T) {
-	out := snapLine("%1", "", "", "dash", "", "", "0", "0", "[kmux][dash]~", "/h", "@1", "1", "200", "48", "0", "2", "33", "0", "83", "48") +
-		snapLine("%2", "[kmux][CC]~/a", "/h/a", "", "1", "2", "1", "0", "[kmux][dash]~", "/h", "@1", "1", "200", "48", "0", "2", "33", "0", "83", "48") +
+	out := snapLine("%1", "", "", "dash", "", "", "0", "0", "[kmux][dash]~", "/h", "@1", "1", "200", "48", "0", "2", "33", "0", "83", "48", "1") +
+		snapLine("%2", "[kmux][CC]~/a", "/h/a", "", "1", "2", "1", "0", "[kmux][dash]~", "/h", "@1", "1", "200", "48", "0", "2", "33", "0", "83", "48", "1") +
 		"short\tline\n"
 	got := parseSnapshot(out)
 	if len(got) != 2 {
@@ -18,7 +18,7 @@ func TestParseSnapshot(t *testing.T) {
 	}
 	want := Pane{ID: "%2", Name: "[kmux][CC]~/a", Dir: "/h/a", Attn: true, Col: 2, Index: 1,
 		Session: "[kmux][dash]~", SessDir: "/h", Window: "@1", Grid: "1", WinW: 200, WinH: 48,
-		Panes: 2, X: 33, W: 83, H: 48}
+		Panes: 2, X: 33, W: 83, H: 48, Clients: 1}
 	if !reflect.DeepEqual(got[1], want) {
 		t.Errorf("got %#v\nwant %#v", got[1], want)
 	}

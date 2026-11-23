@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/olli-io/kmux/internal/config"
+	"github.com/olli-io/kmux/internal/grid"
 	"github.com/olli-io/kmux/internal/project"
 	"github.com/olli-io/kmux/internal/tmux"
 )
@@ -219,28 +220,50 @@ func PaneID(path, kind string) (string, error) {
 	return p.ID, nil
 }
 
-// attachAgentSession shows the agent name in the calling terminal. It creates
-// the agent (agentCmd in dir) if there is none. An agent that is in a grid stays
-// there: the terminal then shows that grid with the agent pane selected.
+// attachAgentSession shows only the agent name in the calling terminal, in a
+// tmux session of its own. It creates the agent (agentCmd in dir) if there is
+// none. An agent that is in a kmux grid moves out of the grid first. A dashboard
+// leaves an agent alone while a client shows its session, and takes it back into
+// the grid when that client detaches.
 func attachAgentSession(name, dir, agentCmd string) error {
 	snap, err := tmux.Snapshot()
 	if err != nil {
 		return err
 	}
+	inTmux := os.Getenv("TMUX") != ""
+	show := "attach-session"
+	if inTmux {
+		show = "switch-client"
+	}
+	// Each case is one tmux invocation that ends with the attach, so no dashboard
+	// poll can see the session without its client.
+	var cmds [][]string
 	p, ok := tmux.Agents(snap)[name]
-	if !ok {
-		id, err := tmux.NewAgentSession(name, dir, agentCmd)
+	switch {
+	case !ok && inTmux:
+		cmds = [][]string{
+			{"new-session", "-d", "-s", name, "-c", dir, agentCmd},
+			{"switch-client", "-t", "=" + name},
+		}
+	case !ok:
+		cmds = [][]string{{"new-session", "-A", "-s", name, "-c", dir, agentCmd}}
+	case p.Grid != "":
+		dummy, err := grid.NewDummy(p)
 		if err != nil {
 			return err
 		}
-		p = tmux.Pane{ID: id}
+		cmds = append(grid.ParkCommands(p, dummy), []string{show, "-t", p.ID})
+	default:
+		cmds = [][]string{{show, "-t", p.ID}}
 	}
-	// A pane id is a valid target for a window and for a session.
-	verb := "attach-session"
-	if os.Getenv("TMUX") != "" {
-		verb = "switch-client"
+	var args []string
+	for i, c := range cmds {
+		if i > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, c...)
 	}
-	cmd := exec.Command("tmux", "select-window", "-t", p.ID, ";", "select-pane", "-t", p.ID, ";", verb, "-t", p.ID)
+	cmd := exec.Command("tmux", args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
 }

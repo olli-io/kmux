@@ -53,6 +53,8 @@ type Pane struct {
 	Panes   int // number of panes in the window
 	X, Y    int // pane position in the window
 	W, H    int // pane size
+	// Clients is the number of tmux clients attached to the session.
+	Clients int
 }
 
 // snapshotFields is the list-panes format. The fields are tab-separated.
@@ -62,6 +64,7 @@ var snapshotFields = []string{
 	"#{session_name}", "#{session_path}", "#{window_id}", "#{" + OptGrid + "}",
 	"#{window_width}", "#{window_height}", "#{window_zoomed_flag}", "#{window_panes}",
 	"#{pane_left}", "#{pane_top}", "#{pane_width}", "#{pane_height}",
+	"#{session_attached}",
 }
 
 // Snapshot returns all panes on the server in one tmux call. No server gives an
@@ -91,6 +94,7 @@ func parseSnapshot(out string) []Pane {
 			Session: f[8], SessDir: f[9], Window: f[10], Grid: f[11],
 			WinW: atoi(f[12]), WinH: atoi(f[13]), Zoomed: f[14] == "1", Panes: atoi(f[15]),
 			X: atoi(f[16]), Y: atoi(f[17]), W: atoi(f[18]), H: atoi(f[19]),
+			Clients: atoi(f[20]),
 		})
 	}
 	return panes

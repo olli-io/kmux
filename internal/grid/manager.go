@@ -89,12 +89,7 @@ func (m *Manager) reconcile(snap []tmux.Pane, seq int64, want []string, closing 
 	var errs []error
 	dummies := map[string]string{}
 	for _, p := range s.parks {
-		// The temporary name is not an agent name, so no poll takes the dummy for
-		// an agent. The plan gives the session the agent name.
-		id, err := newHidden("kmux-park-"+strings.TrimPrefix(p.ID, "%"), p.Dir, dummyCmd)
-		if err == nil {
-			err = setOpts(id, tmux.OptRole, RoleDummy)
-		}
+		id, err := NewDummy(p)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("detach %s: %w", p.Name, err))
 			continue
@@ -173,4 +168,15 @@ func Zoom(p tmux.Pane) error {
 		{"select-pane", "-t", p.ID},
 		{"resize-pane", "-Z", "-t", p.ID},
 	})
+}
+
+// NewDummy makes the hidden session and pane that ParkCommands needs for the
+// agent pane p, and returns the pane id. The temporary session name is not an
+// agent name, so no poll takes the dummy for an agent.
+func NewDummy(p tmux.Pane) (string, error) {
+	id, err := newHidden("kmux-park-"+strings.TrimPrefix(p.ID, "%"), p.Dir, dummyCmd)
+	if err != nil {
+		return "", err
+	}
+	return id, setOpts(id, tmux.OptRole, RoleDummy)
 }

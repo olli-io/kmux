@@ -91,6 +91,9 @@ func analyse(snap []tmux.Pane, win string, want []string) *state {
 			}
 		case p.Role == tmux.RoleFiller && p.Grid == "" && hiddenFiller == nil:
 			hiddenFiller = &outside[i]
+		case p.Name != "" && p.Clients > 0:
+			// A client shows this agent's own session (`kmux --agent` or a manual
+			// attach). The agent comes into the grid when that client detaches.
 		case p.Name != "" && p.Grid == "" && wanted[p.Name] && !present[p.Name]:
 			pending = append(pending, p.ID)
 			present[p.Name] = true
@@ -186,13 +189,7 @@ func (s *state) commands(dummies map[string]string, filler string) Plan {
 		if d == "" {
 			continue
 		}
-		// After the swap the agent is the only pane of the dummy's session. That
-		// session then gets the agent name.
-		cmds = append(cmds,
-			[]string{"swap-pane", "-d", "-s", p.ID, "-t", d},
-			[]string{"kill-pane", "-t", d},
-			[]string{"rename-session", "-t", p.ID, p.Name},
-			tmux.SetPaneOption(p.ID, tmux.OptCol, ""))
+		cmds = append(cmds, ParkCommands(p, d)...)
 		order = remove(order, p.ID)
 	}
 
@@ -282,4 +279,16 @@ func (s *state) signature() string {
 	}
 	sort.Strings(ids)
 	return fmt.Sprintf("%dx%d %s", s.dash.WinW, s.dash.WinH, strings.Join(ids, " "))
+}
+
+// ParkCommands returns the commands that move an agent pane out of a grid into
+// a session of its own. dummy is a pane from NewDummy. After the swap the agent
+// is the only pane of the dummy's session; that session then gets the agent name.
+func ParkCommands(p tmux.Pane, dummy string) [][]string {
+	return [][]string{
+		{"swap-pane", "-d", "-s", p.ID, "-t", dummy},
+		{"kill-pane", "-t", dummy},
+		{"rename-session", "-t", p.ID, p.Name},
+		tmux.SetPaneOption(p.ID, tmux.OptCol, ""),
+	}
 }

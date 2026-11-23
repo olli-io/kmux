@@ -76,8 +76,9 @@ kmux ~/git/myproject   # or: cd into the repo and run `kmux .`
 
 With `--agent`, kmux skips the dashboard and creates (or attaches to) the tmux
 session for one agent in the project containing the given path, attaching it to
-the current terminal. If the agent is in a kmux grid, the terminal shows that
-grid with the agent pane selected:
+the current terminal. The terminal shows only that agent. If the agent is in a
+kmux grid, it moves out of the grid; when you detach, the dashboard takes it
+back into the grid:
 
 ```sh
 kmux ~/git/myproject --agent claude     # path then flag

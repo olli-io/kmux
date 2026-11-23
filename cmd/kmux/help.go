@@ -33,8 +33,8 @@ MODES
 
   Launch an agent directly (--agent)
     Skip the dashboard and create (or attach to) the tmux session for one agent,
-    attached to the current terminal. The session name matches the dashboard's
-    convention, so opening kmux later moves this agent into the grid.
+    attached to the current terminal. The terminal shows only that agent. An
+    agent in a kmux grid moves out of it, and goes back in when you detach.
 
       kmux ~/git/myproject --agent claude
       kmux --agent opencode ~/git/myproject

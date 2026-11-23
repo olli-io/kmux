@@ -200,3 +200,12 @@ func TestLeftoverDummyIsKilled(t *testing.T) {
 		t.Errorf("kills = %v", s.kills)
 	}
 }
+
+func TestAgentWithClientStaysOut(t *testing.T) {
+	p := parked("%2", "A")
+	p.Clients = 1
+	s := analyse([]tmux.Pane{dash(), p}, win, []string{"A"})
+	if len(s.cols) != 0 {
+		t.Errorf("cols = %v, want none: a client shows the agent's own session", s.cols)
+	}
+}
