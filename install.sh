@@ -110,6 +110,13 @@ if [ -f "$SCRIPT_DIR/scripts/kmux-run" ] && [ -n "$CONFIG_SRC" ]; then
   $SUDO install -m 0755 "$SCRIPT_DIR/scripts/kmux-run" "$DEST/kmux-run"
 fi
 
+# The launcher runs in the free column of the grid. kmux looks for it beside the
+# binary; without it the free column shows a static text.
+if [ -f "$SCRIPT_DIR/scripts/kmux-launcher" ] && [ -n "$CONFIG_SRC" ]; then
+  info "Installing to $DEST/kmux-launcher ..."
+  $SUDO install -m 0755 "$SCRIPT_DIR/scripts/kmux-launcher" "$DEST/kmux-launcher"
+fi
+
 # ---------------------------------------------------------------------------
 # Deprecate the agent attention hooks.
 # kmux now detects which sessions need you (the Sessions-panel glyph and the

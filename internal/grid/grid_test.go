@@ -111,6 +111,15 @@ func TestPlanAttach(t *testing.T) {
 	}
 }
 
+func TestPlanLauncherFillerTakesInput(t *testing.T) {
+	s := analyse([]tmux.Pane{dash(), parked("%2", "A")}, win, []string{"A"})
+	s.launcher = true
+	got := strings.Join(flat(s.commands(nil, "%9").Cmds), "\n")
+	if !strings.Contains(got, "select-pane -e -t %9") || strings.Contains(got, "select-pane -d") {
+		t.Errorf("got:\n%s", got)
+	}
+}
+
 func TestPlanStable(t *testing.T) {
 	d := dash()
 	a, b, c := agent("%2", "A", 1, 1), agent("%3", "B", 2, 2), agent("%4", "C", 3, 3)

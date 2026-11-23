@@ -27,6 +27,8 @@ type state struct {
 	geom   map[string]string // current "WxH,X,Y" of each pane in the window
 	zoomed bool
 	unzoom bool // end a zoom to apply the plan (used when the dashboard stops)
+	// launcher is true when the filler runs an interactive program.
+	launcher bool
 }
 
 func (s *state) needFiller() bool { return len(s.cols) < maxColumns }
@@ -223,7 +225,12 @@ func (s *state) commands(dummies map[string]string, filler string) Plan {
 		order = append(order[:i], append([]string{want[i]}, order[i:]...)...)
 	}
 	if filler != "" && (s.filler == nil || s.filler.Window != s.win) {
-		cmds = append(cmds, []string{"select-pane", "-d", "-t", filler})
+		// -d disables the input of the pane, -e enables it.
+		input := "-d"
+		if s.launcher {
+			input = "-e"
+		}
+		cmds = append(cmds, []string{"select-pane", input, "-t", filler})
 	}
 	for c, col := range s.cols {
 		for _, id := range col {

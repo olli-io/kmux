@@ -266,9 +266,16 @@ func setSessionAttnCmd(p tmux.Pane, session string, needsAttention bool) tea.Cmd
 		if needsAttention {
 			mark = "1"
 		}
+		if p.ID == "" {
+			return nil // the agent is gone; an empty target is the dashboard itself
+		}
 		_ = tmux.SetPaneOptions(p.ID, tmux.OptAttn, mark)
-		if p.Grid == "" { // a parked agent has its own session
-			_ = tmux.RenameSession(p.ID, agent.AttnSession(session, needsAttention))
+		// A parked agent has its own session. p can be out of date: a grid pass can
+		// move the pane into the dashboard's session after the snapshot. Thus the
+		// target is the exact name of the agent's session, not the pane. If the
+		// agent is in a grid now, that session is gone and tmux does nothing.
+		if p.Grid == "" && tmux.IsAgentSession(p.Session) {
+			_ = tmux.RenameSession("="+p.Session, agent.AttnSession(session, needsAttention))
 		}
 		return nil
 	}

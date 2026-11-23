@@ -28,6 +28,10 @@ type ParsedArgs struct {
 	// config dir (~/.config), sandboxed with the config settings that let it write
 	// there.
 	Config bool
+	// PrintProjects prints the directories in which an agent can start, one on
+	// each line. Launch starts the agent without a client, for the launcher.
+	PrintProjects bool
+	Launch        bool
 }
 
 // ParseArgs routes the kmux command line. Flags accept either `--flag claude` or
@@ -66,6 +70,16 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 			pa.Agent, pa.PrintPane = args[i], true
 		case strings.HasPrefix(a, "--pane="):
 			pa.Agent, pa.PrintPane = strings.TrimPrefix(a, "--pane="), true
+		case a == "--projects", a == "-projects":
+			pa.PrintProjects = true
+		case a == "--launch", a == "-launch":
+			if i+1 >= len(args) {
+				return pa, fmt.Errorf("--launch requires a value (%s)", KindList())
+			}
+			i++
+			pa.Agent, pa.Launch = args[i], true
+		case strings.HasPrefix(a, "--launch="):
+			pa.Agent, pa.Launch = strings.TrimPrefix(a, "--launch="), true
 		case a == "--config", a == "-config":
 			pa.Config = true
 		case strings.HasPrefix(a, "-"):
@@ -84,7 +98,7 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 		if pa.Path != "" {
 			return pa, fmt.Errorf("--config takes no path: it always opens %s", "~/.config")
 		}
-		if pa.PrintSession || pa.PrintProject || pa.PrintPane {
+		if pa.PrintSession || pa.PrintProject || pa.PrintPane || pa.PrintProjects || pa.Launch {
 			return pa, fmt.Errorf("--config only combines with --agent")
 		}
 		base, err := config.UserConfigBase()
@@ -111,6 +125,54 @@ func RunAgent(path, kind string) error {
 		return err
 	}
 	return attachAgentSession(name, dir, AgentCommand(kind, dir))
+}
+
+// LaunchDirs returns the directories in which an agent can start: each project,
+// then its linked worktrees. A non-empty path gives only the project of path.
+func LaunchDirs(path string) ([]string, error) {
+	var projects []project.Project
+	if path != "" {
+		p, err := project.ScanProject(path)
+		if err != nil {
+			return nil, err
+		}
+		projects = []project.Project{*p}
+	} else {
+		var err error
+		if projects, err = project.ScanProjects(); err != nil {
+			return nil, err
+		}
+	}
+	var dirs []string
+	for _, p := range projects {
+		dirs = append(dirs, p.Path)
+		for _, w := range p.Worktrees {
+			dirs = append(dirs, w.Path)
+		}
+	}
+	return dirs, nil
+}
+
+// Launch starts the agent for path in a session of its own, with no client. A
+// dashboard moves the agent into its grid on its subsequent poll. An agent that
+// is in a grid already gets the focus.
+func Launch(path, kind string) error {
+	name, dir, err := sessionPlan(path, kind)
+	if err != nil {
+		return err
+	}
+	snap, err := tmux.Snapshot()
+	if err != nil {
+		return err
+	}
+	if p, ok := tmux.Agents(snap)[name]; ok {
+		if p.Grid == "" {
+			return fmt.Errorf("%s runs already, out of the grid", name)
+		}
+		return grid.Focus(p)
+	}
+	_, err = tmux.NewAgentSession(name, dir, AgentCommand(kind, dir))
+	return err
 }
 
 // SessionName returns the exact name RunAgent would create for path, so other

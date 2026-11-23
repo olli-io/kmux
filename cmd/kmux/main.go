@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -56,6 +57,22 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println(dir)
+		return
+	}
+	if pa.PrintProjects {
+		dirs, err := agent.LaunchDirs(pa.Path)
+		if err != nil {
+			fail(err)
+		}
+		for _, d := range dirs {
+			fmt.Println(d)
+		}
+		return
+	}
+	if pa.Launch {
+		if err := agent.Launch(pa.Path, pa.Agent); err != nil {
+			fail(err)
+		}
 		return
 	}
 	if pa.Agent != "" {
@@ -113,6 +130,9 @@ func runDashboard(pathArg string) {
 	if err != nil {
 		fail(err)
 	}
+	mgr.SetLauncher(launcherCmd(scopeDir))
+	// The mark lets a later `kmux` find this dashboard when its session name changed.
+	_ = tmux.SetPaneOptions(pane, tmux.OptDash, agent.DashTabTitle(scopeDir, false))
 	// The dashboard declares its own terminal state (alt screen, focus reporting)
 	// on the tea.View it returns, so the program needs no options here.
 	p := tea.NewProgram(tui.NewModel(mgr, scopeDir))
@@ -140,9 +160,19 @@ func execInTmux(scopeDir string) error {
 		line += " " + shellQuote(scopeDir)
 	}
 	name := agent.DashTabTitle(scopeDir, false)
+	snap, snapErr := tmux.Snapshot()
+	// A dashboard for this scope runs already. Attach to its session, whatever
+	// the name of that session is now, and give the session its name back.
+	if dash, rename := runningDash(snap, name); dash != "" {
+		args := []string{"tmux"}
+		if rename {
+			args = append(args, "rename-session", "-t", dash, name, ";")
+		}
+		return syscall.Exec(tmuxPath, append(args, "attach-session", "-t", dash), os.Environ())
+	}
 	// A dashboard that stopped without its cleanup leaves its session with the
 	// agent panes but no dashboard. Start a new dashboard pane in that window.
-	if snap, err := tmux.Snapshot(); err == nil {
+	if snapErr == nil {
 		var orphan *tmux.Pane
 		hasDash := false
 		for i, p := range snap {
@@ -161,6 +191,45 @@ func execInTmux(scopeDir string) error {
 		}
 	}
 	return syscall.Exec(tmuxPath, []string{"tmux", "new-session", "-A", "-s", name, "-n", name, line}, os.Environ())
+}
+
+// launcherCmd returns the command of the launcher pane: the kmux-launcher script
+// that is installed beside the binary. It returns "" when there is no script.
+func launcherCmd(scopeDir string) string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		exe = resolved
+	}
+	script := filepath.Join(filepath.Dir(exe), "kmux-launcher")
+	if info, err := os.Stat(script); err != nil || info.IsDir() {
+		return ""
+	}
+	// env makes the line independent of the syntax of the user's shell.
+	return "exec env KMUX=" + shellQuote(exe) +
+		" KMUX_SCOPE=" + shellQuote(scopeDir) +
+		" KMUX_KINDS=" + shellQuote(strings.Join(agent.KindNames(), " ")) +
+		" " + shellQuote(script)
+}
+
+// runningDash returns the pane of the live dashboard that has the session name
+// name, or "". rename is true when the session of that pane has a different
+// name now and name is free.
+func runningDash(snap []tmux.Pane, name string) (pane string, rename bool) {
+	taken := false
+	var dash *tmux.Pane
+	for i, p := range snap {
+		taken = taken || p.Session == name
+		if dash == nil && !p.Dead && p.Role == tmux.RoleDash && p.Dash == name {
+			dash = &snap[i]
+		}
+	}
+	if dash == nil {
+		return "", false
+	}
+	return dash.ID, dash.Session != name && !taken
 }
 
 func shellQuote(s string) string {

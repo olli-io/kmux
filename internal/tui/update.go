@@ -235,13 +235,9 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case config.ActionNextItem, config.ActionNextItemAlt:
-		if m.cursor < len(rows)-1 {
-			m.cursor++
-		}
+		m.moveCursor(rows, 1)
 	case config.ActionPrevItem, config.ActionPrevItemAlt:
-		if m.cursor > 0 {
-			m.cursor--
-		}
+		m.moveCursor(rows, -1)
 
 	case config.ActionNextPanel, config.ActionNextPanelAlt:
 		m.focusPanel(rows, true)
@@ -342,6 +338,32 @@ func (m *model) refreshProjectsCmd() tea.Cmd {
 	}
 	m.scanning = true
 	return projectsCmd(m.scopeDir)
+}
+
+// moveCursor moves the cursor one row in display order. The dashboard shows the
+// Projects panel above the Sessions panel, but rows holds the session rows first.
+// Thus the move goes from the last project row down to the first session row,
+// and back. It stops at the top and at the bottom.
+func (m *model) moveCursor(rows []row, delta int) {
+	nSess := 0
+	for nSess < len(rows) && rows[nSess].section == sectionSessions {
+		nSess++
+	}
+	nProj := len(rows) - nSess
+	// Display index: project rows first, then session rows.
+	v := m.cursor + nProj
+	if m.cursor >= nSess {
+		v = m.cursor - nSess
+	}
+	v += delta
+	if v < 0 || v >= len(rows) {
+		return
+	}
+	if v < nProj {
+		m.cursor = v + nSess
+	} else {
+		m.cursor = v - nProj
+	}
 }
 
 // focusPanel moves the cursor to the start of the previous or next panel. It's

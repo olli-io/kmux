@@ -16,6 +16,8 @@ USAGE
   kmux --session <kind> [path]    Print the agent's tmux session name and exit.
   kmux --pane <kind> [path]       Print the tmux pane id of the running agent.
   kmux --project                  Print the project dir of the current agent session.
+  kmux --projects [path]          Print the dirs in which an agent can start.
+  kmux --launch <kind> [path]     Start one agent with no client; a dashboard takes it.
   kmux --help                     Show this help.
 
   <kind> is 'claude', 'opencode' or 'pi'. [path] defaults to the current
@@ -66,7 +68,7 @@ MODES
 
 DASHBOARD KEYBINDINGS
   Navigation
-    j / k, ↓ / ↑                  Move within a panel
+    j / k, ↓ / ↑                  Move through the rows of the two panels
     h / l, ← / →                  Switch panel
     1 / 2                         Focus Projects / Sessions panel
 

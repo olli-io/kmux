@@ -38,6 +38,15 @@ type Manager struct {
 	// not apply a layout exactly, the same request must not go out on each poll.
 	lastWant, lastSeen string
 	seq                atomic.Int64 // number of passes that changed tmux
+	launcher           string       // command of the filler pane; "" = fillerCmd
+}
+
+// SetLauncher makes the filler pane run cmd, an interactive program, in place
+// of the static text. An empty cmd changes nothing.
+func (m *Manager) SetLauncher(cmd string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.launcher = cmd
 }
 
 // New makes the window of the dashboard pane a grid window.
@@ -99,6 +108,11 @@ func (m *Manager) reconcile(snap []tmux.Pane, seq int64, want []string, closing 
 		return false, nil
 	}
 
+	fill := fillerCmd
+	if s.launcher = m.launcher != ""; s.launcher {
+		fill = m.launcher
+	}
+
 	// Make the necessary panes out of view. The plan then moves them into view.
 	var errs []error
 	dummies := map[string]string{}
@@ -116,7 +130,7 @@ func (m *Manager) reconcile(snap []tmux.Pane, seq int64, want []string, closing 
 	case s.filler != nil:
 		filler = s.filler.ID
 	default:
-		id, err := newHidden("", "", fillerCmd)
+		id, err := newHidden("", "", fill)
 		if err == nil {
 			err = setOpts(id, tmux.OptRole, tmux.RoleFiller)
 		}

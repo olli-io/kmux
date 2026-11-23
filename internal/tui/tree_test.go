@@ -127,3 +127,25 @@ func TestBuildSessionRows(t *testing.T) {
 		}
 	}
 }
+
+func TestMoveCursorCrossesPanelsInDisplayOrder(t *testing.T) {
+	// rows holds the session rows first; the display shows the projects first.
+	rows := []row{
+		{section: sectionSessions}, {section: sectionSessions},
+		{section: sectionProjects}, {section: sectionProjects},
+	}
+	steps := []struct{ from, delta, want int }{
+		{2, 1, 3},  // in Projects
+		{3, 1, 0},  // last project -> first session
+		{0, -1, 3}, // first session -> last project
+		{1, 1, 1},  // bottom: stop
+		{2, -1, 2}, // top: stop
+	}
+	for _, s := range steps {
+		m := model{cursor: s.from}
+		m.moveCursor(rows, s.delta)
+		if m.cursor != s.want {
+			t.Errorf("from %d delta %d: got %d, want %d", s.from, s.delta, m.cursor, s.want)
+		}
+	}
+}

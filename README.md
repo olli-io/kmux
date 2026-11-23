@@ -60,8 +60,11 @@ kmux ~/git/myproject   # or: cd into the repo and run `kmux .`
 
 - The grid has three columns. Columns fill from the left. A fourth agent goes
   below the agent in the shortest column.
-- Columns that are not in use show one inert `free column` pane. It keeps the
-  agent panes at a fixed width. It accepts no input.
+- Columns that are not in use show one launcher pane. It keeps the agent panes
+  at a fixed width. Press Enter in it, select a project, then an agent kind:
+  the agent starts and goes into the grid. The launcher is the `kmux-launcher`
+  script beside the binary; it uses `fzf` if that is installed. Without the
+  script, the pane shows the static text `free column` and accepts no input.
 - Each pane has a title line with the agent name. A `[!!]` mark shows that the
   agent waits for an answer. The window name gets the same mark.
 - `d` moves an agent out of the grid into a session of its own; the agent

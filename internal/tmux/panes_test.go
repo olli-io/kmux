@@ -9,8 +9,8 @@ import (
 func snapLine(f ...string) string { return strings.Join(f, "\t") + "\n" }
 
 func TestParseSnapshot(t *testing.T) {
-	out := snapLine("%1", "", "", "dash", "", "", "0", "0", "[kmux][dash]~", "/h", "@1", "1", "200", "48", "0", "2", "33", "0", "83", "48", "1") +
-		snapLine("%2", "[kmux][CC]~/a", "/h/a", "", "1", "2", "1", "0", "[kmux][dash]~", "/h", "@1", "1", "200", "48", "0", "2", "33", "0", "83", "48", "1") +
+	out := snapLine("%1", "", "", "dash", "", "", "0", "0", "[kmux][dash]~", "/h", "@1", "1", "200", "48", "0", "2", "33", "0", "83", "48", "1", "[kmux][dash]~") +
+		snapLine("%2", "[kmux][CC]~/a", "/h/a", "", "1", "2", "1", "0", "[kmux][dash]~", "/h", "@1", "1", "200", "48", "0", "2", "33", "0", "83", "48", "1", "") +
 		"short\tline\n"
 	got := parseSnapshot(out)
 	if len(got) != 2 {
@@ -22,7 +22,7 @@ func TestParseSnapshot(t *testing.T) {
 	if !reflect.DeepEqual(got[1], want) {
 		t.Errorf("got %#v\nwant %#v", got[1], want)
 	}
-	if got[0].Role != RoleDash {
+	if got[0].Role != RoleDash || got[0].Dash != "[kmux][dash]~" {
 		t.Errorf("role = %q, want dash", got[0].Role)
 	}
 }

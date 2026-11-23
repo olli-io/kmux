@@ -71,6 +71,9 @@ func TestParseArgs(t *testing.T) {
 		{"project", []string{"--project"}, ParsedArgs{PrintProject: true}, false},
 		{"project equals form", []string{"-project"}, ParsedArgs{PrintProject: true}, false},
 		{"pane", []string{"--pane", "claude"}, ParsedArgs{Agent: "claude", PrintPane: true}, false},
+		{"projects", []string{"--projects", "x"}, ParsedArgs{Path: "x", PrintProjects: true}, false},
+		{"launch", []string{"--launch", "pi", "x"}, ParsedArgs{Path: "x", Agent: "pi", Launch: true}, false},
+		{"launch bad kind", []string{"--launch", "nope"}, ParsedArgs{Agent: "nope", Launch: true}, true},
 		{"pane equals", []string{"--pane=pi", "x"}, ParsedArgs{Path: "x", Agent: "pi", PrintPane: true}, false},
 		// The --attn hook flags were removed when attention detection moved fully to
 		// pane text; --attn is now just an unknown flag.
