@@ -21,6 +21,9 @@ type model struct {
 	projects  []project.Project
 	collapsed map[string]bool // collapse key -> collapsed
 	detached  map[string]bool // session name -> out of the grid (agent still running)
+	// noClient counts consecutive checks with no tmux client on the dashboard's
+	// session (see clientsMsg).
+	noClient int
 	// panes maps each agent name to its tmux pane, from the last poll.
 	panes map[string]tmux.Pane
 	// lastIdle is the idle-clock snapshot of the last state save, so the state

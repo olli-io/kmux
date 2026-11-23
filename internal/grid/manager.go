@@ -3,6 +3,7 @@ package grid
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,6 +54,15 @@ func New(dashPane, win string) (*Manager, error) {
 	return &Manager{win: win, dash: dashPane}, nil
 }
 
+// Clients returns the number of tmux clients that show the dashboard's session.
+func (m *Manager) Clients() (int, error) {
+	out, err := tmux.Display(m.dash, "#{session_attached}")
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(out))
+}
+
 // Window returns the id of the grid window.
 func (m *Manager) Window() string { return m.win }
 
@@ -83,6 +93,10 @@ func (m *Manager) reconcile(snap []tmux.Pane, seq int64, want []string, closing 
 	}
 	if s.unzoom = closing; s.zoomed && !closing {
 		return false, nil // a layout change would end the zoom
+	}
+	if s.dash.Clients == 0 && !closing {
+		// No terminal shows this grid. A grid out of view must not take agents.
+		return false, nil
 	}
 
 	// Make the necessary panes out of view. The plan then moves them into view.

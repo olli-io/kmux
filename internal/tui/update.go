@@ -35,7 +35,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Skip firing a scan while one is still in flight so a slow scan can't stack
 		// concurrent copies; always re-arm the ticker. Recurring ticks rescan only the
 		// active projects; scoped mode rescans its single project.
-		cmd := projectTickCmd()
+		// This slow tick also checks that a terminal still shows the dashboard. It
+		// runs when the pane has no focus too, because a closed terminal gives none.
+		cmd := tea.Batch(projectTickCmd(), clientsCmd(m.mgr))
 		if !m.scanning {
 			switch {
 			case m.scopeDir != "":
@@ -160,6 +162,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// marker; any other state (including a session that left the poll) clears it.
 		cmds = append(cmds, m.sessionAttnCmds(msg.states)...)
 		return m, tea.Batch(cmds...)
+
+	case clientsMsg:
+		// The terminal of the dashboard was closed or detached. tmux keeps the
+		// session, so kmux would continue out of view and hold the agents in a grid
+		// that nobody sees. Stop instead: each agent goes into its own session.
+		if msg.err != nil || msg.n > 0 {
+			m.noClient = 0
+			return m, nil
+		}
+		if m.noClient++; m.noClient >= noClientChecks {
+			_ = m.mgr.Close()
+			return m, tea.Quit
+		}
+		return m, nil
 
 	case focusedMsg:
 		if msg.err != nil {

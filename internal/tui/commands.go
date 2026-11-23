@@ -74,6 +74,17 @@ type attentionMsg struct {
 	hashes map[string]uint64 // session name -> pane fingerprint, for idle tracking
 }
 type focusedMsg struct{ err error }
+
+// clientsMsg carries the number of tmux clients on the dashboard's session.
+type clientsMsg struct {
+	n   int
+	err error
+}
+
+// noClientChecks is the number of consecutive checks without a client after
+// which the dashboard stops. One check can fall in a short client change.
+const noClientChecks = 2
+
 type savedMsg struct{ err error }
 
 // commandErrMsg drives the dismissible error float.
@@ -211,6 +222,14 @@ func reconcileCmd(mgr *grid.Manager, snap []tmux.Pane, seq int64, active []strin
 			return pollSessions(mgr)
 		}
 		return reconciledMsg{}
+	}
+}
+
+// clientsCmd reads the number of clients on the dashboard's session.
+func clientsCmd(mgr *grid.Manager) tea.Cmd {
+	return func() tea.Msg {
+		n, err := mgr.Clients()
+		return clientsMsg{n: n, err: err}
 	}
 }
 

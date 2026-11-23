@@ -71,6 +71,8 @@ kmux ~/git/myproject   # or: cd into the repo and run `kmux .`
 - A pane that you split in the grid window yourself gets a cell in the grid.
 - To move between panes, use your tmux keys.
 - When kmux stops, each agent goes into a session of its own and continues to run.
+- kmux stops when no terminal shows it: about 10 seconds after you close its
+  terminal or detach from its tmux session.
 
 ## Launch an agent directly
 
