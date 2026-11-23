@@ -236,7 +236,7 @@ func (m model) render() string {
 		focused = r.section
 	}
 
-	contentWidth := m.width - 2 // inside the vertical borders
+	contentWidth := m.width - 2 // one blank column at each side, below the corners
 	if contentWidth < 1 {
 		contentWidth = 1
 	}
@@ -273,7 +273,7 @@ func (m model) render() string {
 
 	// Reserve the bottom rows for the keybind panel, but drop it on very short
 	// terminals so the lists keep usable height.
-	hh := m.helpHeight() + 2
+	hh := m.helpHeight() + 1 // + the top bar
 	avail := m.height - hh
 	if avail < 6 { // two list panels need 3 rows each; drop help before starving them
 		hh, avail = 0, m.height
@@ -294,11 +294,12 @@ func (m model) render() string {
 	if m.scopeName != "" {
 		projTitle = "[1]─Project · " + m.scopeName
 	}
-	sessions := panel("[2]─Sessions", sLines, m.width, sh, focused == sectionSessions)
-	projects := panel(projTitle, pLines, m.width, ph, focused == sectionProjects)
+	sessions := openPanel("[2]─Sessions", sLines, m.width, sh, focused == sectionSessions, true)
+	projects := openPanel(projTitle, pLines, m.width, ph, focused == sectionProjects, true)
 	parts := []string{projects, sessions}
 	if hh > 0 {
-		parts = append(parts, panel("Keys", m.renderHelp(focused), m.width, hh, false))
+		// The Keys section never has the focus; its text stays at full color.
+		parts = append(parts, openPanel("Keys", m.renderHelp(focused), m.width, hh, false, false))
 	}
 	frame := lipgloss.JoinVertical(lipgloss.Left, parts...)
 
@@ -452,6 +453,60 @@ func selectLine(line string, width int) string {
 	return selectedStyle.Render(padCell(line, width))
 }
 
+// faintOpenSeq starts faint text. It mutes all colors of a line by the same degree.
+const faintOpenSeq = "\x1b[2m"
+
+// faintLine mutes a line. Inner styled segments each end with a reset that also
+// clears the faint attribute, so it is re-emitted after every reset.
+func faintLine(line string) string {
+	return faintOpenSeq + strings.ReplaceAll(line, ansi.ResetStyle, ansi.ResetStyle+faintOpenSeq) + ansi.ResetStyle
+}
+
+// openPanel draws a dashboard section: a top bar with the title and the two top
+// corners, then the body with no side or bottom border. width x height includes
+// the top bar. The bar of a section without the focus is grey; with mute, its
+// title and body text are also slightly muted.
+func openPanel(title string, body []string, width, height int, focused, mute bool) string {
+	bs := lipgloss.NewStyle()
+	ts := lipgloss.NewStyle().Bold(true)
+	if !focused {
+		bs = bs.Foreground(borderIdle)
+		if mute {
+			ts = ts.Faint(true)
+		}
+	}
+	inner := width - 2 // columns between the corners
+	if inner < 1 {
+		inner = 1
+	}
+	out := make([]string, 0, height)
+	out = append(out, topBar(title, inner, bs, ts))
+	for i := 0; i < height-1; i++ {
+		var raw string
+		if i < len(body) {
+			raw = body[i]
+		}
+		line := " " + padCell(raw, inner) + " "
+		if mute && !focused {
+			line = faintLine(line)
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+// topBar draws a top border of inner+2 columns with the title in it: ╭─title───╮
+func topBar(title string, inner int, bs, ts lipgloss.Style) string {
+	if maxTitle := inner - 2; maxTitle >= 1 && lipgloss.Width(title) > maxTitle {
+		title = ansi.Truncate(title, maxTitle, "…")
+	}
+	fill := inner - lipgloss.Width(title) - 1 // leading "─" before the title
+	if fill < 0 {
+		fill = 0
+	}
+	return bs.Render("╭─") + ts.Render(title) + bs.Render(strings.Repeat("─", fill)+"╮")
+}
+
 // panel draws a rounded, titled box (lazygit-style: title in the top border, color
 // reflecting focus) sized to width x height. width and height include the border.
 func panel(title string, body []string, width, height int, focused bool) string {
@@ -473,15 +528,7 @@ func box(title string, body []string, width, height int, bs, ts lipgloss.Style) 
 		inner = 1
 	}
 
-	// Top border with the title embedded: ╭─title───╮
-	if maxTitle := inner - 2; maxTitle >= 1 && lipgloss.Width(title) > maxTitle {
-		title = ansi.Truncate(title, maxTitle, "…")
-	}
-	fill := inner - lipgloss.Width(title) - 1 // leading "─" before the title
-	if fill < 0 {
-		fill = 0
-	}
-	top := bs.Render("╭─") + ts.Render(title) + bs.Render(strings.Repeat("─", fill)+"╮")
+	top := topBar(title, inner, bs, ts)
 
 	out := make([]string, 0, height)
 	out = append(out, top)
