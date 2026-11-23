@@ -225,36 +225,32 @@ func PaneID(path, kind string) (string, error) {
 // none. An agent that is in a kmux grid moves out of the grid first. A dashboard
 // leaves an agent alone while a client shows its session, and takes it back into
 // the grid when that client detaches.
+//
+// The tmux client always runs in the calling terminal. If that terminal is a
+// tmux pane, the client is a nested one: the caller asked for the agent at this
+// terminal, so the outer client must not switch away.
 func attachAgentSession(name, dir, agentCmd string) error {
 	snap, err := tmux.Snapshot()
 	if err != nil {
 		return err
-	}
-	inTmux := os.Getenv("TMUX") != ""
-	show := "attach-session"
-	if inTmux {
-		show = "switch-client"
 	}
 	// Each case is one tmux invocation that ends with the attach, so no dashboard
 	// poll can see the session without its client.
 	var cmds [][]string
 	p, ok := tmux.Agents(snap)[name]
 	switch {
-	case !ok && inTmux:
-		cmds = [][]string{
-			{"new-session", "-d", "-s", name, "-c", dir, agentCmd},
-			{"switch-client", "-t", "=" + name},
-		}
 	case !ok:
 		cmds = [][]string{{"new-session", "-A", "-s", name, "-c", dir, agentCmd}}
+	case p.ID == os.Getenv("TMUX_PANE"):
+		return fmt.Errorf("this terminal is the pane of %s", name)
 	case p.Grid != "":
 		dummy, err := grid.NewDummy(p)
 		if err != nil {
 			return err
 		}
-		cmds = append(grid.ParkCommands(p, dummy), []string{show, "-t", p.ID})
+		cmds = append(grid.ParkCommands(p, dummy), []string{"attach-session", "-t", p.ID})
 	default:
-		cmds = [][]string{{show, "-t", p.ID}}
+		cmds = [][]string{{"attach-session", "-t", p.ID}}
 	}
 	var args []string
 	for i, c := range cmds {
@@ -265,5 +261,14 @@ func attachAgentSession(name, dir, agentCmd string) error {
 	}
 	cmd := exec.Command("tmux", args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run()
+	// Without TMUX, tmux permits the nested client. The socket stays the default.
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "TMUX=") && !strings.HasPrefix(kv, "TMUX_PANE=") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("tmux: %w", err)
+	}
+	return nil
 }
