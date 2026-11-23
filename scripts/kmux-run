@@ -51,7 +51,9 @@ else
   run() { "$@"; }
 fi
 mkdir -p /tmp/kmux-run
-log=$(mktemp /tmp/kmux-run/XXXXXXXX.log)
+# BSD mktemp replaces only X characters at the end of the template.
+log=$(mktemp /tmp/kmux-run/XXXXXXXX) || die "cannot make a log file in /tmp/kmux-run"
+mv "$log" "$log.log" && log=$log.log
 
 echo "+ $cmd"
 trap ':' INT
