@@ -1,8 +1,11 @@
 package grid
 
 import (
+	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/olli-io/kmux/internal/tmux"
 )
@@ -21,8 +24,9 @@ type state struct {
 	parks  []tmux.Pane       // agent panes that must go out of the grid
 	cols   [][]string        // target columns
 	col    map[string]int    // current OptCol of each pane in cols
-	dummy  map[string]string // agent name -> dummy pane that is ready in the snapshot
+	geom   map[string]string // current "WxH,X,Y" of each pane in the window
 	zoomed bool
+	unzoom bool // end a zoom to apply the plan (used when the dashboard stops)
 }
 
 func (s *state) needFiller() bool { return len(s.cols) < maxColumns }
@@ -30,7 +34,7 @@ func (s *state) needFiller() bool { return len(s.cols) < maxColumns }
 // analyse reads the snapshot. want holds the names of the agents that must be in
 // the grid. An agent that is in a different grid window stays there.
 func analyse(snap []tmux.Pane, win string, want []string) *state {
-	s := &state{win: win, col: map[string]int{}, dummy: map[string]string{}}
+	s := &state{win: win, col: map[string]int{}, geom: map[string]string{}}
 	wanted := make(map[string]bool, len(want))
 	for _, n := range want {
 		wanted[n] = true
@@ -51,6 +55,7 @@ func analyse(snap []tmux.Pane, win string, want []string) *state {
 	present := map[string]bool{}
 	for i := range inGrid {
 		p := inGrid[i]
+		s.geom["%"+strings.TrimPrefix(p.ID, "%")] = fmt.Sprintf("%dx%d,%d,%d", p.W, p.H, p.X, p.Y)
 		switch {
 		case p.Role == tmux.RoleDash && s.dash == nil:
 			s.dash, s.zoomed = &inGrid[i], p.Zoomed
@@ -80,7 +85,10 @@ func analyse(snap []tmux.Pane, win string, want []string) *state {
 		switch {
 		case p.Dead:
 		case p.Role == RoleDummy:
-			s.dummy[p.Session] = p.ID
+			// Left from a pass that failed. A new pass makes its own dummy panes.
+			if p.Grid == "" {
+				s.kills = append(s.kills, p.ID)
+			}
 		case p.Role == tmux.RoleFiller && p.Grid == "" && hiddenFiller == nil:
 			hiddenFiller = &outside[i]
 		case p.Name != "" && p.Grid == "" && wanted[p.Name] && !present[p.Name]:
@@ -161,10 +169,14 @@ type Plan struct {
 // commands builds the plan. Each pane in s.parks must have a dummy pane in
 // dummies, and filler is the filler pane to use ("" = none).
 func (s *state) commands(dummies map[string]string, filler string) Plan {
-	if s.dash == nil || s.zoomed {
+	if s.dash == nil || (s.zoomed && !s.unzoom) {
 		return Plan{}
 	}
 	var cmds [][]string
+	if s.zoomed {
+		// resize-pane -Z on a pane of a zoomed window ends the zoom.
+		cmds = append(cmds, []string{"resize-pane", "-Z", "-t", s.dash.ID})
+	}
 	for _, id := range s.kills {
 		cmds = append(cmds, []string{"kill-pane", "-t", id})
 	}
@@ -174,9 +186,12 @@ func (s *state) commands(dummies map[string]string, filler string) Plan {
 		if d == "" {
 			continue
 		}
+		// After the swap the agent is the only pane of the dummy's session. That
+		// session then gets the agent name.
 		cmds = append(cmds,
 			[]string{"swap-pane", "-d", "-s", p.ID, "-t", d},
 			[]string{"kill-pane", "-t", d},
+			[]string{"rename-session", "-t", p.ID, p.Name},
 			tmux.SetPaneOption(p.ID, tmux.OptCol, ""))
 		order = remove(order, p.ID)
 	}
@@ -222,7 +237,7 @@ func (s *state) commands(dummies map[string]string, filler string) Plan {
 	}
 
 	layout := Layout(s.dash.WinW, s.dash.WinH, s.dash.ID, s.cols, filler)
-	if len(cmds) == 0 && layout == s.dash.Layout {
+	if len(cmds) == 0 && s.matches(layout) {
 		return Plan{}
 	}
 	only := len(cmds) == 0
@@ -238,4 +253,33 @@ func remove(list []string, id string) []string {
 		}
 	}
 	return out
+}
+
+// leafRe matches one pane cell of a layout string: "WxH,X,Y,ID".
+var leafRe = regexp.MustCompile(`(\d+x\d+,\d+,\d+),(\d+)`)
+
+// matches reports whether the panes of the window have the geometry of the
+// layout. The comparison uses pane geometry because the format of the tmux
+// window_layout variable is not the same in all tmux versions.
+func (s *state) matches(layout string) bool {
+	leaves := leafRe.FindAllStringSubmatch(layout, -1)
+	if len(leaves) != len(s.geom) {
+		return false
+	}
+	for _, l := range leaves {
+		if s.geom["%"+l[2]] != l[1] {
+			return false
+		}
+	}
+	return true
+}
+
+// signature identifies the current geometry of the window.
+func (s *state) signature() string {
+	ids := make([]string, 0, len(s.geom))
+	for id, g := range s.geom {
+		ids = append(ids, id+"="+g)
+	}
+	sort.Strings(ids)
+	return fmt.Sprintf("%dx%d %s", s.dash.WinW, s.dash.WinH, strings.Join(ids, " "))
 }

@@ -32,17 +32,14 @@ const (
 // pickers and badges show all come from here, so adding an agent is one entry plus a
 // detect manifest (internal/status/detect) and a UI color.
 //
-// Key is the idle slot's fixed launch key, separate from the dashboard's rebindable
-// createOrFocus* keybindings (config.DefaultKeybindings), because an idle slot is a
-// bare shell loop with no config to read. The two are kept equal so a user sees one
-// key per agent across the whole UI.
+// Key is the default launch key of the kind (see config.DefaultKeybindings).
 type Kind struct {
 	Name   string // canonical name, as spelled on the CLI and used as a map key
 	Marker string // session-name marker, e.g. "[CC]"
 	Bin    string // executable kmux runs to start the agent (need not match Name)
-	Label  string // display name in the launcher pickers
-	Badge  string // two-letter code for the dashboard badge and the idler's running tag
-	Key    string // idle-slot hotkey that launches this kind straight from the shell loop
+	Label  string // display name in the agent picker
+	Badge  string // two-letter code for the dashboard badge
+	Key    string // default launch key of this kind
 
 	// SandboxBin replaces Bin when kmux wraps the agent in the sandbox runner, for a
 	// Bin that is itself a sandbox (pi-sandbox) and cannot nest inside srt. Empty
@@ -151,26 +148,17 @@ func AttnSession(session string, needsAttention bool) string {
 	return session
 }
 
-// DashboardTitle carries the same sessionTag as the agent sessions, so the whole
-// kmux-managed family is identifiable by the leading "[kmux]".
-func DashboardTitle() string {
-	return sessionTag + "[dashboard]"
-}
-
-// DashTabTitle is the kitty *tab* title for the kmux dashboard tab. Unlike the
-// sidebar window title (DashboardTitle), it carries the scoped project path
-// (home-abbreviated) and abbreviates "dashboard" to "dash" to stay compact in the
-// tab bar: "[kmux][dash]<path>". scopeDir is the scoped project's main worktree,
-// or "" in unscoped mode, where the ~/git scan root (project.Root) stands in so
-// the path segment is never empty. When needsAttention is set — some session is
-// blocked on a prompt awaiting an answer — the title is prefixed with "[!!]" so
-// the tab bar surfaces it even when the tab isn't focused.
+// DashTabTitle is the name of the dashboard's tmux session and grid window:
+// "[kmux][dash]<path>", with the path home-abbreviated and made safe for a tmux
+// target. scopeDir is the scoped project's main worktree, or "" in unscoped mode,
+// where the ~/git scan root (project.Root) stands in. When needsAttention is set
+// (some agent is blocked on a prompt), the name has the "[!!]" prefix.
 func DashTabTitle(scopeDir string, needsAttention bool) string {
 	path := scopeDir
 	if path == "" {
 		path = project.Root()
 	}
-	title := sessionTag + "[dash]" + abbrevHome(path)
+	title := sessionTag + "[dash]" + tmuxSafe(abbrevHome(path))
 	if needsAttention {
 		title = attnMark + title
 	}

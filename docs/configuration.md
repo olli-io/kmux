@@ -77,8 +77,8 @@ customCommands:
     cmd: ""            # remove an inherited binding
 ```
 
-`target:` — `tab` (terminal apps), `window` (separate kitty instance),
-`detach` (background, no kitty surface).
+`target:` — `tab` or `window` (terminal apps; both open a new tmux window),
+`detach` (background, no tmux window).
 
 `cmd:` placeholders (shell-escaped, empty when not applicable):
 
@@ -88,10 +88,9 @@ customCommands:
 | `{project}`      | project name (e.g. `kmux`)                            |
 | `{worktree}`     | linked-worktree name, empty on the main worktree      |
 | `{project_root}` | the project's main-worktree path                      |
-| `{tmux_session}` | agent session name (`<project>[/<worktree>]~cl\|~oc`) |
+| `{tmux_session}` | agent name (`[kmux][CC]<path>[@<worktree>]`)          |
 
 ```yaml
-cmd: tmux attach -t {tmux_session}
 cmd: gh repo view --web -R {project}
 ```
 
@@ -114,7 +113,7 @@ keybindings:
   createOrAttachAgent:    enter   # open/attach selection; toggle a folder header
   detachAgent:            d       # detach the agent's pane (tmux keeps running)
   killAgent:              D       # kill the agent's tmux session
-  fullscreenAgent:        f       # open the agent in its own kitty tab
+  fullscreenAgent:        f       # zoom the agent to full window size
   createOrFocusClaude:    c       # launch/focus Claude for the project
   createOrFocusOpencode:  o       # launch/focus OpenCode for the project
   createOrFocusPi:        p       # launch/focus Pi for the project

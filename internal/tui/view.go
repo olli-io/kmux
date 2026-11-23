@@ -54,7 +54,7 @@ func (m model) helpHints(focused section) []keyHint {
 			move,
 			switchPanel,
 			{kb(config.ActionCreateOrAttachAgent), "focus pane"},
-			{kb(config.ActionFullscreenAgent), "fullscreen agent"},
+			{kb(config.ActionFullscreenAgent), "zoom agent"},
 			{kb(config.ActionDetachAgent), "detach"},
 			{kb(config.ActionKillAgent), "kill session"},
 		}
@@ -64,8 +64,8 @@ func (m model) helpHints(focused section) []keyHint {
 			switchPanel,
 			{kb(config.ActionCreateOrAttachAgent), "launch agent"},
 			m.launchKindHint(kb),
-			{kb(config.ActionFullscreenAgent), "fullscreen agent"},
-			{kb(config.ActionLaunchKmuxInProject), "kmux project in tab"},
+			{kb(config.ActionFullscreenAgent), "zoom agent"},
+			{kb(config.ActionLaunchKmuxInProject), "kmux project in window"},
 			{kb(config.ActionRefreshProjects), "refresh git status"},
 			{kb(config.ActionKillAgent), "kill session"},
 		}
@@ -209,8 +209,8 @@ func (m model) renderHelp(focused section) []string {
 
 // View wraps the rendered frame with the terminal state the dashboard needs.
 // AltScreen gives a clean, full-pane dashboard (clears on launch, restores on
-// exit). ReportFocus lets the model trigger a full git rescan when kmux's tab is
-// refocused.
+// exit). ReportFocus lets the model trigger a full git rescan when the dashboard pane
+// gets the focus again.
 func (m model) View() tea.View {
 	v := tea.NewView(m.render())
 	v.AltScreen = true

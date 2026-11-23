@@ -114,7 +114,11 @@ func TestPlanAttach(t *testing.T) {
 func TestPlanStable(t *testing.T) {
 	d := dash()
 	a, b, c := agent("%2", "A", 1, 1), agent("%3", "B", 2, 2), agent("%4", "C", 3, 3)
-	d.Layout = Layout(200, 48, "%1", [][]string{{"%2"}, {"%3"}, {"%4"}}, "")
+	// Geometry of Layout(200, 48, ...) with three columns.
+	d.W, d.H = 32, 48
+	a.X, a.W, a.H = 33, 55, 48
+	b.X, b.W, b.H = 89, 55, 48
+	c.X, c.W, c.H = 145, 55, 48
 	s := analyse([]tmux.Pane{d, a, b, c}, win, []string{"A", "B", "C"})
 	if p := s.commands(nil, ""); len(p.Cmds) != 0 {
 		t.Errorf("stable grid gave commands: %v", flat(p.Cmds))
@@ -140,7 +144,7 @@ func TestPlanParkAndPromote(t *testing.T) {
 	}
 	got := flat(s.commands(map[string]string{"B": "%7"}, "").Cmds)
 	want := []string{
-		"swap-pane -d -s %3 -t %7", "kill-pane -t %7", "set-option -p -u -t %3 @kmux_col",
+		"swap-pane -d -s %3 -t %7", "kill-pane -t %7", "rename-session -t %3 B", "set-option -p -u -t %3 @kmux_col",
 		"join-pane -d -h -s %4 -t %2", "select-layout -t @1 tiled",
 		"set-option -p -t %4 @kmux_col 2",
 		"set-option -p -t %5 @kmux_col 3",
@@ -175,5 +179,24 @@ func TestZoomedGridIsNotChanged(t *testing.T) {
 	s := analyse([]tmux.Pane{d, parked("%2", "A")}, win, []string{"A"})
 	if p := s.commands(nil, "%9"); len(p.Cmds) != 0 {
 		t.Errorf("zoomed grid gave commands: %v", flat(p.Cmds))
+	}
+}
+
+func TestCloseEndsZoomAndParksAll(t *testing.T) {
+	d := dash()
+	d.Zoomed = true
+	s := analyse([]tmux.Pane{d, agent("%2", "A", 1, 1)}, win, nil)
+	s.unzoom = true
+	got := flat(s.commands(map[string]string{"A": "%7"}, "%9").Cmds)
+	if got[0] != "resize-pane -Z -t %1" || got[1] != "swap-pane -d -s %2 -t %7" {
+		t.Errorf("got %v", got)
+	}
+}
+
+func TestLeftoverDummyIsKilled(t *testing.T) {
+	left := tmux.Pane{ID: "%8", Role: RoleDummy, Window: "@5", Session: "kmux-park-3", Panes: 1}
+	s := analyse([]tmux.Pane{dash(), left}, win, nil)
+	if len(s.kills) != 1 || s.kills[0] != "%8" {
+		t.Errorf("kills = %v", s.kills)
 	}
 }

@@ -50,18 +50,18 @@ type Pane struct {
 	WinW    int
 	WinH    int
 	Zoomed  bool
-	Panes   int    // number of panes in the window
-	Layout  string // window_layout
+	Panes   int // number of panes in the window
+	X, Y    int // pane position in the window
+	W, H    int // pane size
 }
 
-// snapshotFields is the list-panes format. The fields are tab-separated. The
-// layout is last because it is the only long field.
+// snapshotFields is the list-panes format. The fields are tab-separated.
 var snapshotFields = []string{
 	"#{pane_id}", "#{" + OptName + "}", "#{" + OptDir + "}", "#{" + OptRole + "}",
 	"#{" + OptAttn + "}", "#{" + OptCol + "}", "#{pane_index}", "#{pane_dead}",
 	"#{session_name}", "#{session_path}", "#{window_id}", "#{" + OptGrid + "}",
 	"#{window_width}", "#{window_height}", "#{window_zoomed_flag}", "#{window_panes}",
-	"#{window_layout}",
+	"#{pane_left}", "#{pane_top}", "#{pane_width}", "#{pane_height}",
 }
 
 // Snapshot returns all panes on the server in one tmux call. No server gives an
@@ -90,7 +90,7 @@ func parseSnapshot(out string) []Pane {
 			Attn: f[4] == "1", Col: atoi(f[5]), Index: atoi(f[6]), Dead: f[7] == "1",
 			Session: f[8], SessDir: f[9], Window: f[10], Grid: f[11],
 			WinW: atoi(f[12]), WinH: atoi(f[13]), Zoomed: f[14] == "1", Panes: atoi(f[15]),
-			Layout: f[16],
+			X: atoi(f[16]), Y: atoi(f[17]), W: atoi(f[18]), H: atoi(f[19]),
 		})
 	}
 	return panes
@@ -211,4 +211,19 @@ func KillPane(id string) error {
 // Display returns a format string expanded for the target (pane, window or session).
 func Display(target, format string) (string, error) {
 	return run("display-message", "-p", "-t", target, format)
+}
+
+// Agents returns the live agent panes of a snapshot by agent name. If two panes
+// have the same name, the first one is used.
+func Agents(snap []Pane) map[string]Pane {
+	m := make(map[string]Pane)
+	for _, p := range snap {
+		if p.Name == "" || p.Dead {
+			continue
+		}
+		if _, dup := m[p.Name]; !dup {
+			m[p.Name] = p
+		}
+	}
+	return m
 }

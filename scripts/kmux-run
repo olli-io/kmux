@@ -1,6 +1,6 @@
 #!/bin/bash
 # kmux-run — run a command outside the agent sandbox, then paste its exit code
-# and output tail into the agent's tmux session.
+# and output tail into the agent's tmux pane.
 #
 # A sandboxed agent cannot reach docker, ssh or the tmux socket. It asks you to
 # paste a kmux-run line into an unsandboxed terminal; the result comes back to
@@ -10,7 +10,7 @@
 # Usage:
 #   kmux-run [-t <tmux-target>] [-k <kind>] [-C <dir>] [-n <lines>] [--] <command...>
 #     one <command> argument runs as a shell line; several run as an argv
-#     -t  tmux target to paste into (default: `kmux --session <kind> <dir>`)
+#     -t  tmux target to paste into (default: `kmux --pane <kind> <dir>`)
 #     -k  agent kind for the default target (default: claude)
 #     -C  run the command in <dir> (default: current dir)
 #     -n  output lines to paste (default: 60)
@@ -38,9 +38,9 @@ cd "$dir" || die "cannot cd to $dir"
 dir=$PWD
 
 if [ -z "$target" ]; then
-  target=$(kmux --session "$kind" "$dir") || die "cannot resolve the $kind session for $dir"
+  target=$(kmux --pane "$kind" "$dir") || die "no running $kind agent for $dir"
 fi
-tmux has-session -t "$target" 2>/dev/null || die "no tmux session '$target'"
+tmux display-message -p -t "$target" '' >/dev/null 2>&1 || die "no tmux target '$target'"
 
 # One argument is a shell line; several are an argv, run as-is.
 if [ $# -eq 1 ]; then

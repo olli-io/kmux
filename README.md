@@ -6,28 +6,21 @@
 > or particularly configurable.
 
 `kmux` is a barebones TUI for monitoring parallel AI coding agents (claude,
-opencode, pi) that each run in their own tmux session. It runs as a left sidebar
-inside a kitty window and auto-attaches every matching tmux session into its own
-pane.
+opencode, pi). Each agent runs in a tmux pane. kmux runs as the left pane of one
+tmux window and shows the agent panes to its right, in three fixed columns. tmux
+draws the grid, so kmux works in any terminal.
 
-Attaching a pane pulls kitty to the foreground and resizes the splits around it, so
-kmux only does it while the dashboard's own kitty tab holds the cursor — the sidebar
-or any agent pane in it counts, another tab or another app does not. A session that
-starts elsewhere — an editor plugin spawning an agent, say — is listed right away with
-a dim `P` badge and gets its pane on the next poll after you're back in that tab.
-Launching from kmux itself, and the initial build at startup, are never held back.
+An agent that is not in the grid runs in a tmux session of its own. kmux moves
+its pane into the grid with `join-pane`, so there is no nested tmux and each
+layout change is one redraw. A session that starts elsewhere (an editor plugin
+that starts an agent, for example) is listed immediately with a dim `P` badge
+and gets its place in the grid on the next poll.
 
 ![kmux screenshot](docs/screenshot.png)
 
 ## Prerequisites
 
-- **kitty** with remote control enabled. In `~/.config/kitty/kitty.conf`:
-
-  ```
-  allow_remote_control yes
-  listen_on unix:@kitty
-  ```
-- **tmux**
+- **tmux** 3.2 or newer
 - **Go** 1.21+ (to build)
 
 ## Install
@@ -47,8 +40,10 @@ It builds from source and installs `kmux` to `~/.local/bin` (override with
 
 ## Run
 
-Run it **inside a kitty window** — that window becomes the sidebar and agent
-panes open to its right:
+Run it in any terminal. Outside tmux, kmux starts a tmux session
+(`[kmux][dash]<path>`) and attaches to it. In tmux, the current window becomes
+the grid: the pane that runs kmux is the sidebar and agent panes open to its
+right:
 
 ```sh
 kmux
@@ -61,32 +56,28 @@ worktree, a linked worktree, or any subdirectory of one:
 kmux ~/git/myproject   # or: cd into the repo and run `kmux .`
 ```
 
-## Idle slots
+## The grid
 
-The empty columns kmux pads the layout with aren't just filler — they're
-launchers. Focus an idle slot and:
-
-- **`c`** / **`o`** / **`p`** — pick a project, then launch Claude / OpenCode /
-  Pi in it.
-- **`↵`** — pick a project, then pick the agent kind.
-
-The picker lists the same projects (and worktrees) as the `[1]─Projects` panel.
-On select, kmux-idler creates the agent's tmux session in the background and the
-dashboard gives it a managed pane on its next poll — kmux owns every split, so the
-layout always stays put. You can also press **`q`** on a spare idle slot to close
-it (the dashboard plus its three columns can't be quit away).
-
-An idle slot itself is held by a tiny shell loop (it only draws the hint and
-waits for a keypress), so it costs a shell, not a whole process. The picker —
-**`kmux-idler`**, a small separate binary installed beside `kmux` — is spawned
-only for the moment you're choosing, then exits. If `kmux-idler` is missing, idle
-slots fall back to inert placeholders.
+- The grid has three columns. Columns fill from the left. A fourth agent goes
+  below the agent in the shortest column.
+- Columns that are not in use show one inert `free column` pane. It keeps the
+  agent panes at a fixed width. It accepts no input.
+- Each pane has a title line with the agent name. A `[!!]` mark shows that the
+  agent waits for an answer. The window name gets the same mark.
+- `d` moves an agent out of the grid into a session of its own; the agent
+  continues to run. `enter` moves it back in or selects its pane.
+- `f` shows the agent at full window size (tmux zoom). While a pane has the
+  zoom, kmux does not change the grid.
+- A pane that you split in the grid window yourself gets a cell in the grid.
+- To move between panes, use your tmux keys.
+- When kmux stops, each agent goes into a session of its own and continues to run.
 
 ## Launch an agent directly
 
 With `--agent`, kmux skips the dashboard and creates (or attaches to) the tmux
 session for one agent in the project containing the given path, attaching it to
-the current terminal. This needs only tmux — no kitty:
+the current terminal. If the agent is in a kmux grid, the terminal shows that
+grid with the agent pane selected:
 
 ```sh
 kmux ~/git/myproject --agent claude     # path then flag
@@ -98,20 +89,27 @@ The session name follows the same convention the dashboard uses
 (`[kmux][CC]<project-path>` for claude, `[kmux][OC]…` for opencode, `[kmux][PI]…`
 for pi; worktrees become `[kmux][CC]<project-path>@<worktree>`, e.g.
 `[kmux][CC]~/git/myproject@feat`), so an agent launched this way is the very same
-session the dashboard manages — launch it here, then open `kmux`, and it focuses
-that running agent.
+agent the dashboard manages. When you open `kmux`, it moves that agent into the
+grid.
 
 ## Print a session name
 
 `--session` resolves the very same session name without launching anything and
 prints it to stdout, for scripting against the running agent. Like `--agent` it
-takes a kind and an optional path (default: the current directory), and needs
-neither tmux nor kitty:
+takes a kind and an optional path (default: the current directory), and does
+not need tmux:
 
 ```sh
 kmux --session claude                   # e.g. [kmux][CC]~/git/myproject
 kmux --session pi ~/git/myproject       # name for a specific path
-tmux send-keys -t "$(kmux --session claude)" 'hello' Enter
+```
+
+A session with this name exists only while the agent is not in a grid. To send
+text to an agent in all cases, use its pane id. `--pane` prints the pane id of
+the running agent and fails if there is none:
+
+```sh
+tmux send-keys -t "$(kmux --pane claude)" 'hello' Enter
 ```
 
 ## Run a command outside the sandbox
@@ -119,10 +117,10 @@ tmux send-keys -t "$(kmux --session claude)" 'hello' Enter
 A sandboxed agent cannot reach docker, ssh or the tmux socket. `kmux-run`
 (installed beside `kmux` from a checkout) runs a command in an unsandboxed
 terminal, then pastes the exit code and the output tail into the agent's tmux
-session as a prompt message. The full log stays in `/tmp/kmux-run/`.
+pane as a prompt message. The full log stays in `/tmp/kmux-run/`.
 
 ```sh
-kmux-run -C ~/git/myproject -- docker ps        # pastes into $(kmux --session claude ~/git/myproject)
+kmux-run -C ~/git/myproject -- docker ps        # pastes into $(kmux --pane claude ~/git/myproject)
 kmux-run -t '$3' -n 100 -- ./build.sh           # explicit tmux target, 100 lines
 ```
 

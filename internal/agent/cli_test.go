@@ -70,8 +70,8 @@ func TestParseArgs(t *testing.T) {
 		{"session with path", []string{"--session", "opencode", "/g/x"}, ParsedArgs{Path: "/g/x", Agent: "opencode", PrintSession: true}, false},
 		{"project", []string{"--project"}, ParsedArgs{PrintProject: true}, false},
 		{"project equals form", []string{"-project"}, ParsedArgs{PrintProject: true}, false},
-		{"splash", []string{"--splash"}, ParsedArgs{Splash: true}, false},
-		{"splash single dash", []string{"-splash"}, ParsedArgs{Splash: true}, false},
+		{"pane", []string{"--pane", "claude"}, ParsedArgs{Agent: "claude", PrintPane: true}, false},
+		{"pane equals", []string{"--pane=pi", "x"}, ParsedArgs{Path: "x", Agent: "pi", PrintPane: true}, false},
 		// The --attn hook flags were removed when attention detection moved fully to
 		// pane text; --attn is now just an unknown flag.
 		{"attn rejected", []string{"--attn"}, ParsedArgs{}, true},

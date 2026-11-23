@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/olli-io/kmux/internal/tmux"
 )
@@ -12,6 +13,7 @@ import (
 // Seams for tests.
 var (
 	chain     = tmux.Chain
+	snapshot  = tmux.Snapshot
 	newHidden = tmux.NewHiddenPane
 	setOpts   = tmux.SetPaneOptions
 )
@@ -31,9 +33,10 @@ type Manager struct {
 	mu   sync.Mutex // each tea.Cmd runs in its own goroutine
 	win  string
 	dash string
-	// Result of the last layout-only pass. tmux can adjust a layout; then the same
-	// request must not go out again on each poll.
-	lastWant, lastGot string
+	// The last layout-only request and the geometry that caused it. If tmux does
+	// not apply a layout exactly, the same request must not go out on each poll.
+	lastWant, lastSeen string
+	seq                atomic.Int64 // number of passes that changed tmux
 }
 
 // New makes the window of the dashboard pane a grid window.
@@ -53,28 +56,42 @@ func New(dashPane, win string) (*Manager, error) {
 // Window returns the id of the grid window.
 func (m *Manager) Window() string { return m.win }
 
+// Seq changes each time a pass changes tmux. A caller reads it before it takes
+// a snapshot, so that Reconcile can reject a snapshot that is out of date.
+func (m *Manager) Seq() int64 { return m.seq.Load() }
+
 // Reconcile makes the grid show the wanted agents. It returns true when it sent
-// commands to tmux.
-func (m *Manager) Reconcile(snap []tmux.Pane, want []string) (bool, error) {
+// commands to tmux. snap must come from after Seq() returned seq; if a different
+// pass changed tmux since then, or snap is nil, Reconcile takes a new snapshot.
+func (m *Manager) Reconcile(snap []tmux.Pane, seq int64, want []string) (bool, error) {
+	return m.reconcile(snap, seq, want, false)
+}
+
+func (m *Manager) reconcile(snap []tmux.Pane, seq int64, want []string, closing bool) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if snap == nil || seq != m.seq.Load() {
+		var err error
+		if snap, err = snapshot(); err != nil {
+			return false, err
+		}
+	}
 
 	s := analyse(snap, m.win, want)
 	if s.dash == nil {
 		return false, errors.New("the dashboard pane is not in the tmux snapshot")
 	}
-	if s.zoomed {
+	if s.unzoom = closing; s.zoomed && !closing {
 		return false, nil // a layout change would end the zoom
 	}
 
 	// Make the necessary panes out of view. The plan then moves them into view.
 	var errs []error
-	dummies := s.dummy
+	dummies := map[string]string{}
 	for _, p := range s.parks {
-		if dummies[p.Name] != "" {
-			continue
-		}
-		id, err := newHidden(p.Name, p.Dir, dummyCmd)
+		// The temporary name is not an agent name, so no poll takes the dummy for
+		// an agent. The plan gives the session the agent name.
+		id, err := newHidden("kmux-park-"+strings.TrimPrefix(p.ID, "%"), p.Dir, dummyCmd)
 		if err == nil {
 			err = setOpts(id, tmux.OptRole, RoleDummy)
 		}
@@ -104,31 +121,30 @@ func (m *Manager) Reconcile(snap []tmux.Pane, want []string) (bool, error) {
 	if len(plan.Cmds) == 0 {
 		return false, errors.Join(errs...)
 	}
-	if plan.LayoutOnly && plan.Layout == m.lastWant && s.dash.Layout == m.lastGot {
+	sig := s.signature()
+	if plan.LayoutOnly && plan.Layout == m.lastWant && sig == m.lastSeen {
 		return false, errors.Join(errs...)
 	}
+	m.seq.Add(1)
 	if err := chain(plan.Cmds); err != nil {
 		errs = append(errs, err)
 	}
-	m.lastWant, m.lastGot = "", ""
+	m.lastWant, m.lastSeen = "", ""
 	if plan.LayoutOnly {
-		m.lastWant = plan.Layout
-		if got, err := windowLayout(m.win); err == nil {
-			m.lastGot = got
-		}
+		m.lastWant, m.lastSeen = plan.Layout, sig
 	}
 	return true, errors.Join(errs...)
 }
 
 // Close moves all agents out of the grid and removes the filler. The agents
 // continue to run in their own sessions.
-func (m *Manager) Close(snap []tmux.Pane) error {
-	_, err := m.Reconcile(snap, nil)
+func (m *Manager) Close() error {
+	_, err := m.reconcile(nil, 0, nil, true)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var cmds [][]string
-	if snap2, serr := tmux.Snapshot(); serr == nil {
-		for _, p := range snap2 {
+	if snap, serr := snapshot(); serr == nil {
+		for _, p := range snap {
 			if p.Window == m.win && p.Role == tmux.RoleFiller {
 				cmds = append(cmds, []string{"kill-pane", "-t", p.ID})
 			}
@@ -157,9 +173,4 @@ func Zoom(p tmux.Pane) error {
 		{"select-pane", "-t", p.ID},
 		{"resize-pane", "-Z", "-t", p.ID},
 	})
-}
-
-var windowLayout = func(win string) (string, error) {
-	out, err := tmux.Display(win, "#{window_layout}")
-	return strings.TrimSpace(out), err
 }

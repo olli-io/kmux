@@ -13,15 +13,16 @@ import (
 )
 
 // ParsedArgs is the routed kmux command line: Agent is "" for the dashboard mode,
-// the Print* flags print a value instead of launching, and Splash renders the
-// launch-overlay animation.
+// and the Print* flags print a value instead of launching.
 type ParsedArgs struct {
 	Path         string
 	Agent        string
 	PrintSession bool
 	PrintProject bool
-	Splash       bool
-	Help         bool
+	// PrintPane prints the tmux pane id of the running agent, for tools that send
+	// text to the agent. The agent can be in the grid or in its own session.
+	PrintPane bool
+	Help      bool
 	// Config launches a config session: the agent (claude by default) in the user
 	// config dir (~/.config), sandboxed with the config settings that let it write
 	// there.
@@ -56,8 +57,14 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 			pa.Agent, pa.PrintSession = strings.TrimPrefix(a, "--session="), true
 		case a == "--project", a == "-project":
 			pa.PrintProject = true
-		case a == "--splash", a == "-splash":
-			pa.Splash = true
+		case a == "--pane", a == "-pane":
+			if i+1 >= len(args) {
+				return pa, fmt.Errorf("--pane requires a value (%s)", KindList())
+			}
+			i++
+			pa.Agent, pa.PrintPane = args[i], true
+		case strings.HasPrefix(a, "--pane="):
+			pa.Agent, pa.PrintPane = strings.TrimPrefix(a, "--pane="), true
 		case a == "--config", a == "-config":
 			pa.Config = true
 		case strings.HasPrefix(a, "-"):
@@ -76,7 +83,7 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 		if pa.Path != "" {
 			return pa, fmt.Errorf("--config takes no path: it always opens %s", "~/.config")
 		}
-		if pa.PrintSession || pa.PrintProject {
+		if pa.PrintSession || pa.PrintProject || pa.PrintPane {
 			return pa, fmt.Errorf("--config only combines with --agent")
 		}
 		base, err := config.UserConfigBase()
@@ -195,11 +202,45 @@ func gitToplevel(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// attachAgentSession attaches to tmux session name, creating it (running agentCmd
-// in dir) if absent — `new-session -A` does both. stdio is inherited so the agent
-// runs in the foreground of the calling terminal.
+// PaneID returns the tmux pane id of the running agent for path.
+func PaneID(path, kind string) (string, error) {
+	name, _, err := sessionPlan(path, kind)
+	if err != nil {
+		return "", err
+	}
+	snap, err := tmux.Snapshot()
+	if err != nil {
+		return "", err
+	}
+	p, ok := tmux.Agents(snap)[name]
+	if !ok {
+		return "", fmt.Errorf("no running agent %s", name)
+	}
+	return p.ID, nil
+}
+
+// attachAgentSession shows the agent name in the calling terminal. It creates
+// the agent (agentCmd in dir) if there is none. An agent that is in a grid stays
+// there: the terminal then shows that grid with the agent pane selected.
 func attachAgentSession(name, dir, agentCmd string) error {
-	cmd := exec.Command("tmux", "new-session", "-A", "-s", name, "-c", dir, agentCmd)
+	snap, err := tmux.Snapshot()
+	if err != nil {
+		return err
+	}
+	p, ok := tmux.Agents(snap)[name]
+	if !ok {
+		id, err := tmux.NewAgentSession(name, dir, agentCmd)
+		if err != nil {
+			return err
+		}
+		p = tmux.Pane{ID: id}
+	}
+	// A pane id is a valid target for a window and for a session.
+	verb := "attach-session"
+	if os.Getenv("TMUX") != "" {
+		verb = "switch-client"
+	}
+	cmd := exec.Command("tmux", "select-window", "-t", p.ID, ";", "select-pane", "-t", p.ID, ";", verb, "-t", p.ID)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
 }

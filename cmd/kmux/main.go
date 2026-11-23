@@ -3,17 +3,19 @@ package main
 import (
 	"fmt"
 	"os"
-	"strconv"
+	"os/exec"
+	"strings"
+	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/config"
-	"github.com/olli-io/kmux/internal/kitty"
-	"github.com/olli-io/kmux/internal/layout"
+	"github.com/olli-io/kmux/internal/grid"
 	"github.com/olli-io/kmux/internal/project"
 	"github.com/olli-io/kmux/internal/status"
+	"github.com/olli-io/kmux/internal/tmux"
 	"github.com/olli-io/kmux/internal/tui"
 )
 
@@ -38,6 +40,15 @@ func main() {
 		fmt.Println(name)
 		return
 	}
+	if pa.PrintPane {
+		id, err := agent.PaneID(pa.Path, pa.Agent)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(id)
+		return
+	}
 	if pa.PrintProject {
 		dir, err := agent.CurrentProjectDir()
 		if err != nil {
@@ -54,94 +65,109 @@ func main() {
 		}
 		return
 	}
-	if pa.Splash {
-		// Internal launch-overlay mode, spawned by the dashboard in its own kitty tab.
-		if err := runSplash(); err != nil {
-			fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
-			os.Exit(1)
-		}
-		return
-	}
 	runDashboard(pa.Path)
 }
 
 // runDashboard launches the kmux dashboard. A non-empty pathArg scopes kmux to the
 // single git project containing it; otherwise it scans ~/git plus configured folders.
+//
+// The dashboard runs in a tmux pane, and the window of that pane becomes the
+// grid. Outside tmux, kmux starts (or attaches to) a tmux session that runs it.
 func runDashboard(pathArg string) {
-	// Detect a non-kitty host before the remote-control check below, whose hint
-	// wrongly implies the user is already in kitty.
-	if !kitty.InKitty() {
-		fmt.Fprintln(os.Stderr, "kmux: incompatible terminal — kmux only runs inside the kitty terminal.")
-		if term := os.Getenv("TERM"); term != "" {
-			fmt.Fprintf(os.Stderr, "Detected TERM=%s.\n", term)
-		}
-		fmt.Fprintln(os.Stderr, "Install kitty and run kmux inside it: https://sw.kovidgoyal.net/kitty/")
-		os.Exit(1)
-	}
-
-	if os.Getenv("KITTY_LISTEN_ON") == "" {
-		fmt.Fprintln(os.Stderr, "kmux: KITTY_LISTEN_ON is not set.")
-		fmt.Fprintln(os.Stderr, "Run kmux inside kitty with remote control enabled:")
-		fmt.Fprintln(os.Stderr, "  allow_remote_control yes")
-		fmt.Fprintln(os.Stderr, "  listen_on unix:@kitty")
-		os.Exit(1)
-	}
-
-	sidebarID, err := strconv.Atoi(os.Getenv("KITTY_WINDOW_ID"))
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "kmux: KITTY_WINDOW_ID is not set; run kmux inside a kitty window.")
-		os.Exit(1)
-	}
-
 	var scopeDir string
 	if pathArg != "" {
 		proj, err := project.ScanProject(pathArg)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
-			os.Exit(1)
+			fail(err)
 		}
 		scopeDir = proj.Path
 	}
 
-	if err := kitty.GotoLayoutSplits(); err != nil {
-		fmt.Fprintf(os.Stderr, "kmux: could not switch to splits layout: %v\n", err)
-		os.Exit(1)
+	pane := os.Getenv("TMUX_PANE")
+	if os.Getenv("TMUX") == "" || pane == "" {
+		fail(execInTmux(scopeDir))
+	}
+	win, err := tmux.Display(pane, "#{window_id}")
+	if err != nil {
+		fail(err)
+	}
+	win = strings.TrimSpace(win)
+	snap, err := tmux.Snapshot()
+	if err != nil {
+		fail(err)
+	}
+	for _, p := range snap {
+		if p.Window == win && p.Role == tmux.RoleDash && p.ID != pane && !p.Dead {
+			fail(fmt.Errorf("this tmux window already has a kmux dashboard (pane %s)", p.ID))
+		}
 	}
 
-	// Label the sidebar window so the dashboard is identifiable alongside the
-	// [kmux]… agent sessions. Best-effort.
-	_ = kitty.SetWindowTitle(sidebarID, agent.DashboardTitle())
-
 	// Reap sessions already idle past the timeout at launch, before the dashboard
-	// attaches panes to them. Best-effort: read errors skip the sweep.
+	// moves their panes into the grid. Best-effort: read errors skip the sweep.
 	cfg, _ := config.LoadConfig()
 	if _, idle, err := status.LoadState(); err == nil {
 		status.SweepIdleAtLaunch(time.Now(), cfg.IdleDuration(), idle)
 	}
 
-	// Pop a splash tab in front so the user doesn't watch the first reconcile
-	// assemble the layout pane by pane; opening it focused pushes this tab to the
-	// background, where the dashboard builds its panes hidden. The model closes the
-	// splash once its first reconcile settles. Best-effort: on failure launcherID is
-	// 0 and startup proceeds with no overlay.
-	var launcherID int
-	if exe, err := os.Executable(); err == nil {
-		launcherID, _ = kitty.OpenLauncherTab(exe)
+	mgr, err := grid.New(pane, win)
+	if err != nil {
+		fail(err)
 	}
-
-	mgr := layout.NewManager(sidebarID)
 	// The dashboard declares its own terminal state (alt screen, focus reporting)
 	// on the tea.View it returns, so the program needs no options here.
-	p := tea.NewProgram(tui.NewModel(mgr, scopeDir, launcherID))
-	_, runErr := p.Run()
-	// Close the splash tab unconditionally on exit; a quit or crash before the model
-	// dismisses it would otherwise orphan it. CloseWindow ignores a missing match.
-	if launcherID != 0 {
-		_ = kitty.CloseWindow(launcherID)
+	p := tea.NewProgram(tui.NewModel(mgr, scopeDir))
+	if _, err := p.Run(); err != nil {
+		_ = mgr.Close()
+		fail(err)
 	}
-	if runErr != nil {
-		mgr.CloseAll()
-		fmt.Fprintf(os.Stderr, "kmux: %v\n", runErr)
-		os.Exit(1)
+}
+
+// execInTmux replaces this process with a tmux client on the dashboard session.
+// tmux makes the session, with kmux as its command, if it does not exist. It
+// returns only on an error.
+func execInTmux(scopeDir string) error {
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		return fmt.Errorf("kmux needs tmux: %w", err)
 	}
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	// tmux gives one command argument to a shell, thus the quotes.
+	line := shellQuote(exe)
+	if scopeDir != "" {
+		line += " " + shellQuote(scopeDir)
+	}
+	name := agent.DashTabTitle(scopeDir, false)
+	// A dashboard that stopped without its cleanup leaves its session with the
+	// agent panes but no dashboard. Start a new dashboard pane in that window.
+	if snap, err := tmux.Snapshot(); err == nil {
+		var orphan *tmux.Pane
+		hasDash := false
+		for i, p := range snap {
+			if p.Session != name || p.Dead {
+				continue
+			}
+			hasDash = hasDash || p.Role == tmux.RoleDash
+			if orphan == nil || (orphan.Grid == "" && p.Grid != "") {
+				orphan = &snap[i]
+			}
+		}
+		if orphan != nil && !hasDash {
+			if err := tmux.Chain([][]string{{"split-window", "-d", "-h", "-b", "-t", orphan.ID, line}}); err != nil {
+				return err
+			}
+		}
+	}
+	return syscall.Exec(tmuxPath, []string{"tmux", "new-session", "-A", "-s", name, "-n", name, line}, os.Environ())
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func fail(err error) {
+	fmt.Fprintf(os.Stderr, "kmux: %v\n", err)
+	os.Exit(1)
 }

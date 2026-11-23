@@ -6,14 +6,15 @@ package main
 // internal/config (DefaultKeybindings) and the footer hints in internal/tui.
 const helpText = `kmux — a TUI for monitoring parallel AI coding agents (claude, opencode, pi).
 
-Each agent runs in its own tmux session. kmux runs as a left sidebar inside a
-kitty window and auto-attaches every matching session into its own pane.
+Each agent runs in a tmux pane. kmux runs as the left pane of one tmux window
+and shows the agent panes to its right, in three fixed columns.
 
 USAGE
-  kmux [path]                     Launch the dashboard (needs kitty + tmux).
+  kmux [path]                     Launch the dashboard (needs tmux).
   kmux --agent <kind> [path]      Launch/attach one agent in the terminal (tmux only).
   kmux --config [--agent <kind>]  Launch/attach a config session in ~/.config.
   kmux --session <kind> [path]    Print the agent's tmux session name and exit.
+  kmux --pane <kind> [path]       Print the tmux pane id of the running agent.
   kmux --project                  Print the project dir of the current agent session.
   kmux --help                     Show this help.
 
@@ -23,17 +24,17 @@ USAGE
 
 MODES
   Dashboard (default)
-    Run inside a kitty window (with remote control enabled); that window becomes
-    the sidebar and agent panes open to its right. Pass a path to scope kmux to a
-    single project instead of scanning ~/git plus your configured folders.
+    Run in any terminal. Outside tmux, kmux starts a tmux session and attaches to
+    it. In tmux, the current window becomes the grid. Pass a path to scope kmux to
+    a single project instead of scanning ~/git plus your configured folders.
 
       kmux                        Scan ~/git and configured folders.
       kmux ~/git/myproject        Scope to one project.
 
   Launch an agent directly (--agent)
     Skip the dashboard and create (or attach to) the tmux session for one agent,
-    attached to the current terminal. Needs only tmux — no kitty. The session name
-    matches the dashboard's convention, so opening kmux later focuses this agent.
+    attached to the current terminal. The session name matches the dashboard's
+    convention, so opening kmux later moves this agent into the grid.
 
       kmux ~/git/myproject --agent claude
       kmux --agent opencode ~/git/myproject
@@ -41,10 +42,15 @@ MODES
 
   Print a session name (--session)
     Resolve the same session name without launching anything, for scripting.
-    Needs neither tmux nor kitty.
+    Does not need tmux. A session with this name exists only while the agent is
+    not in a grid.
 
       kmux --session claude                     # e.g. [kmux][CC]~/git/myproject
-      tmux send-keys -t "$(kmux --session claude)" 'hi' Enter
+
+  Print a pane id (--pane)
+    Print the tmux pane id of the running agent, in a grid or not.
+
+      tmux send-keys -t "$(kmux --pane claude)" 'hi' Enter
 
   Config session (--config)
     Launch an agent (claude by default) in ~/.config. With the sandbox enabled
@@ -55,7 +61,7 @@ MODES
     skips its own permission prompts. See docs/configuration.md.
 
   Print the current project dir (--project)
-    From inside an agent's tmux session, print its git project directory — for
+    From inside an agent's tmux pane, print its git project directory — for
     scripts bound to tmux keybindings.
 
 DASHBOARD KEYBINDINGS
@@ -67,21 +73,16 @@ DASHBOARD KEYBINDINGS
   Projects panel
     enter                         Launch an agent (pick project, then kind)
     c / o / p                     Launch claude / opencode / pi
-    t                             Open kmux for the project in a new kitty tab
+    t                             Open kmux for the project in a new tmux window
     r                             Refresh git status
-    f                             Fullscreen the focused agent
-    D                             Kill the session
+    f                             Zoom the agent to full window size
+    D                             Kill the agent
 
   Sessions panel
-    enter                         Focus the agent's pane
-    f                             Fullscreen the agent
-    d                             Detach the agent
-    D                             Kill the session
-
-  Idle slots (empty launcher columns)
-    c / o / p                     Pick a project, then launch claude / opencode / pi
-    enter                         Pick a project, then pick the agent kind
-    q                             Close a spare idle slot
+    enter                         Select the agent's pane (move it into the grid if necessary)
+    f                             Zoom the agent to full window size (again: end the zoom)
+    d                             Move the agent out of the grid (it continues to run)
+    D                             Kill the agent
 
   General
     q                             Quit (ctrl+c always quits)
