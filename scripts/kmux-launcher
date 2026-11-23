@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# kmux-launcher — runs in the free column of the kmux grid. It shows the
+# projects and starts an agent in the project that you select. The dashboard
+# then moves the agent into the grid.
+#
+# The launcher waits for Enter before it shows the list. While it waits, no
+# program reads the keys, so tmux pane navigation keys (for example the
+# vim-tmux-navigator Ctrl-h/j/k/l bindings, which send the keys to fzf) work.
+#
+# The dashboard sets the environment:
+#   KMUX        path of the kmux binary
+#   KMUX_SCOPE  project directory of a scoped dashboard, or empty
+#   KMUX_KINDS  agent kinds, separated by spaces; the first is the default
+set -u
+trap : INT # Ctrl-C cancels a selection, not the launcher
+
+kmux="${KMUX:-kmux}"
+read -r -a kinds <<<"${KMUX_KINDS:-claude}"
+
+# pick <prompt> <item>... prints the selected item. It uses fzf if available.
+pick() {
+  local prompt="$1" item
+  shift
+  if command -v fzf >/dev/null 2>&1; then
+    # Ctrl-h and Ctrl-l go to the adjacent pane and close the list.
+    printf '%s\n' "$@" | fzf --prompt="$prompt> " --reverse --no-info \
+      --bind 'ctrl-h:execute-silent(tmux select-pane -L)+abort' \
+      --bind 'ctrl-l:execute-silent(tmux select-pane -R)+abort'
+    return
+  fi
+  local PS3="$prompt> "
+  select item in "$@"; do
+    [ -n "$item" ] && { printf '%s\n' "$item"; return 0; }
+  done
+  return 1
+}
+
+# wait_enter returns when the user presses Enter. It ignores all other keys.
+wait_enter() {
+  local key
+  while :; do
+    IFS= read -rsn1 key || return 1
+    [ -z "$key" ] && return 0
+  done
+}
+
+while :; do
+  clear
+  printf '\n  \033[2mfree column\033[0m\n\n  Press Enter to start an agent.\n'
+  wait_enter || { sleep 0.2; continue; }
+  clear
+  dirs=()
+  while IFS= read -r d; do
+    dirs+=("$d")
+  done < <("$kmux" --projects ${KMUX_SCOPE:+"$KMUX_SCOPE"})
+  if [ "${#dirs[@]}" -eq 0 ]; then
+    printf '\n  no projects\n'
+    sleep 5
+    continue
+  fi
+
+  dir="$(pick project "${dirs[@]}")" || { sleep 0.2; continue; }
+  kind="${kinds[0]}"
+  if [ "${#kinds[@]}" -gt 1 ]; then
+    kind="$(pick agent "${kinds[@]}")" || continue
+  fi
+  if ! "$kmux" --launch "$kind" "$dir"; then
+    printf '\n  Press a key to continue.\n'
+    read -rsn1
+  fi
+done

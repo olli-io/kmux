@@ -112,14 +112,15 @@ func SweepIdleAtLaunch(now time.Time, timeout time.Duration, persisted map[strin
 	if timeout <= 0 || len(persisted) == 0 {
 		return
 	}
-	names, err := tmux.ListAgentSessions()
+	snap, err := tmux.Snapshot()
 	if err != nil {
 		return
 	}
-	hashes := make(map[string]uint64, len(names))
-	for _, name := range names {
-		text, err := tmux.CapturePane(name)
-		if err != nil {
+	agents := tmux.Agents(snap)
+	hashes := make(map[string]uint64, len(agents))
+	for name, p := range agents {
+		text := tmux.CapturePaneID(p.ID)
+		if text == "" {
 			continue // flaky capture: treat as unseen this launch, never kill
 		}
 		hashes[name] = HashPane(text)
@@ -128,6 +129,6 @@ func SweepIdleAtLaunch(now time.Time, timeout time.Duration, persisted map[strin
 	// hashes: it kills only sessions whose pane is unchanged and stale.
 	t := NewIdleTrackerFrom(timeout, persisted)
 	for _, name := range t.Reap(now, hashes, nil) {
-		_ = tmux.KillSession(name) // best-effort; a missing session is already gone
+		_ = tmux.KillPane(agents[name].ID) // best-effort; a missing pane is already gone
 	}
 }

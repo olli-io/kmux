@@ -9,36 +9,36 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/config"
-	"github.com/olli-io/kmux/internal/layout"
+	"github.com/olli-io/kmux/internal/grid"
 	"github.com/olli-io/kmux/internal/project"
 	"github.com/olli-io/kmux/internal/status"
+	"github.com/olli-io/kmux/internal/tmux"
 )
 
 type model struct {
-	mgr       *layout.Manager
+	mgr       *grid.Manager
 	sessions  []string
 	projects  []project.Project
 	collapsed map[string]bool // collapse key -> collapsed
-	detached  map[string]bool // session name -> pane detached (tmux still running)
-	// launchDeferred is set when the last reconcile held panes back because the
-	// dashboard's tab was unfocused, so refocusing can retry them at once.
-	launchDeferred bool
-	attention      map[string]status.AttentionState // session name -> latest detected attention state
-	idle           status.IdleTracker               // per-session pane-stability clock for idle-kill
-	cursor         int                              // index into rows()
-	spinnerFrame   int                              // animation frame for busy-session glyphs
-	spinning       bool                             // whether the spinner ticker is currently armed (only while a session is busy)
-	prompt         *agentPrompt                     // non-nil while the agent-picker overlay is open
-	commands       []config.CustomCommand           // user-configurable command keybindings (editor, lazygit, …)
-	cmdErr         *commandError                    // non-nil while a failed-command error float is shown
-	lastErr        string
-	width, height  int
-
-	// idledPanes records blank panes already handled so each becomes an idle
-	// launcher at most once. blankSeeded holds conversion until the first snapshot,
-	// so only panes appearing after kmux started become launchers.
-	idledPanes  map[int]bool
-	blankSeeded bool
+	detached  map[string]bool // session name -> out of the grid (agent still running)
+	// noClient counts consecutive checks with no tmux client on the dashboard's
+	// session (see clientsMsg).
+	noClient int
+	// panes maps each agent name to its tmux pane, from the last poll.
+	panes map[string]tmux.Pane
+	// lastIdle is the idle-clock snapshot of the last state save, so the state
+	// file is written only when the clocks change.
+	lastIdle      map[string]status.IdleRecord
+	attention     map[string]status.AttentionState // session name -> latest detected attention state
+	idle          status.IdleTracker               // per-session pane-stability clock for idle-kill
+	cursor        int                              // index into rows()
+	spinnerFrame  int                              // animation frame for busy-session glyphs
+	spinning      bool                             // whether the spinner ticker is currently armed (only while a session is busy)
+	prompt        *agentPrompt                     // non-nil while the agent-picker overlay is open
+	commands      []config.CustomCommand           // user-configurable command keybindings (editor, lazygit, …)
+	cmdErr        *commandError                    // non-nil while a failed-command error float is shown
+	lastErr       string
+	width, height int
 
 	// orphanStrikes counts consecutive polls a session's anchor directory has been
 	// missing; it's killed at orphanConfirmPolls, and reset if the directory
@@ -68,10 +68,9 @@ type model struct {
 	scopeDir  string
 	scopeName string
 
-	// tabAttn is the last-applied [!!] attention state of the kitty tab title.
-	// The attentionMsg handler re-titles the tab only when this flips, so the
-	// dashboard doesn't spawn a `kitten @` on every poll. It starts false,
-	// matching the no-attention title Init sets at launch.
+	// tabAttn is the last-applied [!!] attention state of the grid window name.
+	// The attentionMsg handler renames the window only when this flips. It starts
+	// false, matching the name Init sets at launch.
 	tabAttn bool
 
 	// sessAttn tracks, per canonical session name, whether its tmux session currently
@@ -79,18 +78,6 @@ type model struct {
 	// permission state flips, so it doesn't shell out to `tmux rename-session` every
 	// poll. Sessions absent from the map have an unmarked (canonical) name.
 	sessAttn map[string]bool
-
-	// launcherID is the kitty window id of the [kmux][launcher] splash tab the
-	// dashboard was spawned behind (0 when none — e.g. the splash failed to open).
-	// launched guards the one-shot dismissal: once the layout is ready and the
-	// minimum hold has elapsed (or the cap-timer fallback fires) the finished
-	// dashboard is focused and this tab closed, and launched is set so later
-	// reconciles don't try again. layoutReady/minHeld are the two gates the normal
-	// dismissal waits on (see dismissLauncherWhenReady).
-	launcherID  int
-	launched    bool
-	layoutReady bool // first reconcile settled: panes built and sized
-	minHeld     bool // launcherMin elapsed since launch
 }
 
 // commandError backs the error float for a failed command, dismissed by any keypress.
@@ -105,7 +92,6 @@ type agentPrompt struct {
 	session string // the row's claude session name (base for agent.SessionForKind)
 	dir     string // working directory the agent launches in
 	cursor  int    // index into promptOptions
-	tab     bool   // launch the chosen agent in a standalone kitty tab, not a pane
 }
 
 // promptOption is one row of the agent picker.
@@ -125,9 +111,8 @@ var promptOptions = func() []promptOption {
 }()
 
 // NewModel builds the dashboard model. scopeDir scopes it to one project's main
-// worktree; launcherID is the splash tab it builds behind, closed once the first
-// reconcile settles.
-func NewModel(mgr *layout.Manager, scopeDir string, launcherID int) tea.Model {
+// worktree.
+func NewModel(mgr *grid.Manager, scopeDir string) tea.Model {
 	// Restore detached sessions and idle clocks from a previous run; best-effort
 	// (a read error just starts with empty sets).
 	detached, idle, err := status.LoadState()
@@ -146,7 +131,7 @@ func NewModel(mgr *layout.Manager, scopeDir string, launcherID int) tea.Model {
 	return model{
 		mgr:           mgr,
 		collapsed:     map[string]bool{},
-		idledPanes:    map[int]bool{},
+		panes:         map[string]tmux.Pane{},
 		orphanStrikes: map[string]int{},
 		detached:      detached,
 		attention:     map[string]status.AttentionState{},
@@ -158,7 +143,6 @@ func NewModel(mgr *layout.Manager, scopeDir string, launcherID int) tea.Model {
 		conflicts:     cfg.KeybindingConflicts(),
 		scopeDir:      scopeDir,
 		scopeName:     scopeName,
-		launcherID:    launcherID,
 		focused:       true, // poll from launch until the terminal reports a blur
 	}
 }
@@ -221,19 +205,10 @@ func (m model) Init() tea.Cmd {
 	// interval. This projectsCmd is the one full ~/git sweep; later project ticks
 	// rescan only active projects. The spinner ticker is armed later, only while a
 	// session is busy.
-	cmds := []tea.Cmd{pollCmd(), projectsCmd(m.scopeDir), tickCmd(), projectTickCmd()}
-	// Label the dashboard's kitty tab immediately (no attention yet), so it's
-	// identifiable in the tab bar before any session exists — mirroring how
-	// main.go titles the sidebar window at launch. The attentionMsg handler takes
-	// over the [!!] marker from here as sessions change state.
-	cmds = append(cmds, setTabTitleCmd(m.mgr.SidebarID(), m.scopeDir, false))
-	// When the dashboard is building behind a launch-overlay splash tab, arm a
-	// fallback cap: if the first reconcile never completes (e.g. the tmux poll
-	// errored and short-circuited before reconcile), the cap timer still dismisses
-	// the splash so it can't linger over a stalled launch.
-	if m.launcherID != 0 {
-		cmds = append(cmds, launcherCapCmd(), launcherMinCmd())
-	}
+	cmds := []tea.Cmd{pollCmd(m.mgr), projectsCmd(m.scopeDir), tickCmd(), projectTickCmd()}
+	// Name the grid window immediately (no attention yet). The attentionMsg handler
+	// takes over the [!!] marker from here as sessions change state.
+	cmds = append(cmds, setWindowNameCmd(m.mgr.Window(), m.scopeDir, false))
 	return tea.Batch(cmds...)
 }
 
@@ -242,7 +217,7 @@ func (m model) Init() tea.Cmd {
 func (m model) rows() []row {
 	deco := rowDeco{spinner: m.spinnerFrame}
 	names := agent.ProjectPaths(m.projects)
-	sess := buildSessionRows(m.sessions, names, m.collapsed, m.attention, m.mgr.Attached, m.isDetached, deco)
+	sess := buildSessionRows(m.sessions, names, m.collapsed, m.attention, m.attached, m.isDetached, deco)
 	proj := buildProjectRows(m.projects, m.collapsed, m.projectLive, deco)
 	out := make([]row, 0, len(sess)+len(proj))
 	out = append(out, sess...)
@@ -317,6 +292,12 @@ func (m model) scopedSessions(names []string) []string {
 		}
 	}
 	return out
+}
+
+// attached reports whether the agent's pane is in a grid window.
+func (m model) attached(name string) bool {
+	p, ok := m.panes[name]
+	return ok && p.Grid != ""
 }
 
 func (m model) isDetached(name string) bool {

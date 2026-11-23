@@ -13,7 +13,7 @@
 # Kill an idle agent's pane after this long. Go duration; 0/off/never disables.
 # idle_timeout: 2h
 
-# Bind a key to a shell command run in a new kitty tab at the selected folder.
+# Bind a key to a shell command run in a new tmux window at the selected folder.
 customCommands:
   - key: e
     panel: both
@@ -41,7 +41,7 @@ customCommands:
 #   createOrAttachAgent:    enter   # open/focus/launch the selection (or toggle a folder)
 #   detachAgent:            d       # detach a session's pane (tmux keeps running)
 #   killAgent:              D       # kill the agent's tmux session
-#   fullscreenAgent:        f       # open the agent in its own kitty tab
+#   fullscreenAgent:        f       # zoom the agent to full window size
 #   createOrFocusClaude:    c       # launch/focus Claude for the project
 #   createOrFocusOpencode:  o       # launch/focus OpenCode for the project
 #   createOrFocusPi:        p       # launch/focus Pi for the project

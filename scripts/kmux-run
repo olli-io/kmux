@@ -1,6 +1,6 @@
 #!/bin/bash
 # kmux-run — run a command outside the agent sandbox, then paste its exit code
-# and output tail into the agent's tmux session.
+# and output tail into the agent's tmux pane.
 #
 # A sandboxed agent cannot reach docker, ssh or the tmux socket. It asks you to
 # paste a kmux-run line into an unsandboxed terminal; the result comes back to
@@ -8,7 +8,8 @@
 # sandbox can read.
 #
 # Usage: kmux-run <id> <command...>
-#   <id>  tmux session of the agent: 7, '$7' or any tmux target
+#   <id>  tmux pane of the agent: 7, %7 or any tmux target.
+#         The agent reads its pane id from $TMUX_PANE.
 #   one <command> argument runs as a shell line; several run as an argv
 #   The command runs in the agent pane's current directory.
 #   KMUX_LINES sets how many output lines to paste (default 60).
@@ -22,10 +23,9 @@ die() { echo "kmux-run: $*" >&2; exit 2; }
 [ "${1:-}" = -h ] && { sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 0; }
 [ $# -ge 2 ] || die "usage: kmux-run <id> <command...>"
 target=$1; shift
-[[ $target =~ ^[0-9]+$ ]] && target="\$$target"
+[[ $target =~ ^[0-9]+$ ]] && target="%$target"
 lines=${KMUX_LINES:-60}
-tmux has-session -t "$target" 2>/dev/null || die "no tmux session '$target'"
-dir=$(tmux display -p -t "$target" '#{pane_current_path}')
+dir=$(tmux display-message -p -t "$target" '#{pane_current_path}' 2>/dev/null) || die "no tmux target '$target'"
 cd "$dir" || die "cannot cd to $dir"
 
 # One argument is a shell line; several are an argv, run as-is.
@@ -48,7 +48,9 @@ if [ -n "$scripts" ]; then
 fi
 
 mkdir -p /tmp/kmux-run
-log=$(mktemp /tmp/kmux-run/XXXXXXXX.log)
+# BSD mktemp replaces only X characters at the end of the template.
+log=$(mktemp /tmp/kmux-run/XXXXXXXX) || die "cannot make a log file in /tmp/kmux-run"
+mv "$log" "$log.log" && log=$log.log
 
 echo "+ $cmd"
 trap : INT

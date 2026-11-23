@@ -32,8 +32,6 @@ have go || die "Go is not installed. Install it from https://go.dev/dl/ (1.21+ r
 info "Using $(go version)"
 
 have tmux   || warn "tmux not found — kmux needs it at runtime."
-have kitty  || warn "kitty not found — kmux must run inside a kitty window."
-have kitten || warn "kitten not found — kmux drives kitty via 'kitten @'; ensure kitty's bin dir is on PATH."
 
 # ---------------------------------------------------------------------------
 # Locate the source.
@@ -69,20 +67,15 @@ fi
 # ---------------------------------------------------------------------------
 # Build & install
 # ---------------------------------------------------------------------------
-# kmux-idler is the lightweight launcher kmux runs in its idle panes. It installs
-# beside kmux ($DEST/kmux-idler) where kmux discovers it relative to its own path;
-# if it's absent kmux just falls back to inert idle slots.
+# Older versions installed a kmux-idler helper beside kmux. It is not used now.
 IDLER_NAME="kmux-idler"
 
 if [ -f "$SCRIPT_DIR/go.mod" ]; then
   info "Building $BIN_NAME from source in $SCRIPT_DIR ..."
   TMP_DIR="$(mktemp -d)"
   ( cd "$SCRIPT_DIR" && go build -trimpath -ldflags "-s -w" -o "$TMP_DIR/$BIN_NAME" ./cmd/kmux )
-  info "Building $IDLER_NAME ..."
-  ( cd "$SCRIPT_DIR" && go build -trimpath -ldflags "-s -w" -o "$TMP_DIR/$IDLER_NAME" ./cmd/kmux-idler )
-  info "Installing to $DEST/$BIN_NAME and $DEST/$IDLER_NAME ..."
+  info "Installing to $DEST/$BIN_NAME ..."
   $SUDO install -m 0755 "$TMP_DIR/$BIN_NAME" "$DEST/$BIN_NAME"
-  $SUDO install -m 0755 "$TMP_DIR/$IDLER_NAME" "$DEST/$IDLER_NAME"
   rm -rf "$TMP_DIR"
   CONFIG_SRC="$SCRIPT_DIR/scripts/config.yaml"
 else
@@ -90,16 +83,14 @@ else
   TMP_GOBIN="$(mktemp -d)"
   GOBIN="$TMP_GOBIN" GOFLAGS="-trimpath" go install "${REPO_URL#https://}/cmd/kmux@latest" \
     || die "go install failed. Clone the repo and re-run ./install.sh from inside it."
-  GOBIN="$TMP_GOBIN" GOFLAGS="-trimpath" go install "${REPO_URL#https://}/cmd/kmux-idler@latest" \
-    || warn "could not build $IDLER_NAME; idle panes will fall back to inert slots."
   info "Installing to $DEST/$BIN_NAME ..."
   $SUDO install -m 0755 "$TMP_GOBIN/$BIN_NAME" "$DEST/$BIN_NAME"
-  if [ -f "$TMP_GOBIN/$IDLER_NAME" ]; then
-    info "Installing to $DEST/$IDLER_NAME ..."
-    $SUDO install -m 0755 "$TMP_GOBIN/$IDLER_NAME" "$DEST/$IDLER_NAME"
-  fi
   rm -rf "$TMP_GOBIN"
   CONFIG_SRC=""
+fi
+if [ -f "$DEST/$IDLER_NAME" ]; then
+  info "Removing the unused $DEST/$IDLER_NAME ..."
+  $SUDO rm -f "$DEST/$IDLER_NAME"
 fi
 
 # ---------------------------------------------------------------------------
@@ -119,10 +110,17 @@ if [ -f "$SCRIPT_DIR/scripts/kmux-run" ] && [ -n "$CONFIG_SRC" ]; then
   $SUDO install -m 0755 "$SCRIPT_DIR/scripts/kmux-run" "$DEST/kmux-run"
 fi
 
+# The launcher runs in the free column of the grid. kmux looks for it beside the
+# binary; without it the free column shows a static text.
+if [ -f "$SCRIPT_DIR/scripts/kmux-launcher" ] && [ -n "$CONFIG_SRC" ]; then
+  info "Installing to $DEST/kmux-launcher ..."
+  $SUDO install -m 0755 "$SCRIPT_DIR/scripts/kmux-launcher" "$DEST/kmux-launcher"
+fi
+
 # ---------------------------------------------------------------------------
 # Deprecate the agent attention hooks.
-# kmux now detects which sessions need you (the Sessions-panel glyph and the kitty
-# tab / tmux window "[!!]" marker) purely from each session's pane text — no agent-
+# kmux now detects which sessions need you (the Sessions-panel glyph and the
+# tmux pane / window "[!!]" marker) purely from each session's pane text — no agent-
 # side hooks or plugins are required. Earlier versions installed a Claude Code hook
 # (in ~/.claude/settings.json) and an OpenCode plugin that invoked `kmux --attn`;
 # that flag no longer exists. This section REMOVES any previously-installed hook /
@@ -197,4 +195,4 @@ case ":$PATH:" in
 esac
 
 info "Done. Installed $BIN_NAME to $DEST/$BIN_NAME"
-info "Run it inside a kitty window with remote control enabled (see README)."
+info "Run kmux in any terminal; it needs tmux 3.2 or newer (see README)."

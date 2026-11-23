@@ -90,10 +90,9 @@ func kindStyle(kind string) lipgloss.Style {
 }
 
 // agentBadge renders the styled agent-kind badge ("CC"/"OC"/"PI") prefixed with its
-// attach state: green "A" attached, red "D" detached, dim "P" pending. Pending is
-// everything else — the session runs but has no pane, which in steady state means
-// reconcile is holding its pane back until the dashboard has focus. Showing it
-// keeps that wait visible instead of looking like kmux simply missed the session.
+// attach state: green "A" in a grid, red "D" detached, dim "P" pending. Pending is
+// everything else: the agent runs but its pane is not in a grid yet. The next
+// poll moves it in (not while a pane has the tmux zoom).
 // ‧ (U+2027) is a cosmetic separator. Returns "" for a non-agent name.
 func agentBadge(name string, attached, detached bool) string {
 	kind, ok := agent.LookupKind(agent.AgentKind(name))

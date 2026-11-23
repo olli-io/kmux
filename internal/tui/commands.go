@@ -7,21 +7,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/olli-io/kmux/internal/agent"
-	"github.com/olli-io/kmux/internal/kitty"
-	"github.com/olli-io/kmux/internal/layout"
+	"github.com/olli-io/kmux/internal/grid"
 	"github.com/olli-io/kmux/internal/project"
 	"github.com/olli-io/kmux/internal/status"
 	"github.com/olli-io/kmux/internal/tmux"
 )
 
-// macCadence throttles a polling interval on macOS, where the kitty and tmux
-// round-trips are noticeably more expensive.
+// macCadence throttles a polling interval on macOS, where a tmux round-trip is
+// noticeably more expensive.
 func macCadence(linux, mac time.Duration) time.Duration {
 	if runtime.GOOS == "darwin" {
 		return mac
@@ -41,11 +41,6 @@ const projectInterval = 5 * time.Second
 
 const spinnerInterval = 150 * time.Millisecond
 
-// launcherMin keeps the splash covering the pane churn that continues past the
-// first reconcile; launcherCap dismisses it if no reconcile ever completes.
-const launcherMin = 750 * time.Millisecond
-const launcherCap = 1500 * time.Millisecond
-
 var spinnerFrames = []string{"⠹", "⠼", "⠶", "⠧", "⠏", "⠛"}
 
 // messages
@@ -56,7 +51,11 @@ type sessionsMsg struct {
 	// orphaned sessions are killed after orphanConfirmPolls consecutive misses.
 	// Nil on a poll that couldn't compute it.
 	orphaned []string
-	err      error
+	// snap is the tmux pane snapshot of this poll; seq is the grid sequence number
+	// read before the snapshot (see grid.Manager.Reconcile).
+	snap []tmux.Pane
+	seq  int64
+	err  error
 }
 type projectsMsg struct {
 	projects []project.Project
@@ -67,28 +66,26 @@ type projectsMsg struct {
 }
 type spinnerMsg struct{}
 
-// reconciledMsg carries the blank panes read from the same snapshot the reconcile
-// took. scanned marks the reconciles that looked for blanks, so an empty slice
-// means "none" rather than "didn't check".
-type reconciledMsg struct {
-	errs   []error
-	blanks []kitty.BlankPane
-	// scanned reports that the pass got a live kitty snapshot; deferred that it had
-	// panes to open but held them back because the dashboard was unfocused.
-	scanned  bool
-	deferred bool
-}
+// reconciledMsg is the result of a grid pass that changed nothing.
+type reconciledMsg struct{ err error }
 
-type launcherCapMsg struct{}
-type launcherMinMsg struct{}
-type launcherDismissedMsg struct{ err error }
 type attentionMsg struct {
 	states map[string]status.AttentionState
 	hashes map[string]uint64 // session name -> pane fingerprint, for idle tracking
 }
 type focusedMsg struct{ err error }
+
+// clientsMsg carries the number of tmux clients on the dashboard's session.
+type clientsMsg struct {
+	n   int
+	err error
+}
+
+// noClientChecks is the number of consecutive checks without a client after
+// which the dashboard stops. One check can fall in a short client change.
+const noClientChecks = 2
+
 type savedMsg struct{ err error }
-type idleConvertedMsg struct{ err error }
 
 // commandErrMsg drives the dismissible error float.
 type commandErrMsg struct {
@@ -108,39 +105,35 @@ func spinnerCmd() tea.Cmd {
 	return tea.Tick(spinnerInterval, func(time.Time) tea.Msg { return spinnerMsg{} })
 }
 
-func launcherCapCmd() tea.Cmd {
-	return tea.Tick(launcherCap, func(time.Time) tea.Msg { return launcherCapMsg{} })
-}
-
-func launcherMinCmd() tea.Cmd {
-	return tea.Tick(launcherMin, func(time.Time) tea.Msg { return launcherMinMsg{} })
-}
-
-func pollCmd() tea.Cmd {
+func pollCmd(mgr *grid.Manager) tea.Cmd {
 	return func() tea.Msg {
-		return pollSessions()
+		return pollSessions(mgr)
 	}
 }
 
 // pollSessions lists the live agent sessions and flags those whose anchor
 // directory has vanished. A tmux error is returned verbatim so the caller leaves
 // the session list untouched.
-func pollSessions() tea.Msg {
-	sessions, err := tmux.ListAgentSessionsFull()
+func pollSessions(mgr *grid.Manager) tea.Msg {
+	seq := mgr.Seq()
+	snap, err := tmux.Snapshot()
 	if err != nil {
 		return sessionsMsg{err: err}
 	}
-	names := make([]string, len(sessions))
+	agents := tmux.Agents(snap)
+	names := make([]string, 0, len(agents))
 	var orphaned []string
-	for i, s := range sessions {
-		names[i] = s.Name
+	for name, p := range agents {
+		names = append(names, name)
 		// A deliberately-orphaned session was never bound to a project, so its
 		// directory going away isn't a worktree removal.
-		if !agent.IsOrphan(s.Name) && isMissingDir(s.Dir) {
-			orphaned = append(orphaned, s.Name)
+		if !agent.IsOrphan(name) && isMissingDir(p.Dir) {
+			orphaned = append(orphaned, name)
 		}
 	}
-	return sessionsMsg{names: names, orphaned: orphaned}
+	sort.Strings(names)
+	sort.Strings(orphaned)
+	return sessionsMsg{names: names, orphaned: orphaned, snap: snap, seq: seq}
 }
 
 // isMissingDir counts only a not-exist error; an empty path or any other stat
@@ -154,25 +147,29 @@ func isMissingDir(dir string) bool {
 }
 
 // attentionCmd classifies every session's attention state from its tmux pane.
-// Panes are captured in one batched call, falling back to one call per session
-// so a session that died mid-cycle can't blank the rest. Detached sessions are
+// Panes are captured in one batched call, falling back to one call per pane so
+// a pane that died mid-cycle can't blank the rest. Detached sessions are
 // included; tmux keeps their buffers.
-func attentionCmd(sessions []string) tea.Cmd {
+func attentionCmd(sessions []string, panes map[string]tmux.Pane) tea.Cmd {
 	snap := append([]string(nil), sessions...)
+	ids := make([]string, len(snap))
+	for i, s := range snap {
+		ids[i] = panes[s].ID
+	}
 	return func() tea.Msg {
 		states := make(map[string]status.AttentionState, len(snap))
 		hashes := make(map[string]uint64, len(snap))
-		texts, err := tmux.CapturePanes(snap)
+		texts, err := tmux.CapturePaneIDs(ids)
 		if err != nil {
-			texts = make(map[string]string, len(snap))
-			for _, s := range snap {
-				if t, err := tmux.CapturePane(s); err == nil {
-					texts[s] = t
+			texts = make(map[string]string, len(ids))
+			for _, id := range ids {
+				if t := tmux.CapturePaneID(id); t != "" {
+					texts[id] = t
 				}
 			}
 		}
-		for _, s := range snap {
-			text, ok := texts[s]
+		for i, s := range snap {
+			text, ok := texts[ids[i]]
 			if !ok {
 				// Omitting the hash makes the idle tracker treat this session as gone
 				// for this poll, so a flaky capture never causes a kill.
@@ -183,26 +180,6 @@ func attentionCmd(sessions []string) tea.Cmd {
 			hashes[s] = status.HashPane(text)
 		}
 		return attentionMsg{states: states, hashes: hashes}
-	}
-}
-
-// convertBlankPaneCmd handles a newly appeared user-spawned blank pane off the UI
-// goroutine. A pane that is its own full-height column is a manual *vertical* split
-// — a fourth column the fixed sidebar+maxColumns layout has no room for — so it is
-// restacked under an existing column (layout.ReorgVerticalPane). Any other blank
-// pane (already stacked, i.e. a horizontal split) is turned into a kmux idle
-// launcher in place: an `exec` of `kmux-idler --idle-loop` makes it show the idle
-// hint and launch the picker on a keypress, exactly like a managed placeholder
-// slot. The standalone-column classification rides along on the pane from the scan
-// (see kitty.BlankPane), so no second `ls` is needed here. idlerPath is the
-// absolute path to the helper (from layout.IdlerPath).
-func convertBlankPaneCmd(mgr *layout.Manager, pane kitty.BlankPane, idlerPath string) tea.Cmd {
-	return func() tea.Msg {
-		if pane.StandaloneColumn {
-			return idleConvertedMsg{err: mgr.ReorgVerticalPane(pane.ID)}
-		}
-		runline := "exec " + shellQuote(idlerPath) + " --idle-loop"
-		return idleConvertedMsg{err: kitty.RunInWindow(pane.ID, runline)}
 	}
 }
 
@@ -230,104 +207,100 @@ func activeProjectsCmd(paths []string) tea.Cmd {
 	}
 }
 
-// reconcileCmd attaches/detaches agent panes, then pads the layout with
-// placeholders so real agent panes keep a fixed width. Opening a pane pulls kitty
-// to the foreground even with --keep-focus, so the Manager holds new panes back
-// while the dashboard's tab is unfocused; deferred says it did, and the ticker
-// retries every poll.
-func reconcileCmd(mgr *layout.Manager, active []string) tea.Cmd {
+// reconcileCmd moves agent panes into and out of the grid window and sets the
+// layout. snap and seq come from the poll; a nil snap makes the Manager take a
+// new snapshot. A pass that changed tmux is followed by a poll, so that the
+// dashboard shows the new state at once.
+func reconcileCmd(mgr *grid.Manager, snap []tmux.Pane, seq int64, active []string) tea.Cmd {
+	want := append([]string(nil), active...)
 	return func() tea.Msg {
-		// Atomic inside the Manager, so overlapping reconciles serialize instead of
-		// racing the layout into extra slots.
-		_, deferred, blanks, errs := mgr.ReconcileAll(active)
-		return reconciledMsg{errs: errs, blanks: blanks, scanned: true, deferred: deferred}
-	}
-}
-
-func focusCmd(id int) tea.Cmd {
-	return func() tea.Msg {
-		return focusedMsg{err: kitty.FocusWindow(id)}
-	}
-}
-
-// setTabTitleCmd retitles the dashboard's kitty tab off the UI goroutine, matching
-// on the sidebar window id (windowID). It is best-effort and returns no message: a
-// title failure must not disrupt the dashboard, and the title carries no state the
-// model needs to hear back about.
-func setTabTitleCmd(windowID int, scopeDir string, needsAttention bool) tea.Cmd {
-	return func() tea.Msg {
-		_ = kitty.SetTabTitle(windowID, agent.DashTabTitle(scopeDir, needsAttention))
-		return nil
-	}
-}
-
-// setSessionAttnCmd renames session (a canonical name) to surface or clear the "[!!]"
-// attention marker on the tmux SESSION itself, off the UI goroutine. It renames from the
-// session's current live name (resolved via LiveName) to AttnSession(canonical, want), so
-// the marker shows in tmux's status bar and choose-tree. parseSessionList strips the
-// marker back off on the next poll, so kmux's identity/map keys stay canonical.
-// Best-effort and message-less, matching setTabTitleCmd: a rename failure must not
-// disrupt the dashboard. The attentionMsg handler only calls this on a permission-state
-// flip, so it doesn't shell out every poll.
-func setSessionAttnCmd(session string, needsAttention bool) tea.Cmd {
-	return func() tea.Msg {
-		_ = tmux.RenameSession(tmux.LiveName(session), agent.AttnSession(session, needsAttention))
-		return nil
-	}
-}
-
-// dismissLauncherCmd tears down the launch-overlay splash tab off the UI
-// goroutine: it focuses the finished dashboard (sidebarID) first, so the reveal
-// switches to the settled layout, then closes the splash tab (launcherID). Doing
-// it in that order means the user never sees a bare tab between the splash
-// closing and the dashboard appearing. Best-effort — close ignores a missing
-// match — so a splash the user closed by hand can't error the launch.
-func dismissLauncherCmd(sidebarID, launcherID int) tea.Cmd {
-	return func() tea.Msg {
-		if err := kitty.FocusWindow(sidebarID); err != nil {
-			return launcherDismissedMsg{err: err}
+		changed, err := mgr.Reconcile(snap, seq, want)
+		if err != nil {
+			return reconciledMsg{err: err}
 		}
-		return launcherDismissedMsg{err: kitty.CloseWindow(launcherID)}
+		if changed {
+			return pollSessions(mgr)
+		}
+		return reconciledMsg{}
 	}
 }
 
-// openSessionCmd creates (if needed) and attaches an agent session pane, then
-// pads/rebalances the layout. agentCmd is the executable the new tmux session runs.
-func openSessionCmd(mgr *layout.Manager, name, dir, agentCmd string) tea.Cmd {
+// clientsCmd reads the number of clients on the dashboard's session.
+func clientsCmd(mgr *grid.Manager) tea.Cmd {
 	return func() tea.Msg {
-		return reconciledMsg{errs: mgr.OpenAndSync(name, dir, agentCmd)}
+		n, err := mgr.Clients()
+		return clientsMsg{n: n, err: err}
 	}
 }
 
-// killSessionCmd re-lists after the kill so the panel updates immediately; the
-// resulting sessionsMsg drives the reconcile that closes the orphaned pane.
-func killSessionCmd(name string) tea.Cmd {
+func focusCmd(p tmux.Pane) tea.Cmd {
 	return func() tea.Msg {
-		if err := tmux.KillSession(name); err != nil {
+		return focusedMsg{err: grid.Focus(p)}
+	}
+}
+
+// zoomCmd shows one agent pane at full window size (tmux zoom).
+func zoomCmd(p tmux.Pane) tea.Cmd {
+	return func() tea.Msg {
+		return focusedMsg{err: grid.Zoom(p)}
+	}
+}
+
+// setWindowNameCmd renames the grid window off the UI goroutine. The name has
+// the "[!!]" prefix while an agent is blocked, so the tmux status line shows it.
+// It is best-effort and returns no message.
+func setWindowNameCmd(win, scopeDir string, needsAttention bool) tea.Cmd {
+	return func() tea.Msg {
+		_ = tmux.Chain([][]string{{"rename-window", "-t", win, agent.DashTabTitle(scopeDir, needsAttention)}})
+		return nil
+	}
+}
+
+// setSessionAttnCmd sets or clears the attention mark of an agent, off the UI
+// goroutine: the pane option that the grid's pane title line shows, and, for a
+// parked agent, the "[!!]" prefix of its own tmux session name. Best-effort and
+// message-less. The attentionMsg handler calls it only when the state flips.
+func setSessionAttnCmd(p tmux.Pane, session string, needsAttention bool) tea.Cmd {
+	return func() tea.Msg {
+		mark := ""
+		if needsAttention {
+			mark = "1"
+		}
+		if p.ID == "" {
+			return nil // the agent is gone; an empty target is the dashboard itself
+		}
+		_ = tmux.SetPaneOptions(p.ID, tmux.OptAttn, mark)
+		// A parked agent has its own session. p can be out of date: a grid pass can
+		// move the pane into the dashboard's session after the snapshot. Thus the
+		// target is the exact name of the agent's session, not the pane. If the
+		// agent is in a grid now, that session is gone and tmux does nothing.
+		if p.Grid == "" && tmux.IsAgentSession(p.Session) {
+			_ = tmux.RenameSession("="+p.Session, agent.AttnSession(session, needsAttention))
+		}
+		return nil
+	}
+}
+
+// openSessionCmd creates an agent in a hidden session of its own, then polls.
+// The poll's reconcile moves the new pane into the grid. agentCmd is the command
+// the new pane runs.
+func openSessionCmd(mgr *grid.Manager, name, dir, agentCmd string) tea.Cmd {
+	return func() tea.Msg {
+		if _, err := tmux.NewAgentSession(name, dir, agentCmd); err != nil {
 			return sessionsMsg{err: err}
 		}
-		return pollSessions()
+		return pollSessions(mgr)
 	}
 }
 
-// reattachSessionCmd re-opens a pane for a running session whose pane was lost.
-func reattachSessionCmd(mgr *layout.Manager, name string) tea.Cmd {
+// killSessionCmd removes the agent's pane, then polls so the panel and the grid
+// update immediately.
+func killSessionCmd(mgr *grid.Manager, p tmux.Pane) tea.Cmd {
 	return func() tea.Msg {
-		return reconciledMsg{errs: mgr.ReattachAndSync(name)}
-	}
-}
-
-// saveProjectsCmd persists the full scanned project list off the UI goroutine so
-// a freshly-spawned idler can paint its picker from disk instead of re-scanning
-// every repo under ~/git. It snapshots the slice header so a later m.projects
-// replacement can't race the write; the underlying Project values are only read.
-// The result is discarded (a fresh tea.Msg the model ignores) — a write error is
-// non-fatal, the idler just falls back to a live scan.
-func saveProjectsCmd(projects []project.Project) tea.Cmd {
-	snapshot := append([]project.Project(nil), projects...)
-	return func() tea.Msg {
-		_ = status.SaveProjects(snapshot)
-		return nil
+		if err := tmux.KillPane(p.ID); err != nil {
+			return sessionsMsg{err: err}
+		}
+		return pollSessions(mgr)
 	}
 }
 
@@ -370,15 +343,20 @@ func (m model) runUserCommand(key string, rows []row) tea.Cmd {
 		case "detach":
 			return detachProcessCmd(vars["dir"], title, runline)
 		case "window":
-			return userCommandCmd(vars["dir"], title, holdOnError(runline, title), kitty.OpenCommandWindow)
+			return userCommandCmd(vars["dir"], title, holdOnError(runline, title), openCommandWindow)
 		default: // "tab"
-			return userCommandCmd(vars["dir"], title, holdOnError(runline, title), kitty.OpenCommandTab)
+			return userCommandCmd(vars["dir"], title, holdOnError(runline, title), openCommandWindow)
 		}
 	}
 	return nil
 }
 
-// holdOnError keeps a failed command's kitty surface open with a labeled notice
+// openCommandWindow runs a shell line in a new tmux window in dir.
+func openCommandWindow(dir, title, runline string) error {
+	return tmux.Chain([][]string{{"new-window", "-c", dir, "-n", title, "sh", "-c", runline}})
+}
+
+// holdOnError keeps a failed command's tmux window open with a labeled notice
 // instead of flashing shut. The command runs out of kmux's reach, so this is how
 // its failure surfaces. label is shell-escaped.
 func holdOnError(runline, label string) string {
@@ -412,8 +390,8 @@ func userCommandCmd(dir, title, runline string, open func(dir, title, runline st
 // to fail before treating it as a launched, live app.
 const detachGrace = 600 * time.Millisecond
 
-// detachProcessCmd runs runline as a detached background process with no kitty
-// surface, for fork-and-return GUI apps. The child gets its own process group and
+// detachProcessCmd runs runline as a detached background process with no tmux
+// window, for fork-and-return GUI apps. The child gets its own process group and
 // survives kmux, but its early exit is still observable.
 func detachProcessCmd(dir, title, runline string) tea.Cmd {
 	return func() tea.Msg {
@@ -445,29 +423,16 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// openAgentTabCmd attaches an agent session in a standalone kitty tab, not a
-// managed pane. A non-empty agentCmd first ensures a detached tmux session exists;
-// pass an empty one to just attach.
-func openAgentTabCmd(name, dir, agentCmd string) tea.Cmd {
-	return func() tea.Msg {
-		if agentCmd != "" {
-			if err := tmux.NewDetachedSession(name, dir, agentCmd); err != nil {
-				return focusedMsg{err: err}
-			}
-		}
-		// Attach by the live name (a blocked session carries "[!!]"); keep the canonical
-		// name as the tab title.
-		return focusedMsg{err: kitty.OpenAgentTab(tmux.LiveName(name), name)}
-	}
-}
-
-// openTabCmd launches a new kitty tab running a fresh kmux scoped to dir.
+// openTabCmd opens a new tmux window that runs a fresh kmux scoped to dir. That
+// window is a grid of its own.
 func openTabCmd(dir string) tea.Cmd {
 	return func() tea.Msg {
 		exe, err := os.Executable()
 		if err != nil {
 			return focusedMsg{err: err}
 		}
-		return focusedMsg{err: kitty.OpenTab(exe, dir, "kmux::"+filepath.Base(dir))}
+		return focusedMsg{err: tmux.Chain([][]string{
+			{"new-window", "-c", dir, "-n", "kmux::" + filepath.Base(dir), exe, dir},
+		})}
 	}
 }

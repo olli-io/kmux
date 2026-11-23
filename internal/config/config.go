@@ -79,7 +79,7 @@ func (s Sandbox) ConfigSettingsPath() string {
 }
 
 // CustomCommand is one configurable keybinding: pressing Key in a matching panel
-// runs Cmd in a new kitty tab whose cwd is the selected row's directory.
+// runs Cmd in a new tmux window whose cwd is the selected row's directory.
 type CustomCommand struct {
 	// Key is the keypress that triggers the command. Keys that collide with kmux's
 	// fixed bindings are ignored.
@@ -89,11 +89,11 @@ type CustomCommand struct {
 	Cmd string `yaml:"cmd"`
 	// Panel scopes the binding: "sessions", "projects", or "both" (the default).
 	Panel string `yaml:"panel"`
-	// Title labels the binding in the Keys footer and names its kitty tab.
+	// Title labels the binding in the Keys footer and names its tmux window.
 	Title string `yaml:"title"`
-	// Target selects how the command runs: "tab" (default) a new kitty tab,
-	// "window" a new kitty OS window, or "detach" a background process with no
-	// kitty surface (for GUI editors like Zed that fork and return).
+	// Target selects how the command runs: "tab" (default) or "window" a
+	// new tmux window, or "detach" a background process with no tmux window (for
+	// GUI editors like Zed that fork and return).
 	Target string `yaml:"target"`
 }
 

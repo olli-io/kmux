@@ -2,15 +2,15 @@ package tui
 
 import (
 	"path/filepath"
+	"reflect"
 	"slices"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/olli-io/kmux/internal/agent"
 	"github.com/olli-io/kmux/internal/config"
-	"github.com/olli-io/kmux/internal/kitty"
-	"github.com/olli-io/kmux/internal/layout"
 	"github.com/olli-io/kmux/internal/status"
+	"github.com/olli-io/kmux/internal/tmux"
 )
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -29,13 +29,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.focused {
 			return m, tickCmd()
 		}
-		return m, tea.Batch(pollCmd(), tickCmd())
+		return m, tea.Batch(pollCmd(m.mgr), tickCmd())
 
 	case projectTickMsg:
 		// Skip firing a scan while one is still in flight so a slow scan can't stack
 		// concurrent copies; always re-arm the ticker. Recurring ticks rescan only the
 		// active projects; scoped mode rescans its single project.
-		cmd := projectTickCmd()
+		// This slow tick also checks that a terminal still shows the dashboard. It
+		// runs when the pane has no focus too, because a closed terminal gives none.
+		cmd := tea.Batch(projectTickCmd(), clientsCmd(m.mgr))
 		if !m.scanning {
 			switch {
 			case m.scopeDir != "":
@@ -62,14 +64,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// again, rather than waiting for the next tick.
 		if !m.focused {
 			m.focused = true
-			cmd = tea.Batch(cmd, pollCmd())
-		}
-		// Panes held back while unfocused would otherwise wait for the next tick, so
-		// retry at once. kitty reports focus per pane, so this fires only when the
-		// cursor lands on the sidebar itself; the gate is per tab, so landing in a
-		// sibling agent pane also opens it, and there the poll is the retry.
-		if m.launchDeferred {
-			cmd = tea.Batch(cmd, reconcileCmd(m.mgr, m.attachable()))
+			cmd = tea.Batch(cmd, pollCmd(m.mgr))
 		}
 		return m, cmd
 
@@ -96,16 +91,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.lastErr = ""
 		m.sessions = m.scopedSessions(msg.names)
+		m.panes = tmux.Agents(msg.snap)
 		pruned := m.pruneDetached()
 		// Refresh attention off the freshest session list (drives the session glyphs).
-		cmd := tea.Batch(reconcileCmd(m.mgr, m.attachable()), attentionCmd(m.sessions))
+		cmd := tea.Batch(reconcileCmd(m.mgr, msg.snap, msg.seq, m.attachable()), attentionCmd(m.sessions, m.panes))
 		if pruned {
 			cmd = tea.Batch(cmd, m.saveStateCmd())
 		}
 		// Kill sessions whose repo/worktree has been deleted, once confirmed missing
 		// across enough polls. killSessionCmd re-lists, so the panel and panes update.
 		for _, name := range m.trackOrphans(msg.orphaned) {
-			cmd = tea.Batch(cmd, killSessionCmd(name))
+			cmd = tea.Batch(cmd, killSessionCmd(m.mgr, m.panes[name]))
 		}
 		return m, cmd
 
@@ -122,46 +118,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.projects = msg.projects
-		// A full, unscoped sweep is the only time m.projects holds the complete
-		// ~/git set; persist it so a freshly-spawned idler can paint from the cache
-		// instead of re-scanning every repo. Scoped mode holds a single project and
-		// must not clobber the full cache.
-		if m.scopeDir != "" {
-			return m, nil
-		}
-		return m, saveProjectsCmd(m.projects)
+		return m, nil
 
 	case reconciledMsg:
-		if len(msg.errs) > 0 {
-			m.lastErr = msg.errs[0].Error()
-		}
-		// The first reconcile means the panes are built; mark the layout ready and drop
-		// the splash once the minimum hold has also elapsed. Later reconciles no-op.
-		m.layoutReady = true
-		m.launchDeferred = msg.deferred
-		cmd := m.dismissLauncherWhenReady()
-		// Adopt user-spawned blank panes off this reconcile's snapshot. Only a scanned
-		// reconcile (the poll) feeds the handler; the others never seed or convert.
-		if msg.scanned {
-			if blankCmd := m.handleBlankPanes(msg.blanks); blankCmd != nil {
-				cmd = tea.Batch(cmd, blankCmd)
-			}
-		}
-		return m, cmd
-
-	case launcherMinMsg:
-		// The minimum hold elapsed; dismiss the splash once the layout is also ready.
-		m.minHeld = true
-		cmd := m.dismissLauncherWhenReady()
-		return m, cmd
-
-	case launcherCapMsg:
-		// Fallback: dismiss the splash even if no reconcile ever completed, ignoring
-		// the min-hold gate so a stalled launch can't strand it.
-		cmd := m.dismissLauncher()
-		return m, cmd
-
-	case launcherDismissedMsg:
 		if msg.err != nil {
 			m.lastErr = msg.err.Error()
 		}
@@ -176,11 +135,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			busy[s] = st == status.AttnBusy
 		}
 		kill := m.idle.Reap(time.Now(), msg.hashes, busy)
-		// Persist the freshly advanced idle clocks so a restart resumes them and
+		// Persist the idle clocks when they changed, so a restart resumes them and
 		// the launch sweep can reap sessions that stayed idle while kmux was off.
-		cmds := []tea.Cmd{m.saveStateCmd()}
+		var cmds []tea.Cmd
+		if idle := m.idle.Snapshot(); !reflect.DeepEqual(idle, m.lastIdle) {
+			m.lastIdle = idle
+			cmds = append(cmds, m.saveStateCmd())
+		}
 		for _, name := range kill {
-			cmds = append(cmds, killSessionCmd(name))
+			cmds = append(cmds, killSessionCmd(m.mgr, m.panes[name]))
 		}
 		// Start the busy spinner on the idle->busy transition; this is the sole place
 		// it restarts. The spinning guard prevents arming a second ticker.
@@ -188,11 +151,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinning = true
 			cmds = append(cmds, spinnerCmd())
 		}
-		// Re-title the kitty tab only when the [!!] attention flag flips, so the
-		// dashboard doesn't spawn a `kitten @` (a ~30ms cold start) every poll.
+		// Rename the grid window only when the [!!] attention flag flips.
 		if attn := anyNeedsAttention(m.attention); attn != m.tabAttn {
 			m.tabAttn = attn
-			cmds = append(cmds, setTabTitleCmd(m.mgr.SidebarID(), m.scopeDir, attn))
+			cmds = append(cmds, setWindowNameCmd(m.mgr.Window(), m.scopeDir, attn))
 		}
 		// Mirror the [!!] marker onto each session's own tmux session name, so it shows
 		// in tmux's status bar / choose-tree too — but only on a per-session flip, so a
@@ -201,9 +163,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.sessionAttnCmds(msg.states)...)
 		return m, tea.Batch(cmds...)
 
-	case idleConvertedMsg:
-		if msg.err != nil {
-			m.lastErr = msg.err.Error()
+	case clientsMsg:
+		// The terminal of the dashboard was closed or detached. tmux keeps the
+		// session, so kmux would continue out of view and hold the agents in a grid
+		// that nobody sees. Stop instead: each agent goes into its own session.
+		if msg.err != nil || msg.n > 0 {
+			m.noClient = 0
+			return m, nil
+		}
+		if m.noClient++; m.noClient >= noClientChecks {
+			_ = m.mgr.Close()
+			return m, tea.Quit
 		}
 		return m, nil
 
@@ -229,52 +199,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleBlankPanes converts newly appeared blank panes into idle launchers. The
-// first call only seeds idledPanes, so panes already open at startup are left
-// untouched; each pane is converted at most once.
-func (m *model) handleBlankPanes(panes []kitty.BlankPane) tea.Cmd {
-	idlerPath := layout.IdlerPath()
-	if idlerPath == "" {
-		return nil // no helper to launch; leave the user's panes alone
-	}
-	var cmds []tea.Cmd
-	for _, p := range panes {
-		if m.idledPanes[p.ID] {
-			continue
-		}
-		m.idledPanes[p.ID] = true
-		if m.blankSeeded {
-			cmds = append(cmds, convertBlankPaneCmd(m.mgr, p, idlerPath))
-		}
-	}
-	m.blankSeeded = true
-	if len(cmds) == 0 {
-		return nil
-	}
-	return tea.Batch(cmds...)
-}
-
-// dismissLauncher tears down the splash tab, or returns nil when there's no splash
-// or it was already dismissed. One-shot: it marks launched so the reveal happens
-// exactly once, whichever trigger fires first.
-func (m *model) dismissLauncher() tea.Cmd {
-	if m.launcherID == 0 || m.launched {
-		return nil
-	}
-	m.launched = true
-	return dismissLauncherCmd(m.mgr.SidebarID(), m.launcherID)
-}
-
-// dismissLauncherWhenReady tears down the splash only once both gates are met: the
-// layout has settled and the minimum hold has elapsed. The second trigger to arrive
-// completes the dismissal, so the splash never blinks away over the early churn.
-func (m *model) dismissLauncherWhenReady() tea.Cmd {
-	if !m.layoutReady || !m.minHeld {
-		return nil
-	}
-	return m.dismissLauncher()
-}
-
 // handleKey processes navigation and fold keys (arrows + vim).
 func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// A command-error float captures all input until dismissed.
@@ -293,7 +217,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// before the rebindable actions so a user binding can never shadow them.
 	switch msg.String() {
 	case "ctrl+c":
-		m.mgr.CloseAll()
+		_ = m.mgr.Close()
 		return m, tea.Quit
 	case "1":
 		m.cursor = sectionStart(rows, sectionProjects)
@@ -307,17 +231,13 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// the resolved keybindings). An unbound key falls through to user commands.
 	switch m.keyAction[msg.String()] {
 	case config.ActionQuit:
-		m.mgr.CloseAll()
+		_ = m.mgr.Close()
 		return m, tea.Quit
 
 	case config.ActionNextItem, config.ActionNextItemAlt:
-		if m.cursor < len(rows)-1 {
-			m.cursor++
-		}
+		m.moveCursor(rows, 1)
 	case config.ActionPrevItem, config.ActionPrevItemAlt:
-		if m.cursor > 0 {
-			m.cursor--
-		}
+		m.moveCursor(rows, -1)
 
 	case config.ActionNextPanel, config.ActionNextPanelAlt:
 		m.focusPanel(rows, true)
@@ -325,17 +245,17 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.focusPanel(rows, false)
 
 	case config.ActionDetachAgent:
-		// Detach a session leaf: close its kitty pane but leave the tmux session
-		// running. Marking it detached keeps reconcile from re-attaching; the
-		// reconcile below closes the current pane.
+		// Detach a session leaf: move its pane out of the grid into a session of its
+		// own. The agent continues to run. Marking it detached keeps reconcile from
+		// moving it back in.
 		if r := rowAt(rows, m.cursor); isSessionLeaf(r) && !m.detached[r.session] {
 			m.detached[r.session] = true
-			return m, tea.Batch(reconcileCmd(m.mgr, m.attachable()), m.saveStateCmd())
+			return m, tea.Batch(reconcileCmd(m.mgr, nil, 0, m.attachable()), m.saveStateCmd())
 		}
 	case config.ActionKillAgent:
-		// Kill the agent: ends the tmux session and its pane.
+		// Kill the agent: removes its pane and thus ends the agent.
 		if name := m.killTarget(rowAt(rows, m.cursor)); name != "" {
-			return m, killSessionCmd(name)
+			return m, killSessionCmd(m.mgr, m.panes[name])
 		}
 	case config.ActionCreateOrAttachAgent:
 		r := rowAt(rows, m.cursor)
@@ -357,22 +277,22 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case config.ActionLaunchKmuxInProject:
-		// Open the selected project's root/main worktree in a new kitty tab
+		// Open the selected project's root/main worktree in a new tmux window
 		// running its own kmux. Projects panel only (no-op for session rows).
 		if dir := m.projectRoot(rowAt(rows, m.cursor)); dir != "" {
 			return m, openTabCmd(dir)
 		}
 
 	case config.ActionRefreshProjects:
-		// Force a full git rescan of every project on demand, the same sweep a tab
+		// Force a full git rescan of every project on demand, the same sweep a
 		// refocus triggers. Useful when status changed from outside kmux (a commit,
 		// push, or checkout in another terminal) and the user wants it reflected now.
 		cmd := m.refreshProjectsCmd()
 		return m, cmd
 
 	case config.ActionFullscreenAgent:
-		// Open the selected agent in its own kitty tab instead of a managed pane.
-		// Works in both panels: a session leaf attaches; a project row launches.
+		// Show the selected agent at full window size (tmux zoom). Works in both
+		// panels: a session leaf zooms; a project row zooms or launches.
 		r := rowAt(rows, m.cursor)
 		if cmd := m.openSessionTab(r); cmd != nil {
 			return m, cmd
@@ -420,6 +340,32 @@ func (m *model) refreshProjectsCmd() tea.Cmd {
 	return projectsCmd(m.scopeDir)
 }
 
+// moveCursor moves the cursor one row in display order. The dashboard shows the
+// Projects panel above the Sessions panel, but rows holds the session rows first.
+// Thus the move goes from the last project row down to the first session row,
+// and back. It stops at the top and at the bottom.
+func (m *model) moveCursor(rows []row, delta int) {
+	nSess := 0
+	for nSess < len(rows) && rows[nSess].section == sectionSessions {
+		nSess++
+	}
+	nProj := len(rows) - nSess
+	// Display index: project rows first, then session rows.
+	v := m.cursor + nProj
+	if m.cursor >= nSess {
+		v = m.cursor - nSess
+	}
+	v += delta
+	if v < 0 || v >= len(rows) {
+		return
+	}
+	if v < nProj {
+		m.cursor = v + nSess
+	} else {
+		m.cursor = v - nProj
+	}
+}
+
 // focusPanel moves the cursor to the start of the previous or next panel. It's
 // written generically over the panel list so a third panel would just work.
 func (m *model) focusPanel(rows []row, next bool) {
@@ -440,7 +386,7 @@ func (m *model) focusPanel(rows []row, next bool) {
 // handleErrKey dismisses the command-error float on any keypress; ctrl+c quits.
 func (m model) handleErrKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
-		m.mgr.CloseAll()
+		_ = m.mgr.Close()
 		return m, tea.Quit
 	}
 	m.cmdErr = nil
@@ -452,7 +398,7 @@ func (m model) handleErrKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 func (m model) handlePromptKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
-		m.mgr.CloseAll()
+		_ = m.mgr.Close()
 		return m, tea.Quit
 	case "esc", "q", "h", "left":
 		m.prompt = nil
@@ -519,7 +465,7 @@ func (m *model) sessionAttnCmds(states map[string]status.AttentionState) []tea.C
 		} else {
 			delete(m.sessAttn, s)
 		}
-		cmds = append(cmds, setSessionAttnCmd(s, want))
+		cmds = append(cmds, setSessionAttnCmd(m.panes[s], s, want))
 	}
 	// Drop tracking for sessions that vanished from the poll so the map can't grow
 	// unbounded; they're gone, so no rename is needed.
@@ -551,53 +497,45 @@ func (m *model) openOrFocusSession(r *row) tea.Cmd {
 	return m.focusOrReattach(name)
 }
 
-// focusOrReattach focuses a session's pane, re-opening one first when it has none.
-// It clears any detached flag so reconcile keeps the pane, persisting the change.
+// focusOrReattach selects a session's pane, or moves the pane into the grid when
+// it is not there. It clears any detached flag so reconcile keeps the pane in
+// the grid, persisting the change.
 func (m *model) focusOrReattach(name string) tea.Cmd {
 	save := m.clearDetached(name)
-	if id, ok := m.mgr.WindowID(name); ok {
-		return tea.Batch(focusCmd(id), save)
+	if m.attached(name) {
+		return tea.Batch(focusCmd(m.panes[name]), save)
 	}
-	return tea.Batch(reattachSessionCmd(m.mgr, name), save)
+	return tea.Batch(reconcileCmd(m.mgr, nil, 0, m.attachable()), save)
 }
 
-// openSessionTab attaches a session leaf row's session in its own kitty tab, not a
-// managed pane. Returns nil when r is not a session leaf.
+// zoomOrReattach shows a session's pane at full window size. A pane that is not
+// in the grid goes into the grid first; a second press then zooms it.
+func (m *model) zoomOrReattach(name string) tea.Cmd {
+	if m.attached(name) {
+		return zoomCmd(m.panes[name])
+	}
+	return m.focusOrReattach(name)
+}
+
+// openSessionTab zooms a session leaf row's pane. Returns nil when r is not a
+// session leaf.
 func (m *model) openSessionTab(r *row) tea.Cmd {
 	if !isSessionLeaf(r) {
 		return nil
 	}
-	return openAgentTabCmd(r.session, "", "")
+	return m.zoomOrReattach(r.session)
 }
 
-// launchProjectTab is the standalone-tab counterpart of launchProject: it opens the
-// row's agent in a kitty tab rather than a pane. Exactly one running kind attaches
-// directly; none or several opens the picker in tab mode.
+// launchProjectTab is the zoom counterpart of launchProject: exactly one running
+// kind is zoomed directly; none or several opens the picker.
 func (m *model) launchProjectTab(r *row) (tea.Cmd, bool) {
 	if r == nil || r.section != sectionProjects || r.session == "" {
 		return nil, false
 	}
-	running := m.runningKinds(r.session)
-	if len(running) == 1 {
-		return openAgentTabCmd(running[0], "", ""), true
+	if running := m.runningKinds(r.session); len(running) == 1 {
+		return m.zoomOrReattach(running[0]), true
 	}
-	m.prompt = &agentPrompt{
-		title:   filepath.Base(r.dir),
-		session: r.session,
-		dir:     r.dir,
-		tab:     true,
-	}
-	return nil, true
-}
-
-// launchKindTab is the standalone-tab counterpart of launchKind: it attaches the
-// given kind's session in a kitty tab, creating the tmux session first if needed.
-func (m *model) launchKindTab(session, dir, kind string) tea.Cmd {
-	name := agent.SessionForKind(session, kind)
-	if m.hasSession(name) {
-		return openAgentTabCmd(name, "", "")
-	}
-	return openAgentTabCmd(name, dir, agent.AgentCommand(kind, dir))
+	return m.launchProject(r)
 }
 
 // launchKindActions maps an agent kind to the keybinding action that launches it
@@ -647,9 +585,6 @@ func (m *model) launchProject(r *row) (tea.Cmd, bool) {
 func (m *model) confirmPrompt() tea.Cmd {
 	p := m.prompt
 	m.prompt = nil
-	if p.tab {
-		return m.launchKindTab(p.session, p.dir, promptOptions[p.cursor].kind)
-	}
 	return m.launchKind(p.session, p.dir, promptOptions[p.cursor].kind)
 }
 
@@ -657,11 +592,8 @@ func (m *model) confirmPrompt() tea.Cmd {
 // attaches one. session is the base name for agent.SessionForKind.
 func (m *model) launchKind(session, dir, kind string) tea.Cmd {
 	name := agent.SessionForKind(session, kind)
-	// Opening a session clears any detached flag so reconcile keeps its pane;
-	// persist the change when there was one.
-	save := m.clearDetached(name)
-	if id, ok := m.mgr.WindowID(name); ok {
-		return tea.Batch(focusCmd(id), save)
+	if m.hasSession(name) {
+		return m.focusOrReattach(name)
 	}
 	return openSessionCmd(m.mgr, name, dir, agent.AgentCommand(kind, dir))
 }

@@ -8,24 +8,30 @@ import (
 	"strings"
 
 	"github.com/olli-io/kmux/internal/config"
+	"github.com/olli-io/kmux/internal/grid"
 	"github.com/olli-io/kmux/internal/project"
 	"github.com/olli-io/kmux/internal/tmux"
 )
 
 // ParsedArgs is the routed kmux command line: Agent is "" for the dashboard mode,
-// the Print* flags print a value instead of launching, and Splash renders the
-// launch-overlay animation.
+// and the Print* flags print a value instead of launching.
 type ParsedArgs struct {
 	Path         string
 	Agent        string
 	PrintSession bool
 	PrintProject bool
-	Splash       bool
-	Help         bool
+	// PrintPane prints the tmux pane id of the running agent, for tools that send
+	// text to the agent. The agent can be in the grid or in its own session.
+	PrintPane bool
+	Help      bool
 	// Config launches a config session: the agent (claude by default) in the user
 	// config dir (~/.config), sandboxed with the config settings that let it write
 	// there.
 	Config bool
+	// PrintProjects prints the directories in which an agent can start, one on
+	// each line. Launch starts the agent without a client, for the launcher.
+	PrintProjects bool
+	Launch        bool
 }
 
 // ParseArgs routes the kmux command line. Flags accept either `--flag claude` or
@@ -56,8 +62,24 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 			pa.Agent, pa.PrintSession = strings.TrimPrefix(a, "--session="), true
 		case a == "--project", a == "-project":
 			pa.PrintProject = true
-		case a == "--splash", a == "-splash":
-			pa.Splash = true
+		case a == "--pane", a == "-pane":
+			if i+1 >= len(args) {
+				return pa, fmt.Errorf("--pane requires a value (%s)", KindList())
+			}
+			i++
+			pa.Agent, pa.PrintPane = args[i], true
+		case strings.HasPrefix(a, "--pane="):
+			pa.Agent, pa.PrintPane = strings.TrimPrefix(a, "--pane="), true
+		case a == "--projects", a == "-projects":
+			pa.PrintProjects = true
+		case a == "--launch", a == "-launch":
+			if i+1 >= len(args) {
+				return pa, fmt.Errorf("--launch requires a value (%s)", KindList())
+			}
+			i++
+			pa.Agent, pa.Launch = args[i], true
+		case strings.HasPrefix(a, "--launch="):
+			pa.Agent, pa.Launch = strings.TrimPrefix(a, "--launch="), true
 		case a == "--config", a == "-config":
 			pa.Config = true
 		case strings.HasPrefix(a, "-"):
@@ -76,7 +98,7 @@ func ParseArgs(args []string) (ParsedArgs, error) {
 		if pa.Path != "" {
 			return pa, fmt.Errorf("--config takes no path: it always opens %s", "~/.config")
 		}
-		if pa.PrintSession || pa.PrintProject {
+		if pa.PrintSession || pa.PrintProject || pa.PrintPane || pa.PrintProjects || pa.Launch {
 			return pa, fmt.Errorf("--config only combines with --agent")
 		}
 		base, err := config.UserConfigBase()
@@ -103,6 +125,54 @@ func RunAgent(path, kind string) error {
 		return err
 	}
 	return attachAgentSession(name, dir, AgentCommand(kind, dir))
+}
+
+// LaunchDirs returns the directories in which an agent can start: each project,
+// then its linked worktrees. A non-empty path gives only the project of path.
+func LaunchDirs(path string) ([]string, error) {
+	var projects []project.Project
+	if path != "" {
+		p, err := project.ScanProject(path)
+		if err != nil {
+			return nil, err
+		}
+		projects = []project.Project{*p}
+	} else {
+		var err error
+		if projects, err = project.ScanProjects(); err != nil {
+			return nil, err
+		}
+	}
+	var dirs []string
+	for _, p := range projects {
+		dirs = append(dirs, p.Path)
+		for _, w := range p.Worktrees {
+			dirs = append(dirs, w.Path)
+		}
+	}
+	return dirs, nil
+}
+
+// Launch starts the agent for path in a session of its own, with no client. A
+// dashboard moves the agent into its grid on its subsequent poll. An agent that
+// is in a grid already gets the focus.
+func Launch(path, kind string) error {
+	name, dir, err := sessionPlan(path, kind)
+	if err != nil {
+		return err
+	}
+	snap, err := tmux.Snapshot()
+	if err != nil {
+		return err
+	}
+	if p, ok := tmux.Agents(snap)[name]; ok {
+		if p.Grid == "" {
+			return fmt.Errorf("%s runs already, out of the grid", name)
+		}
+		return grid.Focus(p)
+	}
+	_, err = tmux.NewAgentSession(name, dir, AgentCommand(kind, dir))
+	return err
 }
 
 // SessionName returns the exact name RunAgent would create for path, so other
@@ -195,11 +265,72 @@ func gitToplevel(dir string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// attachAgentSession attaches to tmux session name, creating it (running agentCmd
-// in dir) if absent — `new-session -A` does both. stdio is inherited so the agent
-// runs in the foreground of the calling terminal.
+// PaneID returns the tmux pane id of the running agent for path.
+func PaneID(path, kind string) (string, error) {
+	name, _, err := sessionPlan(path, kind)
+	if err != nil {
+		return "", err
+	}
+	snap, err := tmux.Snapshot()
+	if err != nil {
+		return "", err
+	}
+	p, ok := tmux.Agents(snap)[name]
+	if !ok {
+		return "", fmt.Errorf("no running agent %s", name)
+	}
+	return p.ID, nil
+}
+
+// attachAgentSession shows only the agent name in the calling terminal, in a
+// tmux session of its own. It creates the agent (agentCmd in dir) if there is
+// none. An agent that is in a kmux grid moves out of the grid first. A dashboard
+// leaves an agent alone while a client shows its session, and takes it back into
+// the grid when that client detaches.
+//
+// The tmux client always runs in the calling terminal. If that terminal is a
+// tmux pane, the client is a nested one: the caller asked for the agent at this
+// terminal, so the outer client must not switch away.
 func attachAgentSession(name, dir, agentCmd string) error {
-	cmd := exec.Command("tmux", "new-session", "-A", "-s", name, "-c", dir, agentCmd)
+	snap, err := tmux.Snapshot()
+	if err != nil {
+		return err
+	}
+	// Each case is one tmux invocation that ends with the attach, so no dashboard
+	// poll can see the session without its client.
+	var cmds [][]string
+	p, ok := tmux.Agents(snap)[name]
+	switch {
+	case !ok:
+		cmds = [][]string{{"new-session", "-A", "-s", name, "-c", dir, agentCmd}}
+	case p.ID == os.Getenv("TMUX_PANE"):
+		return fmt.Errorf("this terminal is the pane of %s", name)
+	case p.Grid != "":
+		dummy, err := grid.NewDummy(p)
+		if err != nil {
+			return err
+		}
+		cmds = append(grid.ParkCommands(p, dummy), []string{"attach-session", "-t", p.ID})
+	default:
+		cmds = [][]string{{"attach-session", "-t", p.ID}}
+	}
+	var args []string
+	for i, c := range cmds {
+		if i > 0 {
+			args = append(args, ";")
+		}
+		args = append(args, c...)
+	}
+	cmd := exec.Command("tmux", args...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run()
+	// Without TMUX, tmux permits the nested client. The socket stays the default.
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "TMUX=") && !strings.HasPrefix(kv, "TMUX_PANE=") {
+			cmd.Env = append(cmd.Env, kv)
+		}
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("tmux: %w", err)
+	}
+	return nil
 }
