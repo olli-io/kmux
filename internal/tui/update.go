@@ -92,6 +92,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.lastErr = ""
 		m.sessions = m.scopedSessions(msg.names)
 		m.panes = tmux.Agents(msg.snap)
+		m.views = tmux.Views(msg.snap)
 		pruned := m.pruneDetached()
 		// Refresh attention off the freshest session list (drives the session glyphs).
 		cmd := tea.Batch(reconcileCmd(m.mgr, msg.snap, msg.seq, m.attachable()), attentionCmd(m.sessions, m.panes))
@@ -244,6 +245,13 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case config.ActionPrevPanel, config.ActionPrevPanelAlt:
 		m.focusPanel(rows, false)
 
+	case config.ActionAttachAgent:
+		// Attach a session leaf: move its pane into the grid. The focus stays on
+		// the dashboard.
+		if r := rowAt(rows, m.cursor); isSessionLeaf(r) && !m.attached(r.session) {
+			save := m.clearDetached(r.session)
+			return m, tea.Batch(reconcileCmd(m.mgr, nil, 0, m.attachable()), save)
+		}
 	case config.ActionDetachAgent:
 		// Detach a session leaf: move its pane out of the grid into a session of its
 		// own. The agent continues to run. Marking it detached keeps reconcile from
@@ -465,7 +473,7 @@ func (m *model) sessionAttnCmds(states map[string]status.AttentionState) []tea.C
 		} else {
 			delete(m.sessAttn, s)
 		}
-		cmds = append(cmds, setSessionAttnCmd(m.panes[s], s, want))
+		cmds = append(cmds, setSessionAttnCmd(m.panes[s], m.views[s].ID, s, want))
 	}
 	// Drop tracking for sessions that vanished from the poll so the map can't grow
 	// unbounded; they're gone, so no rename is needed.
@@ -502,8 +510,8 @@ func (m *model) openOrFocusSession(r *row) tea.Cmd {
 // the grid, persisting the change.
 func (m *model) focusOrReattach(name string) tea.Cmd {
 	save := m.clearDetached(name)
-	if m.attached(name) {
-		return tea.Batch(focusCmd(m.panes[name]), save)
+	if p, ok := m.gridPane(name); ok {
+		return tea.Batch(focusCmd(p), save)
 	}
 	return tea.Batch(reconcileCmd(m.mgr, nil, 0, m.attachable()), save)
 }
@@ -511,8 +519,8 @@ func (m *model) focusOrReattach(name string) tea.Cmd {
 // zoomOrReattach shows a session's pane at full window size. A pane that is not
 // in the grid goes into the grid first; a second press then zooms it.
 func (m *model) zoomOrReattach(name string) tea.Cmd {
-	if m.attached(name) {
-		return zoomCmd(m.panes[name])
+	if p, ok := m.gridPane(name); ok {
+		return zoomCmd(p)
 	}
 	return m.focusOrReattach(name)
 }

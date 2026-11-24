@@ -16,7 +16,7 @@ USAGE
   kmux --session <kind> [path]    Print the agent's tmux session name and exit.
   kmux --pane <kind> [path]       Print the tmux pane id of the running agent.
   kmux --project                  Print the project dir of the current agent session.
-  kmux --projects [path]          Print the dirs in which an agent can start.
+  kmux --projects [path]          Print the dirs in which an agent can start (no path: ~/git/*).
   kmux --launch <kind> [path]     Start one agent with no client; a dashboard takes it.
   kmux --help                     Show this help.
 
@@ -35,8 +35,8 @@ MODES
 
   Launch an agent directly (--agent)
     Skip the dashboard and create (or attach to) the tmux session for one agent,
-    attached to the current terminal. The terminal shows only that agent. An
-    agent in a kmux grid moves out of it, and goes back in when you detach.
+    attached to the current terminal. The terminal shows only that agent. A
+    dashboard shows the agent in its grid at the same time.
 
       kmux ~/git/myproject --agent claude
       kmux --agent opencode ~/git/myproject

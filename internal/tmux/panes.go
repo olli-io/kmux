@@ -17,6 +17,7 @@ const (
 	OptCol  = "@kmux_col"  // pane: grid column, 1-based
 	OptGrid = "@kmux_grid" // window: set on a grid window
 	OptDash = "@kmux_dash" // pane: the dashboard's session name, set by its dashboard
+	OptView = "@kmux_view" // pane: agent name that this view pane shows
 
 	RoleDash   = "dash"
 	RoleFiller = "filler"
@@ -57,6 +58,15 @@ type Pane struct {
 	// Clients is the number of tmux clients attached to the session.
 	Clients int
 	Dash    string // OptDash
+	// View is OptView. A view pane runs a nested tmux client on the session of
+	// the agent, so that the grid and a terminal can show the agent together.
+	View string
+	TTY  string // pane_tty
+	// SessionID is the tmux id of the session ("$3").
+	SessionID string
+	// Ext is the number of clients on the session that are not view panes: the
+	// terminals that show the session.
+	Ext int
 }
 
 // snapshotFields is the list-panes format. The fields are tab-separated.
@@ -66,20 +76,49 @@ var snapshotFields = []string{
 	"#{session_name}", "#{session_path}", "#{window_id}", "#{" + OptGrid + "}",
 	"#{window_width}", "#{window_height}", "#{window_zoomed_flag}", "#{window_panes}",
 	"#{pane_left}", "#{pane_top}", "#{pane_width}", "#{pane_height}",
-	"#{session_attached}", "#{" + OptDash + "}",
+	"#{session_attached}", "#{" + OptDash + "}", "#{" + OptView + "}",
+	"#{pane_tty}", "#{session_id}",
 }
+
+// clientMark starts each line of the client list in the snapshot output.
+const clientMark = "kmux-client"
 
 // Snapshot returns all panes on the server in one tmux call. No server gives an
 // empty result, not an error.
 func Snapshot() ([]Pane, error) {
-	out, err := run("list-panes", "-a", "-F", strings.Join(snapshotFields, "\t"))
+	out, err := run("list-panes", "-a", "-F", strings.Join(snapshotFields, "\t"),
+		";", "list-clients", "-F", clientMark+"\t#{client_tty}\t#{session_id}")
 	if err != nil {
 		if strings.Contains(err.Error(), "no server running") || strings.Contains(err.Error(), "error connecting") {
 			return nil, nil
 		}
 		return nil, err
 	}
-	return adopt(parseSnapshot(out)), nil
+	return adopt(countExt(parseSnapshot(out), out)), nil
+}
+
+// countExt sets Pane.Ext from the client lines of the snapshot output. The
+// client of a view pane has the tty of that pane, so it is not counted. The
+// count does not use the number of view panes: a new view pane needs some time
+// to attach its client.
+func countExt(panes []Pane, out string) []Pane {
+	viewTTY := map[string]bool{}
+	for _, p := range panes {
+		if p.View != "" && p.TTY != "" {
+			viewTTY[p.TTY] = true
+		}
+	}
+	ext := map[string]int{}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Split(line, "\t")
+		if len(f) == 3 && f[0] == clientMark && !viewTTY[f[1]] {
+			ext[f[2]]++
+		}
+	}
+	for i := range panes {
+		panes[i].Ext = ext[panes[i].SessionID]
+	}
+	return panes
 }
 
 func parseSnapshot(out string) []Pane {
@@ -96,7 +135,8 @@ func parseSnapshot(out string) []Pane {
 			Session: f[8], SessDir: f[9], Window: f[10], Grid: f[11],
 			WinW: atoi(f[12]), WinH: atoi(f[13]), Zoomed: f[14] == "1", Panes: atoi(f[15]),
 			X: atoi(f[16]), Y: atoi(f[17]), W: atoi(f[18]), H: atoi(f[19]),
-			Clients: atoi(f[20]), Dash: f[21],
+			Clients: atoi(f[20]), Dash: f[21], View: f[22],
+			TTY: f[23], SessionID: f[24],
 		})
 	}
 	return panes
@@ -108,7 +148,7 @@ func parseSnapshot(out string) []Pane {
 func adopt(panes []Pane) []Pane {
 	for i := range panes {
 		p := &panes[i]
-		if p.Name != "" || p.Role != "" || p.Panes != 1 || !IsAgentSession(p.Session) {
+		if p.Name != "" || p.Role != "" || p.View != "" || p.Panes != 1 || !IsAgentSession(p.Session) {
 			continue
 		}
 		p.Name, p.Dir = stripAttnMark(p.Session), p.SessDir
@@ -217,6 +257,20 @@ func KillPane(id string) error {
 // Display returns a format string expanded for the target (pane, window or session).
 func Display(target, format string) (string, error) {
 	return run("display-message", "-p", "-t", target, format)
+}
+
+// Views returns the live view panes that are in a grid window, by agent name.
+func Views(snap []Pane) map[string]Pane {
+	m := make(map[string]Pane)
+	for _, p := range snap {
+		if p.View == "" || p.Dead || p.Grid == "" {
+			continue
+		}
+		if _, dup := m[p.View]; !dup {
+			m[p.View] = p
+		}
+	}
+	return m
 }
 
 // Agents returns the live agent panes of a snapshot by agent name. If two panes

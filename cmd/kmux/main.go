@@ -104,6 +104,10 @@ func runDashboard(pathArg string) {
 	if os.Getenv("TMUX") == "" || pane == "" {
 		fail(execInTmux(scopeDir))
 	}
+	// execInTmux made the session of this pane. The programs that the dashboard
+	// starts must not get the mark.
+	wrapped := os.Getenv(wrapperEnv) == "1"
+	_ = os.Unsetenv(wrapperEnv)
 	win, err := tmux.Display(pane, "#{window_id}")
 	if err != nil {
 		fail(err)
@@ -140,7 +144,17 @@ func runDashboard(pathArg string) {
 		_ = mgr.Close()
 		fail(err)
 	}
+	// The dashboard stopped and its agents are in sessions of their own. End the
+	// session that kmux made for the dashboard, with all its other windows.
+	if wrapped {
+		if err := mgr.KillSession(); err != nil {
+			fail(err)
+		}
+	}
 }
+
+// wrapperEnv marks a dashboard that runs in a session that kmux made for it.
+const wrapperEnv = "KMUX_WRAPPER"
 
 // execInTmux replaces this process with a tmux client on the dashboard session.
 // tmux makes the session, with kmux as its command, if it does not exist. It
@@ -154,8 +168,9 @@ func execInTmux(scopeDir string) error {
 	if err != nil {
 		return err
 	}
-	// tmux gives one command argument to a shell, thus the quotes.
-	line := shellQuote(exe)
+	// tmux gives one command argument to a shell, thus the quotes. env makes the
+	// line independent of the syntax of the user's shell.
+	line := "env " + wrapperEnv + "=1 " + shellQuote(exe)
 	if scopeDir != "" {
 		line += " " + shellQuote(scopeDir)
 	}

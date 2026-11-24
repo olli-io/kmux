@@ -53,8 +53,9 @@ func (m model) helpHints(focused section) []keyHint {
 		hints = []keyHint{
 			move,
 			switchPanel,
-			{kb(config.ActionCreateOrAttachAgent), "focus pane"},
+			{kb(config.ActionCreateOrAttachAgent), "focus or attach"},
 			{kb(config.ActionFullscreenAgent), "zoom agent"},
+			{kb(config.ActionAttachAgent), "attach"},
 			{kb(config.ActionDetachAgent), "detach"},
 			{kb(config.ActionKillAgent), "kill session"},
 		}

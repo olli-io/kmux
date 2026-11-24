@@ -27,7 +27,13 @@ const dummyCmd = "exec sleep 2147483647"
 
 // borderFormat is the pane title line of the grid window: the attention mark and
 // the agent name.
-const borderFormat = " #{?" + tmux.OptAttn + ",#[fg=red bold][!!]#[default] ,}#{?" + tmux.OptName + ",#{" + tmux.OptName + "},#{pane_title}} "
+const borderFormat = " #{?" + tmux.OptAttn + ",#[fg=red bold][!!]#[default] ,}#{?" + tmux.OptName + ",#{" + tmux.OptName + "},#{?" + tmux.OptView + ",#{" + tmux.OptView + "},#{pane_title}}} "
+
+// viewCmd is the command of a view pane: a tmux client on the session of the
+// agent pane. Without TMUX, tmux permits the nested client.
+func viewCmd(agentPane string) string {
+	return "exec env -u TMUX -u TMUX_PANE tmux attach-session -t '" + agentPane + "'"
+}
 
 // Manager applies the grid to one tmux window.
 type Manager struct {
@@ -124,6 +130,20 @@ func (m *Manager) reconcile(snap []tmux.Pane, seq int64, want []string, closing 
 		}
 		dummies[p.Name] = id
 	}
+	for _, p := range s.views {
+		id, err := newHidden("", p.Dir, viewCmd(p.ID))
+		if err == nil {
+			err = setOpts(id, tmux.OptView, p.Name)
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("view of %s: %w", p.Name, err))
+			if id != "" {
+				_ = chain([][]string{{"kill-pane", "-t", id}})
+			}
+			id = ""
+		}
+		s.setView(p.Name, id)
+	}
 	filler := ""
 	switch {
 	case !s.needFiller():
@@ -168,7 +188,7 @@ func (m *Manager) Close() error {
 	var cmds [][]string
 	if snap, serr := snapshot(); serr == nil {
 		for _, p := range snap {
-			if p.Window == m.win && p.Role == tmux.RoleFiller {
+			if p.Window == m.win && (p.Role == tmux.RoleFiller || p.View != "") {
 				cmds = append(cmds, []string{"kill-pane", "-t", p.ID})
 			}
 		}
@@ -179,6 +199,38 @@ func (m *Manager) Close() error {
 		[]string{"set-option", "-w", "-u", "-t", m.win, "pane-border-format"},
 		tmux.SetPaneOption(m.dash, tmux.OptRole, ""))
 	return errors.Join(err, chain(cmds))
+}
+
+// KillSession ends the tmux session of the dashboard, and the hidden filler and
+// dummy panes that a pass left. Call it after Close. It does nothing and returns
+// an error if an agent is still in the session, because the agent would stop.
+func (m *Manager) KillSession() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	snap, err := snapshot()
+	if err != nil {
+		return err
+	}
+	session := ""
+	for _, p := range snap {
+		if p.ID == m.dash {
+			session = p.Session
+		}
+	}
+	if session == "" {
+		return nil // the session is gone
+	}
+	var cmds [][]string
+	for _, p := range snap {
+		switch {
+		case p.Session == session && p.Name != "" && !p.Dead:
+			return fmt.Errorf("the agent %s is still in the dashboard session; the session stays", p.Name)
+		case p.Session != session && p.Grid == "" && (p.Role == tmux.RoleFiller || p.Role == RoleDummy || p.View != ""):
+			cmds = append(cmds, []string{"kill-pane", "-t", p.ID})
+		}
+	}
+	// "=" makes tmux use the exact session name.
+	return chain(append(cmds, []string{"kill-session", "-t", "=" + session}))
 }
 
 // Focus selects a pane. The pane can be in a different grid window.

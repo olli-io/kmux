@@ -29,6 +29,34 @@ type state struct {
 	unzoom bool // end a zoom to apply the plan (used when the dashboard stops)
 	// launcher is true when the filler runs an interactive program.
 	launcher bool
+	// views holds the parked agents that need a new view pane. s.cols has the
+	// placeholder viewKey(name) for each one until the Manager makes the pane.
+	views []tmux.Pane
+}
+
+// viewKey is the placeholder in s.cols for the view pane of an agent.
+func viewKey(name string) string { return "view:" + name }
+
+// setView puts the pane id of a new view pane in the place of its placeholder.
+// An empty id removes the placeholder.
+func (s *state) setView(name, id string) {
+	key := viewKey(name)
+	var cols [][]string
+	for _, col := range s.cols {
+		var out []string
+		for _, v := range col {
+			switch {
+			case v != key:
+				out = append(out, v)
+			case id != "":
+				out = append(out, id)
+			}
+		}
+		if len(out) > 0 {
+			cols = append(cols, out)
+		}
+	}
+	s.cols = cols
 }
 
 func (s *state) needFiller() bool { return len(s.cols) < maxColumns }
@@ -41,6 +69,23 @@ func analyse(snap []tmux.Pane, win string, want []string) *state {
 	for _, n := range want {
 		wanted[n] = true
 	}
+
+	// An agent whose own session has a client in a terminal stays in that session,
+	// and the grid shows it in a view pane.
+	parkedReal := map[string]tmux.Pane{}
+	for _, p := range snap {
+		if !p.Dead && p.View == "" && p.Name != "" && p.Grid == "" {
+			if _, dup := parkedReal[p.Name]; !dup {
+				parkedReal[p.Name] = p
+			}
+		}
+	}
+	mirrored := func(name string) bool {
+		p, ok := parkedReal[name]
+		return ok && p.Ext > 0
+	}
+	// slot keeps the column of a view pane for the agent pane that replaces it.
+	slot := map[string]int{}
 
 	var inGrid, outside []tmux.Pane
 	for _, p := range snap {
@@ -63,6 +108,22 @@ func analyse(snap []tmux.Pane, win string, want []string) *state {
 			s.dash, s.zoomed = &inGrid[i], p.Zoomed
 		case p.Role == tmux.RoleFiller && s.filler == nil && !p.Dead:
 			s.filler = &inGrid[i]
+		case p.View != "":
+			if p.Dead || !wanted[p.View] || !mirrored(p.View) || present[p.View] {
+				// The agent pane comes into the grid again when no terminal shows it.
+				if !present[p.View] {
+					slot[p.View] = p.Col
+				}
+				s.kills = append(s.kills, p.ID)
+				continue
+			}
+			present[p.View] = true
+			if p.Col >= 1 && p.Col <= maxColumns {
+				columns[p.Col-1] = append(columns[p.Col-1], p.ID)
+				s.col[p.ID] = p.Col
+			} else {
+				pending = append(pending, p.ID)
+			}
 		case p.Role != "" || (p.Dead && p.Name != ""):
 			s.kills = append(s.kills, p.ID)
 			continue
@@ -79,7 +140,8 @@ func analyse(snap []tmux.Pane, win string, want []string) *state {
 		s.order = append(s.order, p.ID)
 	}
 
-	// Parked agents that must come into the grid, in name order.
+	// Parked agents that must come into the grid, in name order. An agent whose
+	// own session has a client gets a view pane in the grid.
 	sort.Slice(outside, func(i, j int) bool { return outside[i].Name < outside[j].Name })
 	var hiddenFiller *tmux.Pane
 	for i := range outside {
@@ -93,12 +155,23 @@ func analyse(snap []tmux.Pane, win string, want []string) *state {
 			}
 		case p.Role == tmux.RoleFiller && p.Grid == "" && hiddenFiller == nil:
 			hiddenFiller = &outside[i]
-		case p.Name != "" && p.Clients > 0:
-			// A client shows this agent's own session (`kmux --agent` or a manual
-			// attach). The agent comes into the grid when that client detaches.
+		case p.View != "":
+			// Left from a pass that failed. A new pass makes its own view panes.
+			if p.Grid == "" {
+				s.kills = append(s.kills, p.ID)
+			}
 		case p.Name != "" && p.Grid == "" && wanted[p.Name] && !present[p.Name]:
-			pending = append(pending, p.ID)
 			present[p.Name] = true
+			id := p.ID
+			if mirrored(p.Name) {
+				id = viewKey(p.Name)
+				s.views = append(s.views, p)
+			}
+			if c := slot[p.Name]; c >= 1 && c <= maxColumns {
+				columns[c-1] = append(columns[c-1], id)
+			} else {
+				pending = append(pending, id)
+			}
 		}
 	}
 

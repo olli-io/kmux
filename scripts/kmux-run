@@ -8,10 +8,13 @@
 # sandbox can read.
 #
 # Usage: kmux-run <id> <command...>
+#        kmux-run -C <dir> [--] <command...>
 #   <id>  tmux pane of the agent: 7, %7 or any tmux target.
 #         The agent reads its pane id from $TMUX_PANE.
+#         The command runs in the agent pane's current directory.
+#   -C <dir>  run the command in <dir> and paste into the pane of the kmux
+#         agent of that project directory.
 #   one <command> argument runs as a shell line; several run as an argv
-#   The command runs in the agent pane's current directory.
 #   KMUX_LINES sets how many output lines to paste (default 60).
 #
 # Ctrl-C stops the command but still pastes the result.
@@ -21,12 +24,27 @@ set -u
 die() { echo "kmux-run: $*" >&2; exit 2; }
 
 [ "${1:-}" = -h ] && { sed -n '2,/^$/s/^# \{0,1\}//p' "$0"; exit 0; }
-[ $# -ge 2 ] || die "usage: kmux-run <id> <command...>"
-target=$1; shift
-[[ $target =~ ^[0-9]+$ ]] && target="%$target"
+usage="usage: kmux-run <id> <command...> | kmux-run -C <dir> [--] <command...>"
+[ $# -ge 2 ] || die "$usage"
 lines=${KMUX_LINES:-60}
-dir=$(tmux display-message -p -t "$target" '#{pane_current_path}' 2>/dev/null) || die "no tmux target '$target'"
-cd "$dir" || die "cannot cd to $dir"
+if [ "$1" = -C ]; then
+  dir=${2/#\~/$HOME}; shift 2
+  [ "${1:-}" = -- ] && shift
+  [ $# -ge 1 ] || die "$usage"
+  cd "$dir" || die "cannot cd to $dir"
+  dir=$PWD
+  # The agent pane has the project directory in the @kmux_dir option.
+  target=$(tmux list-panes -a -F '#{pane_id} #{@kmux_dir}' 2>/dev/null |
+    while read -r id d; do
+      if [ "$d" = "$dir" ] || [ "$d" = "$(pwd -P)" ]; then echo "$id"; break; fi
+    done)
+  [ -n "$target" ] || die "no kmux agent pane for $dir"
+else
+  target=$1; shift
+  [[ $target =~ ^[0-9]+$ ]] && target="%$target"
+  dir=$(tmux display-message -p -t "$target" '#{pane_current_path}' 2>/dev/null) || die "no tmux target '$target'"
+  cd "$dir" || die "cannot cd to $dir"
+fi
 
 # One argument is a shell line; several are an argv, run as-is.
 if [ $# -eq 1 ]; then

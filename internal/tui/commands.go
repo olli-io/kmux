@@ -260,7 +260,7 @@ func setWindowNameCmd(win, scopeDir string, needsAttention bool) tea.Cmd {
 // goroutine: the pane option that the grid's pane title line shows, and, for a
 // parked agent, the "[!!]" prefix of its own tmux session name. Best-effort and
 // message-less. The attentionMsg handler calls it only when the state flips.
-func setSessionAttnCmd(p tmux.Pane, session string, needsAttention bool) tea.Cmd {
+func setSessionAttnCmd(p tmux.Pane, view, session string, needsAttention bool) tea.Cmd {
 	return func() tea.Msg {
 		mark := ""
 		if needsAttention {
@@ -270,6 +270,9 @@ func setSessionAttnCmd(p tmux.Pane, session string, needsAttention bool) tea.Cmd
 			return nil // the agent is gone; an empty target is the dashboard itself
 		}
 		_ = tmux.SetPaneOptions(p.ID, tmux.OptAttn, mark)
+		if view != "" { // the grid shows the agent in a view pane
+			_ = tmux.SetPaneOptions(view, tmux.OptAttn, mark)
+		}
 		// A parked agent has its own session. p can be out of date: a grid pass can
 		// move the pane into the dashboard's session after the snapshot. Thus the
 		// target is the exact name of the agent's session, not the pane. If the

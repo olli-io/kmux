@@ -68,7 +68,11 @@ kmux ~/git/myproject   # or: cd into the repo and run `kmux .`
 - Each pane has a title line with the agent name. A `[!!]` mark shows that the
   agent waits for an answer. The window name gets the same mark.
 - `d` moves an agent out of the grid into a session of its own; the agent
-  continues to run. `enter` moves it back in or selects its pane.
+  continues to run. `a` moves it back in. `enter` moves it back in or selects
+  its pane. `x` stops the agent.
+- `q` stops the dashboard. Each agent goes into a session of its own and
+  continues to run. The launcher pane and the tmux session that kmux made for
+  the dashboard end, with all other windows of that session.
 - `f` shows the agent at full window size (tmux zoom). While a pane has the
   zoom, kmux does not change the grid.
 - A pane that you split in the grid window yourself gets a cell in the grid.
@@ -81,9 +85,10 @@ kmux ~/git/myproject   # or: cd into the repo and run `kmux .`
 
 With `--agent`, kmux skips the dashboard and creates (or attaches to) the tmux
 session for one agent in the project containing the given path, attaching it to
-the current terminal. The terminal shows only that agent. If the agent is in a
-kmux grid, it moves out of the grid; when you detach, the dashboard takes it
-back into the grid:
+the current terminal. The terminal shows only that agent. A dashboard shows
+the agent in its grid at the same time, in a view pane (a tmux client on the
+session of the agent). When you detach the terminal, the agent pane itself goes
+into the grid:
 
 ```sh
 kmux ~/git/myproject --agent claude     # path then flag
@@ -128,6 +133,7 @@ pane as a prompt message. The full log stays in `/tmp/kmux-run/`.
 ```sh
 kmux-run 7 'docker ps'                    # run in the agent pane's dir, paste into tmux pane %7
 KMUX_LINES=100 kmux-run 7 './build.sh'    # paste 100 lines (default 60)
+kmux-run -C ~/git/myproject -- git push   # run in the directory, paste into the pane of its agent
 ```
 
 Ctrl-C stops the command and still pastes the result. `kmux-run -h` shows the usage.
@@ -158,7 +164,7 @@ customCommands:
 
 # Navigation keybindings — remap any action's key (defaults live in the binary).
 # keybindings:
-#   killAgent: x
+#   killAgent: D
 ```
 
 See **[docs/configuration.md](docs/configuration.md)** for the full reference:

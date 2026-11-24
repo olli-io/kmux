@@ -26,6 +26,9 @@ type model struct {
 	noClient int
 	// panes maps each agent name to its tmux pane, from the last poll.
 	panes map[string]tmux.Pane
+	// views holds the view pane of each agent that a grid shows while a terminal
+	// has the agent's own session.
+	views map[string]tmux.Pane
 	// lastIdle is the idle-clock snapshot of the last state save, so the state
 	// file is written only when the clocks change.
 	lastIdle      map[string]status.IdleRecord
@@ -294,10 +297,20 @@ func (m model) scopedSessions(names []string) []string {
 	return out
 }
 
-// attached reports whether the agent's pane is in a grid window.
+// attached reports whether a grid window shows the agent.
 func (m model) attached(name string) bool {
-	p, ok := m.panes[name]
-	return ok && p.Grid != ""
+	_, ok := m.gridPane(name)
+	return ok
+}
+
+// gridPane returns the pane that shows the agent in a grid window: the agent
+// pane, or the view pane when the agent is in a session of its own.
+func (m model) gridPane(name string) (tmux.Pane, bool) {
+	if p, ok := m.panes[name]; ok && p.Grid != "" {
+		return p, true
+	}
+	v, ok := m.views[name]
+	return v, ok
 }
 
 func (m model) isDetached(name string) bool {

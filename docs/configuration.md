@@ -23,7 +23,7 @@ customCommands:
     cmd: lazygit
 
 keybindings:
-  killAgent: x         # remap an action's key (defaults live in the binary)
+  killAgent: D         # remap an action's key (defaults live in the binary)
 
 # Run every agent inside srt (anthropic-ai/sandbox-runtime). Off by default.
 sandbox:
@@ -111,8 +111,9 @@ keybindings:
   prevPanelAlt:           left    # cycle panel focus (alias)
   nextPanelAlt:           right   # cycle panel focus (alias)
   createOrAttachAgent:    enter   # open/attach selection; toggle a folder header
+  attachAgent:            a       # move the agent's pane into the grid
   detachAgent:            d       # detach the agent's pane (tmux keeps running)
-  killAgent:              D       # kill the agent's tmux session
+  killAgent:              x       # kill the agent's tmux session
   fullscreenAgent:        f       # zoom the agent to full window size
   createOrFocusClaude:    c       # launch/focus Claude for the project
   createOrFocusOpencode:  o       # launch/focus OpenCode for the project

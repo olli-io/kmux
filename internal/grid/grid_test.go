@@ -210,11 +210,90 @@ func TestLeftoverDummyIsKilled(t *testing.T) {
 	}
 }
 
-func TestAgentWithClientStaysOut(t *testing.T) {
+func TestAgentWithClientGetsView(t *testing.T) {
 	p := parked("%2", "A")
-	p.Clients = 1
+	p.Clients, p.Ext = 1, 1
 	s := analyse([]tmux.Pane{dash(), p}, win, []string{"A"})
-	if len(s.cols) != 0 {
-		t.Errorf("cols = %v, want none: a client shows the agent's own session", s.cols)
+	if len(s.views) != 1 || len(s.cols) != 1 || s.cols[0][0] != viewKey("A") {
+		t.Fatalf("views = %v, cols = %v; want one view placeholder", s.views, s.cols)
+	}
+	s.setView("A", "%9")
+	got := strings.Join(flat(s.commands(nil, "").Cmds), "\n")
+	if !strings.Contains(got, "join-pane -d -h -s %9 -t %1") || strings.Contains(got, "%2") {
+		t.Errorf("the view pane must come in and the agent pane must stay:\n%s", got)
+	}
+
+	// A view pane that the Manager could not make leaves no column.
+	s = analyse([]tmux.Pane{dash(), p}, win, []string{"A"})
+	if s.setView("A", ""); len(s.cols) != 0 {
+		t.Errorf("cols = %v, want none", s.cols)
+	}
+}
+
+func view(id, name string, idx, col int) tmux.Pane {
+	return tmux.Pane{ID: id, View: name, Window: win, Grid: "1", Index: idx, Col: col}
+}
+
+func TestViewStaysWhileTerminalShowsAgent(t *testing.T) {
+	p := parked("%2", "A")
+	p.Clients, p.Ext = 2, 1 // the terminal and the view pane
+	s := analyse([]tmux.Pane{dash(), view("%9", "A", 1, 2), p}, win, []string{"A"})
+	if len(s.kills) != 0 || len(s.views) != 0 || len(s.cols) != 1 || s.cols[0][0] != "%9" {
+		t.Errorf("kills = %v, views = %v, cols = %v; want the view pane only", s.kills, s.views, s.cols)
+	}
+}
+
+func TestAgentReplacesViewWhenTerminalDetaches(t *testing.T) {
+	p := parked("%2", "A")
+	p.Clients, p.Ext = 1, 0 // the view pane only
+	b := agent("%3", "B", 1, 1)
+	s := analyse([]tmux.Pane{dash(), b, view("%9", "A", 2, 2), p}, win, []string{"A", "B"})
+	want := [][]string{{"%3"}, {"%2"}}
+	if len(s.kills) != 1 || s.kills[0] != "%9" || !reflect.DeepEqual(s.cols, want) {
+		t.Errorf("kills = %v, cols = %v; want kill %%9 and cols %v", s.kills, s.cols, want)
+	}
+}
+
+func TestViewGoesWithItsAgent(t *testing.T) {
+	// The agent stopped, or the dashboard does not want it.
+	s := analyse([]tmux.Pane{dash(), view("%9", "A", 1, 1)}, win, []string{"A"})
+	if len(s.kills) != 1 || len(s.cols) != 0 {
+		t.Errorf("kills = %v, cols = %v", s.kills, s.cols)
+	}
+	p := parked("%2", "A")
+	p.Clients, p.Ext = 2, 1
+	s = analyse([]tmux.Pane{dash(), view("%9", "A", 1, 1), p}, win, nil)
+	if len(s.kills) != 1 || len(s.cols) != 0 || len(s.parks) != 0 {
+		t.Errorf("kills = %v, cols = %v, parks = %v", s.kills, s.cols, s.parks)
+	}
+}
+
+func TestKillSession(t *testing.T) {
+	oldChain, oldSnap := chain, snapshot
+	defer func() { chain, snapshot = oldChain, oldSnap }()
+	var got []string
+	chain = func(cmds [][]string) error { got = flat(cmds); return nil }
+
+	d := dash()
+	d.Session = "[kmux][dash]~/git"
+	other := tmux.Pane{ID: "%7", Window: "@7", Session: d.Session} // a second window
+	hidden := tmux.Pane{ID: "%8", Role: tmux.RoleFiller, Window: "@8", Session: "5"}
+	snapshot = func() ([]tmux.Pane, error) { return []tmux.Pane{d, other, hidden, parked("%2", "A")}, nil }
+	m := &Manager{win: win, dash: d.ID}
+	if err := m.KillSession(); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"kill-pane -t %8", "kill-session -t =[kmux][dash]~/git"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	// An agent that is still in the session keeps the session.
+	got = nil
+	a := agent("%2", "A", 1, 1)
+	a.Session = d.Session
+	snapshot = func() ([]tmux.Pane, error) { return []tmux.Pane{d, a}, nil }
+	if err := m.KillSession(); err == nil || got != nil {
+		t.Errorf("err = %v, commands = %v; want an error and no command", err, got)
 	}
 }

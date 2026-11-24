@@ -127,28 +127,20 @@ func RunAgent(path, kind string) error {
 	return attachAgentSession(name, dir, AgentCommand(kind, dir))
 }
 
-// LaunchDirs returns the directories in which an agent can start: each project,
-// then its linked worktrees. A non-empty path gives only the project of path.
+// LaunchDirs returns the directories in which an agent can start. A non-empty
+// path gives the project of path and its linked worktrees. An empty path gives
+// the folders of project.RootDirs, with no git scan.
 func LaunchDirs(path string) ([]string, error) {
-	var projects []project.Project
-	if path != "" {
-		p, err := project.ScanProject(path)
-		if err != nil {
-			return nil, err
-		}
-		projects = []project.Project{*p}
-	} else {
-		var err error
-		if projects, err = project.ScanProjects(); err != nil {
-			return nil, err
-		}
+	if path == "" {
+		return project.RootDirs()
 	}
-	var dirs []string
-	for _, p := range projects {
-		dirs = append(dirs, p.Path)
-		for _, w := range p.Worktrees {
-			dirs = append(dirs, w.Path)
-		}
+	p, err := project.ScanProject(path)
+	if err != nil {
+		return nil, err
+	}
+	dirs := []string{p.Path}
+	for _, w := range p.Worktrees {
+		dirs = append(dirs, w.Path)
 	}
 	return dirs, nil
 }
@@ -166,6 +158,9 @@ func Launch(path, kind string) error {
 		return err
 	}
 	if p, ok := tmux.Agents(snap)[name]; ok {
+		if v, ok := tmux.Views(snap)[name]; ok && p.Grid == "" {
+			p = v // the grid shows the agent in a view pane
+		}
 		if p.Grid == "" {
 			return fmt.Errorf("%s runs already, out of the grid", name)
 		}
@@ -284,9 +279,12 @@ func PaneID(path, kind string) (string, error) {
 
 // attachAgentSession shows only the agent name in the calling terminal, in a
 // tmux session of its own. It creates the agent (agentCmd in dir) if there is
-// none. An agent that is in a kmux grid moves out of the grid first. A dashboard
-// leaves an agent alone while a client shows its session, and takes it back into
-// the grid when that client detaches.
+// none.
+//
+// An agent that is in a kmux grid moves out of the grid first. A dashboard then
+// shows the agent in a view pane, so the agent is in the grid and in the calling
+// terminal together. When this client detaches, the dashboard takes the agent
+// pane back into the grid.
 //
 // The tmux client always runs in the calling terminal. If that terminal is a
 // tmux pane, the client is a nested one: the caller asked for the agent at this

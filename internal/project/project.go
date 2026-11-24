@@ -63,6 +63,40 @@ func Root() string {
 	return filepath.Join(home, "git")
 }
 
+// RootDirs lists the folders directly under Root, then the project folders from
+// the config. It starts no git process, so it is fast. A folder can be a main
+// worktree, a linked worktree, or no git repository at all.
+func RootDirs() ([]string, error) {
+	var dirs []string
+	seen := map[string]bool{}
+	add := func(path string) {
+		if info, err := os.Stat(path); err != nil || !info.IsDir() || seen[path] {
+			return
+		}
+		seen[path] = true
+		dirs = append(dirs, path)
+	}
+	if root := Root(); root != "" {
+		entries, err := os.ReadDir(root)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		for _, e := range entries {
+			if !strings.HasPrefix(e.Name(), ".") {
+				add(filepath.Join(root, e.Name()))
+			}
+		}
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return nil, err
+	}
+	for _, dir := range cfg.Projects {
+		add(filepath.Clean(dir))
+	}
+	return dirs, nil
+}
+
 // ScanProjects lists every git repo directly under ~/git, sorted by name, with
 // its linked worktrees. A missing ~/git yields an empty slice, not an error.
 func ScanProjects() ([]Project, error) {

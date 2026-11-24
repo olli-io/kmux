@@ -133,6 +133,7 @@ const (
 	ActionPrevPanelAlt          = "prevPanelAlt"
 	ActionNextPanelAlt          = "nextPanelAlt"
 	ActionCreateOrAttachAgent   = "createOrAttachAgent"
+	ActionAttachAgent           = "attachAgent"
 	ActionDetachAgent           = "detachAgent"
 	ActionKillAgent             = "killAgent"
 	ActionFullscreenAgent       = "fullscreenAgent"
@@ -154,7 +155,7 @@ func KeyActions() []string {
 		ActionPrevPanel, ActionNextPanel,
 		ActionPrevPanelAlt, ActionNextPanelAlt,
 		ActionCreateOrAttachAgent,
-		ActionDetachAgent, ActionKillAgent, ActionFullscreenAgent,
+		ActionAttachAgent, ActionDetachAgent, ActionKillAgent, ActionFullscreenAgent,
 		ActionCreateOrFocusClaude, ActionCreateOrFocusOpencode, ActionCreateOrFocusPi,
 		ActionLaunchKmuxInProject,
 		ActionRefreshProjects,
@@ -175,8 +176,9 @@ func DefaultKeybindings() map[string]string {
 		ActionPrevPanelAlt:          "left",
 		ActionNextPanelAlt:          "right",
 		ActionCreateOrAttachAgent:   "enter",
+		ActionAttachAgent:           "a",
 		ActionDetachAgent:           "d",
-		ActionKillAgent:             "D",
+		ActionKillAgent:             "x",
 		ActionFullscreenAgent:       "f",
 		ActionCreateOrFocusClaude:   "c",
 		ActionCreateOrFocusOpencode: "o",

@@ -39,8 +39,9 @@ customCommands:
 #   prevPanelAlt:           left    # focus the other panel (alias)
 #   nextPanelAlt:           right   # focus the other panel (alias)
 #   createOrAttachAgent:    enter   # open/focus/launch the selection (or toggle a folder)
+#   attachAgent:            a       # move a session's pane into the grid
 #   detachAgent:            d       # detach a session's pane (tmux keeps running)
-#   killAgent:              D       # kill the agent's tmux session
+#   killAgent:              x       # kill the agent's tmux session
 #   fullscreenAgent:        f       # zoom the agent to full window size
 #   createOrFocusClaude:    c       # launch/focus Claude for the project
 #   createOrFocusOpencode:  o       # launch/focus OpenCode for the project

@@ -6,6 +6,8 @@
 # The launcher waits for Enter before it shows the list. While it waits, no
 # program reads the keys, so tmux pane navigation keys (for example the
 # vim-tmux-navigator Ctrl-h/j/k/l bindings, which send the keys to fzf) work.
+# The list uses fzf if available. In fzf, Ctrl-h and Ctrl-l go to the adjacent
+# pane and close the list.
 #
 # The dashboard sets the environment:
 #   KMUX        path of the kmux binary
@@ -17,18 +19,58 @@ trap : INT # Ctrl-C cancels a selection, not the launcher
 kmux="${KMUX:-kmux}"
 read -r -a kinds <<<"${KMUX_KINDS:-claude}"
 
-# pick <prompt> <item>... prints the selected item. It uses fzf if available.
-pick() {
-  local prompt="$1" item
+export KMUX="$kmux" KMUX_SCOPE="${KMUX_SCOPE:-}"
+# list_cmd prints the directories in which an agent can start, with "~" for the
+# home directory.
+list_cmd='"$KMUX" --projects ${KMUX_SCOPE:+"$KMUX_SCOPE"} | while IFS= read -r d; do case "$d" in "$HOME"/*) d="~/${d#"$HOME"/}" ;; esac; printf "%s\n" "$d"; done'
+
+have_fzf() { command -v fzf >/dev/null 2>&1; }
+
+# menu <prompt> shows the lines of stdin and prints the selected one.
+menu() {
+  local prompt="$1"
   shift
-  if command -v fzf >/dev/null 2>&1; then
-    # Ctrl-h and Ctrl-l go to the adjacent pane and close the list.
-    printf '%s\n' "$@" | fzf --prompt="$prompt> " --reverse --no-info \
-      --bind 'ctrl-h:execute-silent(tmux select-pane -L)+abort' \
-      --bind 'ctrl-l:execute-silent(tmux select-pane -R)+abort'
+  fzf --prompt="$prompt> " --reverse --no-info \
+    --bind 'ctrl-h:execute-silent(tmux select-pane -L)+abort' \
+    --bind 'ctrl-l:execute-silent(tmux select-pane -R)+abort' "$@"
+}
+
+# pick_dir prints the project directory that the user selects.
+# The caller captures stdout, so the text for the user goes to stderr.
+pick_dir() {
+  clear >&2
+  printf '\n  \033[2mfree column\033[0m\n\n  Press Enter to start an agent.\n' >&2
+  wait_enter || return 1
+  clear >&2
+  if have_fzf; then
+    bash -c "$list_cmd" | menu project
     return
   fi
-  local PS3="$prompt> "
+  local dirs=() d
+  while IFS= read -r d; do
+    dirs+=("$d")
+  done < <(bash -c "$list_cmd")
+  if [ "${#dirs[@]}" -eq 0 ]; then
+    printf '\n  no projects\n' >&2
+    sleep 5
+    return 1
+  fi
+  pick_list project "${dirs[@]}"
+}
+
+# pick_kind prints the agent kind that the user selects.
+pick_kind() {
+  if have_fzf; then
+    printf '%s\n' "${kinds[@]}" | menu agent
+    return
+  fi
+  pick_list agent "${kinds[@]}"
+}
+
+# pick_list <prompt> <item>... is the numbered list for a system with no fzf.
+pick_list() {
+  local PS3="$1> " item
+  shift
   select item in "$@"; do
     [ -n "$item" ] && { printf '%s\n' "$item"; return 0; }
   done
@@ -45,24 +87,11 @@ wait_enter() {
 }
 
 while :; do
-  clear
-  printf '\n  \033[2mfree column\033[0m\n\n  Press Enter to start an agent.\n'
-  wait_enter || { sleep 0.2; continue; }
-  clear
-  dirs=()
-  while IFS= read -r d; do
-    dirs+=("$d")
-  done < <("$kmux" --projects ${KMUX_SCOPE:+"$KMUX_SCOPE"})
-  if [ "${#dirs[@]}" -eq 0 ]; then
-    printf '\n  no projects\n'
-    sleep 5
-    continue
-  fi
-
-  dir="$(pick project "${dirs[@]}")" || { sleep 0.2; continue; }
+  dir="$(pick_dir)" && [ -n "$dir" ] || { sleep 0.2; continue; }
+  case "$dir" in "~/"*) dir="$HOME/${dir#"~/"}" ;; esac
   kind="${kinds[0]}"
   if [ "${#kinds[@]}" -gt 1 ]; then
-    kind="$(pick agent "${kinds[@]}")" || continue
+    kind="$(pick_kind)" && [ -n "$kind" ] || continue
   fi
   if ! "$kmux" --launch "$kind" "$dir"; then
     printf '\n  Press a key to continue.\n'

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -227,5 +228,27 @@ func runGit(t *testing.T, dir string, args ...string) {
 	full := append([]string{"-C", dir}, args...)
 	if out, err := exec.Command("git", full...).CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+}
+
+func TestRootDirs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	for _, d := range []string{"git/b", "git/a", "git/.hidden"} {
+		if err := os.MkdirAll(filepath.Join(home, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, "git/file"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := RootDirs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Join(home, "git/a"), filepath.Join(home, "git/b")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
 	}
 }
