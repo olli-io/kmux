@@ -133,7 +133,15 @@ pane as a prompt message. The full log stays in `/tmp/kmux-run/`.
 ```sh
 kmux-run 7 'docker ps'                    # run in the agent pane's dir, paste into tmux pane %7
 KMUX_LINES=100 kmux-run 7 './build.sh'    # paste 100 lines (default 60)
-kmux-run -C ~/git/myproject -- git push   # run in the directory, paste into the pane of its agent
+kmux-run -C ~/git/myproject -- git push   # paste into the pane of the agent of that project
+```
+
+`-C <dir>` is the project directory of the agent. It selects the pane that gets
+the result, and the command also starts there. For a command that operates on a
+different directory, keep `-C` and put the other directory in the command:
+
+```sh
+kmux-run -C ~/git/myproject -- git -C ~/git/other pull
 ```
 
 Ctrl-C stops the command and still pastes the result. `kmux-run -h` shows the usage.

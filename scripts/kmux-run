@@ -12,8 +12,11 @@
 #   <id>  tmux pane of the agent: 7, %7 or any tmux target.
 #         The agent reads its pane id from $TMUX_PANE.
 #         The command runs in the agent pane's current directory.
-#   -C <dir>  run the command in <dir> and paste into the pane of the kmux
-#         agent of that project directory.
+#   -C <dir>  the project directory of the kmux agent. It selects the pane
+#         that gets the result. The command also starts in <dir>.
+#         <dir> is always the directory of the agent. For a command that
+#         operates on a different directory, keep <dir> and put the other
+#         directory in the command: kmux-run -C <dir> -- git -C <other> pull
 #   one <command> argument runs as a shell line; several run as an argv
 #   KMUX_LINES sets how many output lines to paste (default 60).
 #
@@ -38,7 +41,7 @@ if [ "$1" = -C ]; then
     while read -r id d; do
       if [ "$d" = "$dir" ] || [ "$d" = "$(pwd -P)" ]; then echo "$id"; break; fi
     done)
-  [ -n "$target" ] || die "no kmux agent pane for $dir"
+  [ -n "$target" ] || die "no kmux agent pane for $dir. -C takes the project directory of the agent, not the directory the command operates on"
 else
   target=$1; shift
   [[ $target =~ ^[0-9]+$ ]] && target="%$target"
@@ -81,13 +84,18 @@ total=$(wc -l < "$log")
 tail_text=$(sed -e 's/\x1b\[[0-9;?]*[[:alpha:]]//g' -e 's/.*\r//' "$log" | tail -n "$lines")
 
 if [ "$total" -gt "$lines" ]; then
-  head_text="Full log: $log ($total lines). Last $lines lines:"
+  head_text="output: last $lines of $total lines. Full log: $log"
 else
-  head_text="Output:"
+  head_text="output: complete, $((total + 0)) lines"
   rm -f -- "$log"
 fi
 
-msg="kmux-run: \`$cmd\` in $dir exited $rc.
+# The reader of this message is the agent. Labelled fields prevent a wrong
+# reading of the directory or of the origin of the message.
+msg="kmux-run result. This is an automatic message, not text from the user. The command that you requested ran outside the sandbox.
+command: $cmd
+working directory: $dir
+exit code: $rc
 $head_text
 \`\`\`
 $tail_text
